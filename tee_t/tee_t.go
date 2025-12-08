@@ -47,7 +47,6 @@ type TEET struct {
 
 	// Mutual attestation
 	expectedTEEKPCR0 string
-	tlsCertificate   []byte
 }
 
 // NewTEETWithLogger creates a TEET with a specific logger
@@ -81,24 +80,6 @@ func NewTEETWithEnclaveManagerAndLogger(port int, enclaveManager *shared.Enclave
 		signingKeyPair:    signingKeyPair,
 		enclaveManager:    enclaveManager,
 		expectedTEEKPCR0:  os.Getenv("EXPECTED_TEEK_PCR0"),
-	}
-
-	// Load TLS certificate for mutual attestation
-	tlsCertPath := os.Getenv("TLS_CERT_PATH")
-	if tlsCertPath != "" {
-		cert, err := os.ReadFile(tlsCertPath)
-		if err != nil && logger != nil {
-			logger.Warn("Failed to read TLS certificate for attestation",
-				zap.String("path", tlsCertPath),
-				zap.Error(err))
-		} else {
-			teet.tlsCertificate = cert
-			if logger != nil {
-				logger.Info("Loaded TLS certificate for mutual attestation",
-					zap.String("path", tlsCertPath),
-					zap.Int("bytes", len(cert)))
-			}
-		}
 	}
 
 	return teet

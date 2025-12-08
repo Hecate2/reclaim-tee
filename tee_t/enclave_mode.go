@@ -63,15 +63,6 @@ func startEnclaveMode(config *TEETConfig, logger *shared.Logger) {
 	// Phase 2: Start production HTTPS server with WebSocket support
 	teet := NewTEETWithEnclaveManagerAndLogger(int(enclaveConfig.HTTPSPort), enclaveManager, logger)
 
-	// Load TLS certificate from enclave manager for mutual attestation
-	certRaw, err := enclaveManager.GetCertificateRaw()
-	if err != nil {
-		logger.Warn("Failed to get certificate from enclave manager", zap.Error(err))
-	} else {
-		teet.tlsCertificate = certRaw
-		logger.Info("Loaded TLS certificate from enclave manager for mutual attestation", zap.Int("bytes", len(certRaw)))
-	}
-
 	// Start background attestation refresh for performance optimization
 	go teet.startAttestationRefresh(ctx)
 

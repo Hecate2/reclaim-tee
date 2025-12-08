@@ -109,16 +109,22 @@ func (t *TEET) generateAttestationForTEEK() (*teeproto.AttestationReport, error)
 	}
 
 	// Enclave mode: generate attestation with cert hash in userData
-	if len(t.tlsCertificate) == 0 {
+	// Always fetch the current certificate from enclave manager to ensure it matches
+	// what's being served via TLS (handles certificate renewals correctly).
+	tlsCert, err := t.enclaveManager.GetCertificateRaw()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get current TLS certificate: %v", err)
+	}
+	if len(tlsCert) == 0 {
 		return nil, fmt.Errorf("TLS certificate not loaded")
 	}
 
-	certHash := sha256.Sum256(t.tlsCertificate)
+	certHash := sha256.Sum256(tlsCert)
 	userData := fmt.Sprintf("tee_t_cert_hash:%x", certHash[:])
 
 	t.logger.Info("Generating attestation for TEE_K",
 		zap.String("user_data", userData),
-		zap.Int("cert_bytes", len(t.tlsCertificate)))
+		zap.Int("cert_bytes", len(tlsCert)))
 
 	attestationDoc, err := t.enclaveManager.GenerateAttestation(context.Background(), []byte(userData))
 	if err != nil {
