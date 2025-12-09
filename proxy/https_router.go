@@ -232,6 +232,7 @@ func (r *HTTPSRouter) extractSNIWithTLS(replayConn *combinedConn) (string, error
 	}
 
 	// Attempt to start TLS handshake to trigger SNI parsing
+	// Note: We intentionally don't close tlsConn as that would close the underlying connection
 	tlsConn := tls.Server(replayConn, config)
 	_ = tlsConn.Handshake() // Ignore error - we expect this to fail during SNI extraction
 
@@ -268,6 +269,7 @@ func (r *HTTPSRouter) extractSNI(conn net.Conn) (string, error) {
 	}
 
 	// Attempt to start TLS handshake to trigger SNI parsing
+	// Note: We intentionally don't close tlsConn as that would close the underlying connection
 	tlsConn := tls.Server(combinedConn, config)
 	err = tlsConn.Handshake()
 

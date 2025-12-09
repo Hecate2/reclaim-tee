@@ -134,11 +134,11 @@ func (ac *AttestorClient) initializeConnection() error {
 		zap.Bool("has_init_response", responseMessage.GetInitResponse() != nil))
 
 	// Check for error in response
-	if responseMessage.GetRequestError() != nil {
+	if reqErr := responseMessage.GetRequestError(); reqErr != nil {
 		ac.logger.Error("Init request failed",
-			zap.Int32("error_code", int32(responseMessage.GetRequestError().Code)),
-			zap.String("error_message", responseMessage.GetRequestError().Message))
-		return fmt.Errorf("init request failed: %s", responseMessage.GetRequestError().Message)
+			zap.Int32("error_code", int32(reqErr.Code)),
+			zap.String("error_message", reqErr.Message))
+		return fmt.Errorf("init request failed: %s", reqErr.Message)
 	}
 
 	// Verify we got an init response
@@ -380,10 +380,10 @@ func (ac *AttestorClient) SubmitTeeBundle(verificationBundle *teeproto.Verificat
 	responseMessage := responseMessages.Messages[0]
 
 	// Check for error
-	if responseMessage.GetRequestError() != nil {
+	if reqErr := responseMessage.GetRequestError(); reqErr != nil {
 		return nil, fmt.Errorf("claim failed: %s (code: %d)",
-			responseMessage.GetRequestError().Message,
-			responseMessage.GetRequestError().Code)
+			reqErr.Message,
+			reqErr.Code)
 	}
 
 	// Extract claim from ClaimTeeBundleResponse
@@ -392,10 +392,10 @@ func (ac *AttestorClient) SubmitTeeBundle(verificationBundle *teeproto.Verificat
 		return nil, fmt.Errorf("expected ClaimTeeBundleResponse, got different message type")
 	}
 
-	if claimResponse.GetError() != nil {
+	if claimErr := claimResponse.GetError(); claimErr != nil {
 		return nil, fmt.Errorf("claim failed: %s (code: %d)",
-			claimResponse.GetError().Message,
-			claimResponse.GetError().Code)
+			claimErr.Message,
+			claimErr.Code)
 	}
 
 	claim := claimResponse.GetClaim()
@@ -461,10 +461,10 @@ func (ac *AttestorClient) SendOPRFRequest(data []byte, domainSeparator []byte, z
 	responseMessage := responseMessages.Messages[0]
 
 	// Check for error
-	if responseMessage.GetRequestError() != nil {
+	if reqErr := responseMessage.GetRequestError(); reqErr != nil {
 		return nil, nil, fmt.Errorf("TOPRF request failed: %s (code: %d)",
-			responseMessage.GetRequestError().Message,
-			responseMessage.GetRequestError().Code)
+			reqErr.Message,
+			reqErr.Code)
 	}
 
 	// Extract TOPRF response
@@ -554,10 +554,10 @@ func (ac *AttestorClient) sendRPCMessage(message teeproto.IsRPCMessage) (*teepro
 		return nil, fmt.Errorf("RPC ID mismatch: sent %d, received %d", rpcID, responseMessage.Id)
 	}
 
-	if responseMessage.GetRequestError() != nil {
+	if reqErr := responseMessage.GetRequestError(); reqErr != nil {
 		return nil, fmt.Errorf("RPC request failed: %s (code: %d)",
-			responseMessage.GetRequestError().Message,
-			responseMessage.GetRequestError().Code)
+			reqErr.Message,
+			reqErr.Code)
 	}
 
 	return &responseMessages, nil

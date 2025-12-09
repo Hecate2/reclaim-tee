@@ -108,6 +108,7 @@ func reclaim_execute_protocol(request_json *C.char, config_json *C.char, claim_j
 			zap.String("config_json", goConfigJSON))
 		return C.RECLAIM_ERROR_INVALID_ARGS
 	}
+	defer reclaimClient.Close()
 	defer func() {
 		if r := recover(); r != nil {
 			// Log panic but don't propagate - we're already cleaning up
