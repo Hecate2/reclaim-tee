@@ -100,8 +100,8 @@ func (c *FlutterCore) Write(entry zapcore.Entry, fields []zapcore.Field) error {
 	for _, field := range fields {
 		// Check for progress fields and extract them separately
 		if field.Key == "progress_percentage" {
-			if field.Type == zapcore.Int64Type || field.Type == zapcore.Int32Type || 
-			   field.Type == zapcore.Int16Type || field.Type == zapcore.Int8Type {
+			if field.Type == zapcore.Int64Type || field.Type == zapcore.Int32Type ||
+				field.Type == zapcore.Int16Type || field.Type == zapcore.Int8Type {
 				progressPercentage = int(field.Integer)
 				continue // Don't add to fieldsMap
 			}

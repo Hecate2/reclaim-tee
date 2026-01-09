@@ -15,15 +15,13 @@ func (c *Client) buildProtocolResult() (*ProtocolResult, error) {
 	validation, _ := c.buildValidationResults()
 	attestation, _ := c.buildAttestationResults()
 	response, _ := c.buildResponseResults()
-	success := transcripts.BothReceived && transcripts.BothSignaturesValid && validation.AllValidationsPassed && c.responseProcessingSuccessful
+	success := transcripts.BothReceived && validation.AttestationValidation.OverallValid && c.responseProcessingSuccessful
 	var errorMessage string
 	if !success {
 		if !transcripts.BothReceived {
 			errorMessage = "Not all transcripts received"
-		} else if !transcripts.BothSignaturesValid {
-			errorMessage = "Invalid transcript signatures"
-		} else if !validation.AllValidationsPassed {
-			errorMessage = "Validation failed"
+		} else if !validation.AttestationValidation.OverallValid {
+			errorMessage = "Attestation validation failed"
 		} else if !c.responseProcessingSuccessful {
 			errorMessage = "Response processing failed"
 		}

@@ -3,6 +3,7 @@ package client
 import (
 	"encoding/json"
 	"fmt"
+	"tee-mpc/minitls"
 	teeproto "tee-mpc/proto"
 
 	"github.com/consensys/gnark/logger"
@@ -66,6 +67,18 @@ func (c *Client) ProcessOPRFForHashedRanges(attestorClient *AttestorClient) erro
 	if responseResults.HTTPResponse == nil || len(responseResults.HTTPResponse.FullResponse) == 0 {
 		return fmt.Errorf("no HTTP response data available for OPRF processing")
 	}
+
+	// Pre-load ZK circuit BEFORE opening attestor connection
+	// Circuit loading can be slow, so we do it first to avoid WebSocket timeout
+	cipherName, err := c.getTOPRFCipherName()
+	if err != nil {
+		return fmt.Errorf("failed to determine cipher for ZK circuit: %v", err)
+	}
+	c.logger.Info("Pre-loading ZK circuit before attestor connection", zap.String("cipher", cipherName))
+	if err := EnsureAlgorithmInitialized(cipherName); err != nil {
+		return fmt.Errorf("failed to pre-load ZK circuit: %v", err)
+	}
+	c.logger.Info("ZK circuit loaded, proceeding with OPRF processing")
 
 	// Convert oprfRedactionRanges to OPRFRangeData
 	c.oprfRanges = make(map[int]*OPRFRangeData)
@@ -267,8 +280,6 @@ func (c *Client) prepareZKProofForRange(oprfData *OPRFRangeData) (*prover.InputP
 		return nil, fmt.Errorf("failed to unmarshal TEE_T payload: %v", err)
 	}
 
-	consolidatedCiphertext := tPayload.GetConsolidatedResponseCiphertext()
-
 	// Convert HTTP range to TLS ciphertext position
 	httpRangeStart := oprfData.Start
 	httpRangeEnd := oprfData.Start + oprfData.Length
@@ -283,7 +294,7 @@ func (c *Client) prepareZKProofForRange(oprfData *OPRFRangeData) (*prover.InputP
 		zap.String("data", string(oprfData.Data)))
 
 	// Get the ideal blocks for TOPRF using the existing function
-	inputParams, err := c.getIdealBlocksForTOPRF(tlsStart, tlsEnd, packetMetadata, cipherSuite, consolidatedCiphertext, serverKey)
+	inputParams, err := c.getIdealBlocksForTOPRF(tlsStart, tlsEnd, packetMetadata, cipherSuite, serverKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get TOPRF blocks: %v", err)
 	}
@@ -312,6 +323,11 @@ func (c *Client) prepareZKProofForRange(oprfData *OPRFRangeData) (*prover.InputP
 
 // generateZKProof generates the actual ZK proof
 func (c *Client) generateZKProof(inputParams *prover.InputParams) ([]byte, error) {
+	// Ensure algorithm is initialized (lazy loading via callback if needed)
+	if err := EnsureAlgorithmInitialized(inputParams.Cipher); err != nil {
+		return nil, fmt.Errorf("algorithm initialization failed: %v", err)
+	}
+
 	// Marshal the ZK parameters
 	zkJSON, err := json.Marshal(inputParams)
 	if err != nil {
@@ -336,4 +352,36 @@ func (c *Client) generateZKProof(inputParams *prover.InputParams) ([]byte, error
 // GetOPRFRanges returns the OPRF range data for external access
 func (c *Client) GetOPRFRanges() map[int]*OPRFRangeData {
 	return c.oprfRanges
+}
+
+// GetTOPRFCipherInfo returns the TOPRF cipher name and required blocks for a cipher suite
+func GetTOPRFCipherInfo(cipherSuite uint16) (cipherName string, requiredBlocks int, err error) {
+	cipherInfo := minitls.GetCipherSuiteInfo(cipherSuite)
+	if cipherInfo == nil {
+		return "", 0, fmt.Errorf("unknown cipher suite: %x", cipherSuite)
+	}
+
+	if minitls.IsChaCha20(cipherSuite) {
+		if cipherInfo.KeySize == 32 {
+			return "chacha20-toprf", 2, nil // 128 bytes for ChaCha20
+		}
+		return "", 0, fmt.Errorf("unsupported ChaCha20 variant")
+	} else if cipherInfo.KeySize == 16 {
+		return "aes-128-ctr-toprf", 5, nil // 80 bytes for AES-128
+	} else if cipherInfo.KeySize == 32 {
+		return "aes-256-ctr-toprf", 5, nil // 80 bytes for AES-256
+	}
+
+	return "", 0, fmt.Errorf("unsupported cipher configuration")
+}
+
+// getTOPRFCipherName returns the TOPRF cipher name based on the TLS cipher suite
+func (c *Client) getTOPRFCipherName() (string, error) {
+	if c.teekSignedMessage == nil {
+		return "", fmt.Errorf("no TEE_K signed message available")
+	}
+
+	cipherSuite := uint16(c.teekSignedMessage.GetCipherSuite())
+	cipherName, _, err := GetTOPRFCipherInfo(cipherSuite)
+	return cipherName, err
 }

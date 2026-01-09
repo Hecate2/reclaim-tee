@@ -50,6 +50,7 @@ static void store_log_callback(LogCallback callback) {
 
 #include <stddef.h>
 #include <stdlib.h>
+#include <stdbool.h>
 
 // Opaque handle for protocol session
 typedef struct reclaim_protocol* reclaim_protocol_t;
@@ -65,6 +66,29 @@ typedef enum {
     RECLAIM_ERROR_SESSION_NOT_FOUND = -6,
     RECLAIM_ERROR_ALREADY_COMPLETED = -7
 } reclaim_error_t;
+
+// Callback function type for lazy loading ZK circuits.
+// The callback receives the algorithm ID and should call InitAlgorithm
+// with the appropriate proving key and r1cs data.
+// Returns nothing - initialization happens asynchronously.
+// IMPORTANT: The callback MUST ensure that MarkZKInitComplete is called
+// with the result (true/false) when initialization is finished.
+typedef void (*zk_init_callback_t)(unsigned char algorithm_id);
+
+// Global callback pointer (set via SetZKInitCallback)
+static zk_init_callback_t g_zk_init_callback = NULL;
+
+// C wrapper to invoke the callback from Go
+static inline void invoke_zk_init_callback(unsigned char algorithm_id) {
+    if (g_zk_init_callback != NULL) {
+        g_zk_init_callback(algorithm_id);
+    }
+}
+
+// C function to set the callback (called from SetZKInitCallback export)
+static inline void set_zk_init_callback_internal(zk_init_callback_t cb) {
+    g_zk_init_callback = cb;
+}
 
 #line 1 "cgo-generated-wrapper"
 
@@ -135,6 +159,17 @@ extern void reclaim_free_string(char* str);
 extern char* reclaim_get_error_message(reclaim_error_t error);
 extern char* reclaim_get_version(void);
 extern GoUint8 InitAlgorithm(GoUint8 algorithmID, GoSlice provingKey, GoSlice r1cs);
+extern void MarkZKInitComplete(unsigned char algorithmID, _Bool success);
+extern void SetZKInitCallback(zk_init_callback_t callback);
+
+/* Return type for GetAlgorithmID */
+struct GetAlgorithmID_return {
+	unsigned char r0; /* algorithmID */
+	_Bool r1; /* found */
+};
+extern struct GetAlgorithmID_return GetAlgorithmID(char* cipher);
+extern char* GetCipherName(unsigned char algorithmID);
+extern _Bool IsAlgorithmInitialized(unsigned char algorithmID);
 extern void Free(void* pointer);
 
 /* Return type for Prove */

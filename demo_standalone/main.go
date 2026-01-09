@@ -15,13 +15,46 @@ import (
 	"go.uber.org/zap"
 )
 
-// initializeZKCircuits loads the proving keys and R1CS files for OPRF algorithms
-func initializeZKCircuits(logger *shared.Logger) error {
+// circuitConfig holds the configuration for a ZK circuit
+type circuitConfig struct {
+	algorithmID   uint8
+	pkFile        string
+	r1csFile      string
+	algorithmName string
+}
+
+// circuitsRegistry maps algorithm IDs to their circuit configurations
+var circuitsRegistry = map[uint8]circuitConfig{
+	impl.CHACHA20_OPRF: {
+		algorithmID:   impl.CHACHA20_OPRF,
+		pkFile:        "pk.chacha20_oprf",
+		r1csFile:      "r1cs.chacha20_oprf",
+		algorithmName: "CHACHA20_OPRF",
+	},
+	impl.AES_128_OPRF: {
+		algorithmID:   impl.AES_128_OPRF,
+		pkFile:        "pk.aes128_oprf",
+		r1csFile:      "r1cs.aes128_oprf",
+		algorithmName: "AES_128_OPRF",
+	},
+	impl.AES_256_OPRF: {
+		algorithmID:   impl.AES_256_OPRF,
+		pkFile:        "pk.aes256_oprf",
+		r1csFile:      "r1cs.aes256_oprf",
+		algorithmName: "AES_256_OPRF",
+	},
+}
+
+// circuitsDir holds the resolved circuits directory path
+var circuitsDir string
+
+// resolveCircuitsDir finds the circuits directory
+func resolveCircuitsDir() (string, error) {
 	// Define the circuits directory
-	circuitsDir := "circuits"
+	dir := "circuits"
 
 	// Check if circuits directory exists
-	if _, err := os.Stat(circuitsDir); os.IsNotExist(err) {
+	if _, err := os.Stat(dir); os.IsNotExist(err) {
 		// Try alternative paths
 		alternativePaths := []string{
 			"../circuits",
@@ -31,78 +64,105 @@ func initializeZKCircuits(logger *shared.Logger) error {
 		found := false
 		for _, path := range alternativePaths {
 			if _, err := os.Stat(path); err == nil {
-				circuitsDir = path
+				dir = path
 				found = true
 				break
 			}
 		}
 
 		if !found {
-			return fmt.Errorf("circuits directory not found in any expected location")
+			return "", fmt.Errorf("circuits directory not found in any expected location")
 		}
 	}
 
-	logger.Info("Initializing ZK circuits from directory", zap.String("path", circuitsDir))
+	return dir, nil
+}
 
-	// Define algorithm mappings
-	type circuitConfig struct {
-		algorithmID   uint8
-		pkFile        string
-		r1csFile      string
-		algorithmName string
+// zkInitCallback is the lazy loading callback for ZK circuits
+func zkInitCallback(algorithmID uint8) bool {
+	logger := client.GetLogger("zk-init", false)
+
+	config, ok := circuitsRegistry[algorithmID]
+	if !ok {
+		logger.Error("Unknown algorithm ID for lazy loading",
+			zap.Uint8("algorithmID", algorithmID))
+		return false
 	}
 
-	circuits := []circuitConfig{
-		{
-			algorithmID:   impl.CHACHA20_OPRF,
-			pkFile:        "pk.chacha20_oprf",
-			r1csFile:      "r1cs.chacha20_oprf",
-			algorithmName: "CHACHA20_OPRF",
-		},
-		{
-			algorithmID:   impl.AES_128_OPRF,
-			pkFile:        "pk.aes128_oprf",
-			r1csFile:      "r1cs.aes128_oprf",
-			algorithmName: "AES_128_OPRF",
-		},
-		{
-			algorithmID:   impl.AES_256_OPRF,
-			pkFile:        "pk.aes256_oprf",
-			r1csFile:      "r1cs.aes256_oprf",
-			algorithmName: "AES_256_OPRF",
-		},
-	}
+	logger.Info("Lazy loading ZK circuit",
+		zap.String("algorithm", config.algorithmName),
+		zap.Uint8("algorithmID", algorithmID))
 
-	// Initialize each circuit
-	for _, circuit := range circuits {
-		// Read proving key
-		pkPath := filepath.Join(circuitsDir, circuit.pkFile)
-		pkData, err := os.ReadFile(pkPath)
+	// Resolve circuits directory if not already done
+	if circuitsDir == "" {
+		var err error
+		circuitsDir, err = resolveCircuitsDir()
 		if err != nil {
-			return fmt.Errorf("failed to read proving key for %s: %v", circuit.algorithmName, err)
+			logger.Error("Failed to resolve circuits directory", zap.Error(err))
+			return false
 		}
-
-		// Read R1CS
-		r1csPath := filepath.Join(circuitsDir, circuit.r1csFile)
-		r1csData, err := os.ReadFile(r1csPath)
-		if err != nil {
-			return fmt.Errorf("failed to read R1CS for %s: %v", circuit.algorithmName, err)
-		}
-
-		// Initialize the algorithm
-		success := impl.InitAlgorithm(circuit.algorithmID, pkData, r1csData)
-		if !success {
-			return fmt.Errorf("failed to initialize %s algorithm", circuit.algorithmName)
-		}
-
-		logger.Info("Successfully initialized ZK circuit",
-			zap.String("algorithm", circuit.algorithmName),
-			zap.Uint8("id", circuit.algorithmID),
-			zap.Int("pk_size", len(pkData)),
-			zap.Int("r1cs_size", len(r1csData)))
 	}
 
-	logger.Info("All ZK circuits initialized successfully")
+	// Read proving key
+	pkPath := filepath.Join(circuitsDir, config.pkFile)
+	pkData, err := os.ReadFile(pkPath)
+	if err != nil {
+		logger.Error("Failed to read proving key",
+			zap.String("algorithm", config.algorithmName),
+			zap.String("path", pkPath),
+			zap.Error(err))
+		return false
+	}
+
+	// Read R1CS
+	r1csPath := filepath.Join(circuitsDir, config.r1csFile)
+	r1csData, err := os.ReadFile(r1csPath)
+	if err != nil {
+		logger.Error("Failed to read R1CS",
+			zap.String("algorithm", config.algorithmName),
+			zap.String("path", r1csPath),
+			zap.Error(err))
+		return false
+	}
+
+	// Initialize the algorithm using the tracking wrapper
+	success := client.InitAlgorithmWithTracking(algorithmID, pkData, r1csData)
+	if !success {
+		logger.Error("Failed to initialize algorithm",
+			zap.String("algorithm", config.algorithmName))
+		return false
+	}
+
+	logger.Info("Successfully lazy loaded ZK circuit",
+		zap.String("algorithm", config.algorithmName),
+		zap.Uint8("id", algorithmID),
+		zap.Int("pk_size", len(pkData)),
+		zap.Int("r1cs_size", len(r1csData)))
+
+	return true
+}
+
+// setupZKLazyLoading sets up the lazy loading callback for ZK circuits
+func setupZKLazyLoading(logger *shared.Logger) error {
+	// Resolve and validate circuits directory exists
+	var err error
+	circuitsDir, err = resolveCircuitsDir()
+	if err != nil {
+		return err
+	}
+
+	logger.Info("Setting up ZK lazy loading", zap.String("circuits_dir", circuitsDir))
+
+	// Set the lazy loading callback
+	client.SetZKInitCallback(func(algorithmID uint8) <-chan bool {
+		resultCh := make(chan bool, 1)
+		go func() {
+			resultCh <- zkInitCallback(algorithmID)
+		}()
+		return resultCh
+	})
+
+	logger.Info("ZK lazy loading configured - circuits will be loaded on demand")
 	return nil
 }
 
@@ -113,10 +173,10 @@ func main() {
 
 	defer logger.Sync()
 
-	// Initialize ZK circuits for OPRF
-	if err := initializeZKCircuits(logger); err != nil {
-		logger.Error("Failed to initialize ZK circuits", zap.Error(err))
-		log.Fatalf("ZK circuit initialization failed: %v", err)
+	// Setup lazy loading for ZK circuits (loaded on demand when needed)
+	if err := setupZKLazyLoading(logger); err != nil {
+		logger.Error("Failed to setup ZK lazy loading", zap.Error(err))
+		log.Fatalf("ZK lazy loading setup failed: %v", err)
 	}
 	logger.Sync()
 

@@ -6,7 +6,7 @@ import (
 	"strings"
 
 	gojson "github.com/coreos/go-json"
-	jp "github.com/reclaimprotocol/jsonpathplus-go"
+	jp "github.com/reclaimprotocol/jsonpathplus-go/v2"
 	"go.uber.org/zap"
 )
 

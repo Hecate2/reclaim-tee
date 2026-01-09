@@ -103,14 +103,12 @@ func (c *Client) PrepareZKProofForTOPRF(httpRangeStart, httpRangeEnd int, toprfM
 		return nil, fmt.Errorf("failed to unmarshal TEE_T payload: %v", err)
 	}
 
-	consolidatedCiphertext := tPayload.GetConsolidatedResponseCiphertext()
-
 	// Convert HTTP range to TLS ciphertext position
 	tlsStart := c.httpPositionToTlsPosition(httpRangeStart)
 	tlsEnd := c.httpPositionToTlsPosition(httpRangeEnd)
 
 	// Get the ideal blocks for TOPRF
-	inputParams, err := c.getIdealBlocksForTOPRF(tlsStart, tlsEnd, packetMetadata, cipherSuite, consolidatedCiphertext, serverKey)
+	inputParams, err := c.getIdealBlocksForTOPRF(tlsStart, tlsEnd, packetMetadata, cipherSuite, serverKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get TOPRF blocks: %v", err)
 	}
@@ -216,14 +214,9 @@ func (c *Client) buildVerificationBundle() ([]byte, error) {
 			// This is the actual length without padding - boundary fields handle incomplete blocks
 			streamInputLength := uint32(len(oprfData.ZKProofParams.Input))
 
-			// Calculate the starting position of the blocks in the stream
-			// We need to find where the first block starts, not where the hashed data starts
-			httpRangeStart := oprfData.Start
-			tlsRangeStart := c.httpPositionToTlsPosition(httpRangeStart)
-
 			// Find which blocks contain this range and calculate the block-aligned stream position
 			// This requires understanding the block structure used in getIdealBlocksForTOPRF
-			streamPos, err := c.calculateBlockAlignedStreamPosition(tlsRangeStart, oprfData.ZKProofParams)
+			streamPos, err := c.calculateBlockAlignedStreamPosition(oprfData.ZKProofParams)
 			if err != nil {
 				return nil, fmt.Errorf("failed to calculate block-aligned stream position for range %d: %v", oprfData.Start, err)
 			}
@@ -368,7 +361,6 @@ func (c *Client) verifyKeystreamGeneration() {
 		var tPayload teeproto.TOutputPayload
 		if err := proto.Unmarshal(c.teetSignedMessage.GetBody(), &tPayload); err == nil {
 			consolidatedCiphertext := tPayload.GetConsolidatedResponseCiphertext()
-			serverKey := c.teekSignedMessage.GetServerAppKey()
 
 			// First, let's verify what's at position 38245 in the normal decryption
 			if len(generatedKeystream) > 38269 && len(consolidatedCiphertext) > 38269 {
@@ -381,8 +373,7 @@ func (c *Client) verifyKeystreamGeneration() {
 					zap.Binary("binary", normalDecrypt[:24]))
 			}
 
-			c.mapHashedRangesToBlocks(c.teekSignedMessage.GetResponsePackets(), uint16(c.teekSignedMessage.GetCipherSuite()),
-				consolidatedCiphertext, serverKey)
+			c.mapHashedRangesToBlocks(c.teekSignedMessage.GetResponsePackets(), uint16(c.teekSignedMessage.GetCipherSuite()))
 		}
 	}
 
@@ -547,8 +538,7 @@ func (c *Client) httpPositionToTlsPosition(httpPos int) int {
 }
 
 // getIdealBlocksForTOPRF extracts the ideal cipher blocks for TOPRF proof generation
-func (c *Client) getIdealBlocksForTOPRF(rangeStart, rangeEnd int, packetMetadata []*teeproto.TLSPacketInfo,
-	cipherSuite uint16, consolidatedCiphertext []byte, serverKey []byte) (*prover.InputParams, error) {
+func (c *Client) getIdealBlocksForTOPRF(rangeStart, rangeEnd int, packetMetadata []*teeproto.TLSPacketInfo, cipherSuite uint16, serverKey []byte) (*prover.InputParams, error) {
 
 	// Build the original unredacted ciphertext from ciphertextBySeq
 	c.responseContentMutex.Lock()
@@ -573,25 +563,9 @@ func (c *Client) getIdealBlocksForTOPRF(rangeStart, rangeEnd int, packetMetadata
 	}
 
 	blockSize := cipherInfo.BlockSize
-	var requiredBlocks int
-	var cipherName string
-
-	// Determine required blocks and cipher name for ZK circuit
-	if minitls.IsChaCha20(cipherSuite) {
-		requiredBlocks = 2 // 128 bytes for ChaCha20
-		if cipherInfo.KeySize == 32 {
-			cipherName = "chacha20-toprf"
-		} else {
-			return nil, fmt.Errorf("unsupported ChaCha20 variant")
-		}
-	} else if cipherInfo.KeySize == 16 {
-		requiredBlocks = 5 // 80 bytes for AES-128
-		cipherName = "aes-128-ctr-toprf"
-	} else if cipherInfo.KeySize == 32 {
-		requiredBlocks = 5 // 80 bytes for AES-256
-		cipherName = "aes-256-ctr-toprf"
-	} else {
-		return nil, fmt.Errorf("unsupported cipher configuration")
+	cipherName, requiredBlocks, err := GetTOPRFCipherInfo(cipherSuite)
+	if err != nil {
+		return nil, err
 	}
 
 	// Check data size limit (62 bytes max for TOPRF)
@@ -829,7 +803,7 @@ func (c *Client) getIdealBlocksForTOPRF(rangeStart, rangeEnd int, packetMetadata
 }
 
 // calculateBlockAlignedStreamPosition calculates where the ZK Input blocks start in the consolidated stream
-func (c *Client) calculateBlockAlignedStreamPosition(tlsRangeStart int, zkParams *prover.InputParams) (uint32, error) {
+func (c *Client) calculateBlockAlignedStreamPosition(zkParams *prover.InputParams) (uint32, error) {
 	// Instead of recalculating the complex block extraction logic, we can determine the position
 	// based on the first block's counter and nonce from zkParams
 
@@ -947,8 +921,7 @@ func adjustBase64Length(base64Str string, targetLength int) string {
 
 // mapHashedRangesToBlocks maps hashed redaction ranges to their cryptographic blocks and packets
 // This provides the information needed for OPRF implementation in ZK circuits
-func (c *Client) mapHashedRangesToBlocks(packetMetadata []*teeproto.TLSPacketInfo, cipherSuite uint16,
-	consolidatedCiphertext []byte, serverKey []byte) {
+func (c *Client) mapHashedRangesToBlocks(packetMetadata []*teeproto.TLSPacketInfo, cipherSuite uint16) {
 	// Determine block size based on cipher suite
 	blockSize := 16 // AES default
 	var cipherName string
@@ -1055,9 +1028,7 @@ func (c *Client) mapHashedRangesToBlocks(packetMetadata []*teeproto.TLSPacketInf
 
 // decryptAndVerifyHashedBlocks decrypts individual blocks for an OPRF range to verify OPRF computation
 // TODO: Update this function to work with OPRF ranges instead of hashed ranges
-func (c *Client) decryptAndVerifyHashedBlocks(rangeStart, rangeEnd int, rangeLength int,
-	packetMetadata []*teeproto.TLSPacketInfo, cipherSuite uint16,
-	consolidatedCiphertext []byte, serverKey []byte) {
+func (c *Client) decryptAndVerifyHashedBlocks(rangeStart, rangeEnd int, packetMetadata []*teeproto.TLSPacketInfo, cipherSuite uint16, consolidatedCiphertext, serverKey []byte) {
 
 	// Determine block size based on cipher suite
 	blockSize := 16 // AES default
