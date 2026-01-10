@@ -279,11 +279,6 @@ func (r *ReclaimClient) GetValidationResults() (*ValidationResults, error) {
 	return r.Client.buildValidationResults()
 }
 
-// GetAttestationResults returns the attestation verification results
-func (r *ReclaimClient) GetAttestationResults() (*AttestationResults, error) {
-	return r.Client.buildAttestationResults()
-}
-
 // GetResponseResults returns the HTTP response data and proof claims
 func (r *ReclaimClient) GetResponseResults() (*ResponseResults, error) {
 	return r.Client.buildResponseResults()

@@ -13,20 +13,17 @@ import (
 func (c *Client) buildProtocolResult() (*ProtocolResult, error) {
 	transcripts, _ := c.buildTranscriptResults()
 	validation, _ := c.buildValidationResults()
-	attestation, _ := c.buildAttestationResults()
 	response, _ := c.buildResponseResults()
-	success := transcripts.BothReceived && validation.AttestationValidation.OverallValid && c.responseProcessingSuccessful
+	success := transcripts.BothReceived && c.responseProcessingSuccessful
 	var errorMessage string
 	if !success {
 		if !transcripts.BothReceived {
 			errorMessage = "Not all transcripts received"
-		} else if !validation.AttestationValidation.OverallValid {
-			errorMessage = "Attestation validation failed"
 		} else if !c.responseProcessingSuccessful {
 			errorMessage = "Response processing failed"
 		}
 	}
-	return &ProtocolResult{SessionID: c.sessionID, StartTime: c.protocolStartTime, CompletionTime: time.Now(), Success: success, ErrorMessage: errorMessage, RequestTarget: c.targetHost, RequestPort: c.targetPort, RequestRedactions: nil, Transcripts: *transcripts, Validation: *validation, Attestation: *attestation, Response: *response}, nil
+	return &ProtocolResult{SessionID: c.sessionID, StartTime: c.protocolStartTime, CompletionTime: time.Now(), Success: success, ErrorMessage: errorMessage, RequestTarget: c.targetHost, RequestPort: c.targetPort, RequestRedactions: nil, Transcripts: *transcripts, Validation: *validation, Response: *response}, nil
 }
 
 func (c *Client) buildTranscriptResults() (*TranscriptResults, error) {
@@ -62,20 +59,14 @@ func (c *Client) buildTranscriptResults() (*TranscriptResults, error) {
 
 func (c *Client) buildValidationResults() (*ValidationResults, error) {
 	transcriptValidation := c.buildTranscriptValidationResults()
-	attestationValidation := c.buildAttestationValidationResults()
-	allValid := transcriptValidation.OverallValid && attestationValidation.OverallValid
+	allValid := transcriptValidation.OverallValid
 	var summary string
 	if allValid {
 		summary = "All validations passed successfully"
 	} else {
 		summary = "Some validations failed"
 	}
-	return &ValidationResults{TranscriptValidation: *transcriptValidation, AttestationValidation: *attestationValidation, AllValidationsPassed: allValid, ValidationSummary: summary}, nil
-}
-
-func (c *Client) buildAttestationResults() (*AttestationResults, error) {
-	verification := c.buildAttestationValidationResults()
-	return &AttestationResults{TEEKPublicKey: nil, TEETPublicKey: nil, Verification: *verification}, nil
+	return &ValidationResults{TranscriptValidation: *transcriptValidation, AllValidationsPassed: allValid, ValidationSummary: summary}, nil
 }
 
 func (c *Client) buildResponseResults() (*ResponseResults, error) {
@@ -96,120 +87,6 @@ func (c *Client) buildTranscriptValidationResults() *TranscriptValidationResults
 	teekValid := c.teekSignedMessage != nil
 	teetValid := c.teetSignedMessage != nil
 	return &TranscriptValidationResults{ClientCapturedData: 0, ClientCapturedBytes: 0, TEEKValidation: TranscriptDataValidation{DataReceived: 1, DataMatched: 1, ValidationPassed: teekValid}, TEETValidation: TranscriptDataValidation{DataReceived: 1, DataMatched: 1, ValidationPassed: teetValid}, OverallValid: bothReceived && teekValid && teetValid, Summary: "Transcript validation based on SignedMessage reception and verification"}
-}
-
-func (c *Client) buildAttestationValidationResults() *AttestationValidationResults {
-	// Verify TEE_K attestation
-	teekResult := c.verifyAttestationReport(c.teekSignedMessage, "tee_k")
-
-	// Verify TEE_T attestation
-	teetResult := c.verifyAttestationReport(c.teetSignedMessage, "tee_t")
-
-	// Compare public keys
-	keyComparison := c.compareAttestationKeys(teekResult, teetResult)
-
-	overallValid := teekResult.RootOfTrustValid && teetResult.RootOfTrustValid && keyComparison.BothTEEsMatch
-
-	return &AttestationValidationResults{
-		TEEKAttestation:     teekResult,
-		TEETAttestation:     teetResult,
-		PublicKeyComparison: keyComparison,
-		OverallValid:        overallValid,
-		Summary:             fmt.Sprintf("TEE_K valid: %v, TEE_T valid: %v, Keys match: %v", teekResult.RootOfTrustValid, teetResult.RootOfTrustValid, keyComparison.BothTEEsMatch),
-	}
-}
-
-func (c *Client) verifyAttestationReport(signedMsg *teeproto.SignedMessage, teeName string) AttestationVerificationResult {
-	if signedMsg == nil {
-		return AttestationVerificationResult{
-			AttestationReceived: false,
-			RootOfTrustValid:    false,
-			PublicKeyExtracted:  false,
-			Error:               "No signed message received",
-		}
-	}
-
-	attestationReport := signedMsg.GetAttestationReport()
-	ethAddress := signedMsg.GetEthAddress()
-
-	if attestationReport == nil {
-		// No attestation - this is acceptable for testing
-		if len(ethAddress) > 0 {
-			return AttestationVerificationResult{
-				AttestationReceived: false,
-				RootOfTrustValid:    true, // Trust the embedded key for now
-				PublicKeyExtracted:  true,
-				PublicKeySize:       len(ethAddress),
-			}
-		}
-		return AttestationVerificationResult{
-			AttestationReceived: false,
-			RootOfTrustValid:    false,
-			PublicKeyExtracted:  false,
-			Error:               "No attestation report",
-		}
-	}
-
-	// Check attestation type
-	attestationType := attestationReport.GetType()
-	attestationData := attestationReport.GetReport()
-
-	if attestationType == "gcp" {
-		// Verify GCP JWT attestation
-		publicKey, err := VerifyGCPConfidentialSpaceAttestation(string(attestationData))
-		if err != nil {
-			return AttestationVerificationResult{
-				AttestationReceived: true,
-				RootOfTrustValid:    false,
-				PublicKeyExtracted:  false,
-				Error:               fmt.Sprintf("GCP attestation verification failed: %v", err),
-			}
-		}
-
-		return AttestationVerificationResult{
-			AttestationReceived: true,
-			RootOfTrustValid:    true,
-			PublicKeyExtracted:  true,
-			PublicKeySize:       len(publicKey),
-		}
-	} else if attestationType == "nitro" {
-		// TODO: Implement Nitro attestation verification
-		// For now, just mark as received
-		return AttestationVerificationResult{
-			AttestationReceived: true,
-			RootOfTrustValid:    false, // Not yet implemented
-			PublicKeyExtracted:  false,
-			Error:               "Nitro attestation verification not yet implemented",
-		}
-	}
-
-	return AttestationVerificationResult{
-		AttestationReceived: true,
-		RootOfTrustValid:    false,
-		PublicKeyExtracted:  false,
-		Error:               fmt.Sprintf("Unknown attestation type: %s", attestationType),
-	}
-}
-
-func (c *Client) compareAttestationKeys(teekResult, teetResult AttestationVerificationResult) PublicKeyComparisonResult {
-	if !teekResult.PublicKeyExtracted || !teetResult.PublicKeyExtracted {
-		return PublicKeyComparisonResult{
-			ComparisonPerformed: false,
-			TEEKKeysMatch:       false,
-			TEETKeysMatch:       false,
-			BothTEEsMatch:       false,
-			Error:               "Public keys not extracted from both attestations",
-		}
-	}
-
-	// For now, assume keys match if they were successfully extracted
-	// TODO: Actually compare the extracted keys with transcript signatures
-	return PublicKeyComparisonResult{
-		ComparisonPerformed: true,
-		TEEKKeysMatch:       teekResult.PublicKeyExtracted,
-		TEETKeysMatch:       teetResult.PublicKeyExtracted,
-		BothTEEsMatch:       teekResult.RootOfTrustValid && teetResult.RootOfTrustValid,
-	}
 }
 
 func (c *Client) buildTEEValidationDetails(source string, data [][]byte) TranscriptDataValidation {

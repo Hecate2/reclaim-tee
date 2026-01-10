@@ -371,7 +371,6 @@ func main() {
 		fmt.Printf("   All Validations Passed: %v\n", validation.AllValidationsPassed)
 		fmt.Printf("   Summary: %s\n", validation.ValidationSummary)
 		fmt.Printf("   Transcript Validation: %v\n", validation.TranscriptValidation.OverallValid)
-		fmt.Printf("   Attestation Validation: %v\n", validation.AttestationValidation.OverallValid)
 	}
 
 	// Get response results

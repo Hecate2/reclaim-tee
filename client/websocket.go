@@ -144,14 +144,10 @@ func (c *Client) handleMessages() {
 				break
 			}
 			if sm.GetBodyType() == teeproto.BodyType_BODY_TYPE_K_OUTPUT {
-				if err := c.verifySignedMessage(sm, "TEE_K"); err != nil {
-					c.logger.Error("TEE_K SignedMessage verification FAILED", zap.Error(err))
-					break
-				}
-				c.logger.Info("TEE_K SignedMessage verification SUCCESS")
-
 				// Store the original SignedMessage for verification bundle
+				// Attestor handles all cryptographic verification server-side
 				c.teekSignedMessage = sm
+				c.logger.Info("TEE_K SignedMessage received")
 
 				var body teeproto.KOutputPayload
 				if err := proto.Unmarshal(sm.GetBody(), &body); err != nil {
@@ -218,14 +214,10 @@ func (c *Client) handleTEETMessages() {
 				break
 			}
 			if sm.GetBodyType() == teeproto.BodyType_BODY_TYPE_T_OUTPUT {
-				if err := c.verifySignedMessage(sm, "TEE_T"); err != nil {
-					c.logger.Error("TEE_T SignedMessage verification FAILED", zap.Error(err))
-					break
-				}
-				c.logger.Info("TEE_T SignedMessage verification SUCCESS")
-
 				// Store the original SignedMessage for verification bundle
+				// Attestor handles all cryptographic verification server-side
 				c.teetSignedMessage = sm
+				c.logger.Info("TEE_T SignedMessage received")
 
 				var body teeproto.TOutputPayload
 				if err := proto.Unmarshal(sm.GetBody(), &body); err != nil {

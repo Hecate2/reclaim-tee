@@ -1,3 +1,5 @@
+//go:build !mobile
+
 package shared
 
 import (
@@ -440,27 +442,33 @@ func (l *Logger) Close() error {
 
 // Global logger instances
 var (
-	DefaultLogger *Logger
+	DefaultLogger     *Logger
+	teetLoggerOnce    sync.Once
+	teekLoggerOnce    sync.Once
+	defaultTEETLogger *Logger
+	defaultTEEKLogger *Logger
 )
 
 // GetTEETLogger returns the default TEE_T logger
 func GetTEETLogger() *Logger {
-	if DefaultLogger == nil {
-		// Fallback: create a basic logger if not initialized
-		logger, _ := NewLoggerFromEnv("tee_t")
-		return logger
+	if DefaultLogger != nil {
+		return DefaultLogger
 	}
-	return DefaultLogger
+	teetLoggerOnce.Do(func() {
+		defaultTEETLogger, _ = NewLoggerFromEnv("tee_t")
+	})
+	return defaultTEETLogger
 }
 
 // GetTEEKLogger returns the default TEE_K logger
 func GetTEEKLogger() *Logger {
-	if DefaultLogger == nil {
-		// Fallback: create a basic logger if not initialized
-		logger, _ := NewLoggerFromEnv("tee_k")
-		return logger
+	if DefaultLogger != nil {
+		return DefaultLogger
 	}
-	return DefaultLogger
+	teekLoggerOnce.Do(func() {
+		defaultTEEKLogger, _ = NewLoggerFromEnv("tee_k")
+	})
+	return defaultTEEKLogger
 }
 
 func NewNopLogger() *Logger {

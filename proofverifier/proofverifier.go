@@ -1,3 +1,5 @@
+//go:build !mobile
+
 package proofverifier
 
 import (
@@ -13,7 +15,6 @@ import (
 	"tee-mpc/shared"
 
 	"github.com/anjuna-security/go-nitro-attestation/verifier"
-	"github.com/ethereum/go-ethereum/common"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -336,44 +337,44 @@ func ValidateBundleWithOPRFRanges(bundleData []byte, oprfRanges map[int]int) err
 }
 
 // verifyAttestationReportETH verifies a protobuf AttestationReport and extracts the ETH address
-func verifyAttestationReportETH(report *teeproto.AttestationReport, expectedSource string) (common.Address, error) {
+func verifyAttestationReportETH(report *teeproto.AttestationReport, expectedSource string) (shared.Address, error) {
 	switch report.Type {
 	case "nitro":
 		sr, err := verifier.NewSignedAttestationReport(bytes.NewReader(report.Report))
 		if err != nil {
-			return common.Address{}, fmt.Errorf("failed to parse nitro report: %v", err)
+			return shared.Address{}, fmt.Errorf("failed to parse nitro report: %v", err)
 		}
 		if err := verifier.Validate(sr, nil); err != nil {
-			return common.Address{}, fmt.Errorf("nitro validation failed: %v", err)
+			return shared.Address{}, fmt.Errorf("nitro validation failed: %v", err)
 		}
 
 		// Extract ETH address from user data in the attestation document
 		userDataStr := string(sr.Document.UserData)
 		expectedPrefix := fmt.Sprintf("%s_public_key:", strings.ToLower(expectedSource))
 		if !strings.HasPrefix(userDataStr, expectedPrefix) {
-			return common.Address{}, fmt.Errorf("invalid user data format, expected prefix %s", expectedPrefix)
+			return shared.Address{}, fmt.Errorf("invalid user data format, expected prefix %s", expectedPrefix)
 		}
 
 		ethAddressHex := userDataStr[len(expectedPrefix):]
 		if !strings.HasPrefix(ethAddressHex, "0x") {
-			return common.Address{}, fmt.Errorf("invalid ETH address format, expected 0x prefix")
+			return shared.Address{}, fmt.Errorf("invalid ETH address format, expected 0x prefix")
 		}
 
-		if !common.IsHexAddress(ethAddressHex) {
-			return common.Address{}, fmt.Errorf("invalid ETH address format: %s", ethAddressHex)
+		if !shared.IsHexAddress(ethAddressHex) {
+			return shared.Address{}, fmt.Errorf("invalid ETH address format: %s", ethAddressHex)
 		}
 
-		ethAddress := common.HexToAddress(ethAddressHex)
+		ethAddress := shared.HexToAddress(ethAddressHex)
 		fmt.Printf("[Verifier] Extracted ETH address from Nitro attestation: %s\n", ethAddress.Hex())
 		return ethAddress, nil
 
 	case "gcp":
 		// For GCP, we need to extract the ETH address from the attestation token
 		// This is a placeholder - GCP attestation ETH address extraction needs specific implementation
-		return common.Address{}, fmt.Errorf("GCP ETH address extraction not yet implemented for protobuf format")
+		return shared.Address{}, fmt.Errorf("GCP ETH address extraction not yet implemented for protobuf format")
 
 	default:
-		return common.Address{}, fmt.Errorf("unsupported attestation type: %s", report.Type)
+		return shared.Address{}, fmt.Errorf("unsupported attestation type: %s", report.Type)
 	}
 }
 
@@ -403,7 +404,7 @@ func verifySignedMessage(signedMsg *teeproto.SignedMessage, source string) error
 	}
 
 	// Extract ETH address - either from AttestationReport (enclave mode) or PublicKey field (standalone mode)
-	var ethAddress common.Address
+	var ethAddress shared.Address
 	var err error
 
 	if signedMsg.GetAttestationReport() != nil {
@@ -419,7 +420,7 @@ func verifySignedMessage(signedMsg *teeproto.SignedMessage, source string) error
 		fmt.Printf("[Verifier] %s attestation verification SUCCESS, extracted ETH address: %s\n", source, ethAddress.Hex())
 	} else if len(signedMsg.GetEthAddress()) > 0 {
 		// Standalone mode: use ETH address
-		ethAddress = common.HexToAddress(string(signedMsg.GetEthAddress()))
+		ethAddress = shared.HexToAddress(string(signedMsg.GetEthAddress()))
 		fmt.Printf("[Verifier] Using %s standalone mode ETH address: %s\n", source, ethAddress.Hex())
 	} else {
 		return fmt.Errorf("SECURITY ERROR: %s missing both attestation report and public key", source)

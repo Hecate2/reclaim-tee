@@ -1,3 +1,5 @@
+//go:build !mobile
+
 package shared
 
 import "context"

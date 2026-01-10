@@ -24,9 +24,6 @@ type ProtocolResult struct {
 	// Validation results
 	Validation ValidationResults `json:"validation"`
 
-	// Attestation verification
-	Attestation AttestationResults `json:"attestation"`
-
 	// Response data
 	Response ResponseResults `json:"response"`
 }
@@ -50,9 +47,7 @@ type SignedTranscriptData struct {
 
 // ValidationResults contains the results of transcript validation
 type ValidationResults struct {
-	TranscriptValidation  TranscriptValidationResults  `json:"transcript_validation"`
-	AttestationValidation AttestationValidationResults `json:"attestation_validation"`
-
+	TranscriptValidation TranscriptValidationResults `json:"transcript_validation"`
 	// Overall validation status
 	AllValidationsPassed bool   `json:"all_validations_passed"`
 	ValidationSummary    string `json:"validation_summary"`
@@ -87,48 +82,6 @@ type DataValidationDetail struct {
 	DataType       string `json:"data_type"` // hex representation of first byte
 	MatchedCapture bool   `json:"matched_capture"`
 	CaptureIndex   int    `json:"capture_index,omitempty"` // If matched, which capture index
-}
-
-// AttestationValidationResults contains attestation verification results
-type AttestationValidationResults struct {
-	TEEKAttestation AttestationVerificationResult `json:"tee_k_attestation"`
-	TEETAttestation AttestationVerificationResult `json:"tee_t_attestation"`
-
-	PublicKeyComparison PublicKeyComparisonResult `json:"public_key_comparison"`
-
-	OverallValid bool   `json:"overall_valid"`
-	Summary      string `json:"summary"`
-}
-
-// AttestationVerificationResult contains the result of verifying one TEE's attestation
-type AttestationVerificationResult struct {
-	AttestationReceived bool `json:"attestation_received"`
-	RootOfTrustValid    bool `json:"root_of_trust_valid"`
-	PublicKeyExtracted  bool `json:"public_key_extracted"`
-	PublicKeySize       int  `json:"public_key_size"`
-
-	Error string `json:"error,omitempty"`
-}
-
-// PublicKeyComparisonResult contains the result of comparing attestation and transcript public keys
-type PublicKeyComparisonResult struct {
-	ComparisonPerformed bool `json:"comparison_performed"`
-	TEEKKeysMatch       bool `json:"tee_k_keys_match"`
-	TEETKeysMatch       bool `json:"tee_t_keys_match"`
-	BothTEEsMatch       bool `json:"both_tees_match"`
-
-	Error string `json:"error,omitempty"`
-}
-
-// AttestationResults contains attestation data and verification results
-type AttestationResults struct {
-	TEEKAttestation []byte `json:"tee_k_attestation,omitempty"`
-	TEETAttestation []byte `json:"tee_t_attestation,omitempty"`
-
-	TEEKPublicKey []byte `json:"tee_k_public_key,omitempty"`
-	TEETPublicKey []byte `json:"tee_t_public_key,omitempty"`
-
-	Verification AttestationValidationResults `json:"verification"`
 }
 
 // ResponseResults contains the HTTP response data and proof claims

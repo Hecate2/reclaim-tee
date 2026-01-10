@@ -15,9 +15,6 @@ import (
 	teeproto "tee-mpc/proto"
 	"tee-mpc/shared"
 
-	"github.com/ethereum/go-ethereum/accounts"
-	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/gorilla/websocket"
 	"github.com/reclaimprotocol/zk-symmetric-crypto/gnark/utils"
 	"go.uber.org/zap"
@@ -29,7 +26,7 @@ type AttestorClient struct {
 	url        string
 	conn       *websocket.Conn
 	privateKey *ecdsa.PrivateKey
-	address    common.Address
+	address    shared.Address
 	logger     *shared.Logger
 	mu         sync.Mutex
 	connOnce   sync.Once // Ensure connection happens only once
@@ -37,7 +34,7 @@ type AttestorClient struct {
 
 // NewAttestorClient creates a new client for communicating with attestor-core
 func NewAttestorClient(attestorURL string, privateKey *ecdsa.PrivateKey, logger *shared.Logger) *AttestorClient {
-	address := crypto.PubkeyToAddress(privateKey.PublicKey)
+	address := shared.PubkeyToAddress(&privateKey.PublicKey)
 
 	return &AttestorClient{
 		url:        attestorURL,
@@ -337,7 +334,7 @@ func (ac *AttestorClient) SubmitTeeBundle(verificationBundle *teeproto.Verificat
 	}
 
 	// Use personal_sign compatible signature (same as ethers.js wallet.signMessage)
-	signature, err := crypto.Sign(accounts.TextHash(requestBytes), ac.privateKey)
+	signature, err := shared.Sign(shared.TextHash(requestBytes), ac.privateKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to sign request: %v", err)
 	}
@@ -346,7 +343,7 @@ func (ac *AttestorClient) SubmitTeeBundle(verificationBundle *teeproto.Verificat
 	ac.logger.Info("TEE Bundle signature details",
 		zap.Int("signatureLength", len(signature)),
 		zap.String("signatureHex", hex.EncodeToString(signature[:min(10, len(signature))])+"..."),
-		zap.String("textHashHex", hex.EncodeToString(accounts.TextHash(requestBytes))),
+		zap.String("textHashHex", hex.EncodeToString(shared.TextHash(requestBytes))),
 		zap.String("recoveryId", fmt.Sprintf("%d", signature[64])),
 	)
 

@@ -5,9 +5,6 @@ import (
 	"fmt"
 	teeproto "tee-mpc/proto"
 
-	"github.com/ethereum/go-ethereum/accounts"
-	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/crypto"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -70,8 +67,8 @@ type SigningKeyPair struct {
 
 // GenerateSigningKeyPair generates a new ECDSA signing key pair using secp256k1 curve (ETH compatible)
 func GenerateSigningKeyPair() (*SigningKeyPair, error) {
-	// Use Ethereum's key generation (secp256k1) instead of P-256
-	privateKey, err := crypto.GenerateKey()
+	// Use secp256k1 key generation (ETH compatible)
+	privateKey, err := GenerateKey()
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate ECDSA key pair: %v", err)
 	}
@@ -85,10 +82,10 @@ func GenerateSigningKeyPair() (*SigningKeyPair, error) {
 // SignData signs the given data using Ethereum-style signatures
 func (kp *SigningKeyPair) SignData(data []byte) ([]byte, error) {
 	// Use standard Ethereum message signing (includes prefix)
-	hash := accounts.TextHash(data)
+	hash := TextHash(data)
 
 	// Sign the hash - this returns a 65-byte signature with recovery ID
-	signature, err := crypto.Sign(hash, kp.PrivateKey)
+	signature, err := Sign(hash, kp.PrivateKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to sign data with ETH style: %v", err)
 	}
@@ -103,17 +100,17 @@ func VerifySignature(data []byte, signature []byte, publicKey *ecdsa.PublicKey) 
 	}
 
 	// Use standard Ethereum message signing (includes prefix)
-	hash := accounts.TextHash(data)
+	hash := TextHash(data)
 
 	// Recover public key from signature
-	recoveredPubKey, err := crypto.SigToPub(hash, signature)
+	recoveredPubKey, err := SigToPub(hash, signature)
 	if err != nil {
 		return fmt.Errorf("failed to recover public key from signature: %v", err)
 	}
 
 	// Compare recovered public key with expected public key
-	expectedAddress := crypto.PubkeyToAddress(*publicKey)
-	recoveredAddress := crypto.PubkeyToAddress(*recoveredPubKey)
+	expectedAddress := PubkeyToAddress(publicKey)
+	recoveredAddress := PubkeyToAddress(recoveredPubKey)
 
 	if expectedAddress != recoveredAddress {
 		return fmt.Errorf("signature verification failed: expected address %s, got %s",
@@ -130,32 +127,32 @@ func (kp *SigningKeyPair) VerifySignature(data []byte, signature []byte) bool {
 }
 
 // GetEthAddress returns the Ethereum address for this key pair
-func (kp *SigningKeyPair) GetEthAddress() common.Address {
-	return crypto.PubkeyToAddress(*kp.PublicKey)
+func (kp *SigningKeyPair) GetEthAddress() Address {
+	return PubkeyToAddress(kp.PublicKey)
 }
 
 // VerifySignatureWithETH verifies a signature using Ethereum-style verification with an address
-func VerifySignatureWithETH(data []byte, signature []byte, expectedAddress common.Address) error {
+func VerifySignatureWithETH(data []byte, signature []byte, expectedAddress Address) error {
 	return VerifyEthSignature(data, signature, expectedAddress)
 }
 
 // VerifyEthSignature verifies an Ethereum-style signature against the given data and address
-func VerifyEthSignature(data []byte, signature []byte, expectedAddress common.Address) error {
+func VerifyEthSignature(data []byte, signature []byte, expectedAddress Address) error {
 	if len(signature) != 65 {
 		return fmt.Errorf("invalid ETH signature length: expected 65 bytes, got %d", len(signature))
 	}
 
 	// Use standard Ethereum message signing (includes prefix)
-	hash := accounts.TextHash(data)
+	hash := TextHash(data)
 
 	// Recover public key from signature
-	recoveredPubKey, err := crypto.SigToPub(hash, signature)
+	recoveredPubKey, err := SigToPub(hash, signature)
 	if err != nil {
 		return fmt.Errorf("failed to recover public key from signature: %v", err)
 	}
 
 	// Derive address from recovered public key
-	recoveredAddress := crypto.PubkeyToAddress(*recoveredPubKey)
+	recoveredAddress := PubkeyToAddress(recoveredPubKey)
 
 	// Verify address matches
 	if recoveredAddress != expectedAddress {
@@ -167,6 +164,6 @@ func VerifyEthSignature(data []byte, signature []byte, expectedAddress common.Ad
 }
 
 // GetEthAddress returns the Ethereum address for a given public key
-func GetEthAddress(publicKey *ecdsa.PublicKey) common.Address {
-	return crypto.PubkeyToAddress(*publicKey)
+func GetEthAddress(publicKey *ecdsa.PublicKey) Address {
+	return PubkeyToAddress(publicKey)
 }
