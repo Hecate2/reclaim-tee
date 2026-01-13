@@ -23,6 +23,9 @@ func main() {
 	logger := shared.GetTEEKLogger()
 	defer logger.Sync()
 
+	// Start background root CA updater (fetches fresh certs from curl.se daily)
+	StartRootCAUpdater(logger)
+
 	enclaveMode := shared.GetEnvOrDefault("ENCLAVE_MODE", "false") == "true"
 
 	var config *TEEKConfig

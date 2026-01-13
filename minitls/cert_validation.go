@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"net/url"
 
+	"tee-mpc/shared"
+
 	"go.mozilla.org/pkcs7"
 	"go.uber.org/zap"
 )
@@ -73,15 +75,8 @@ func (c *Client) verifyCertificateChainWithDepth(certs []*x509.Certificate, serv
 		intermediates.AddCert(certs[i])
 	}
 
-	// Get system root CA pool
-	roots, err := x509.SystemCertPool()
-	if err != nil {
-		return &CertificateError{
-			Type:    CertErrorSystemRoots,
-			Message: fmt.Sprintf("failed to load system cert pool: %v", err),
-			Err:     err,
-		}
-	}
+	// Get root CA pool (custom if set, otherwise system)
+	roots := shared.GetRootCAPool()
 
 	// Verify certificate chain with hostname
 	opts := x509.VerifyOptions{

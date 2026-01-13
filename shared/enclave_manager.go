@@ -712,6 +712,7 @@ func createVSockHTTPClient(parentCID, internetPort uint32) *http.Client {
 			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 				return manager.CreateInternetConnection(ctx, addr)
 			},
+			TLSClientConfig: GetTLSConfig(),
 			IdleConnTimeout: 30 * time.Second,
 		},
 		Timeout: 30 * time.Second,

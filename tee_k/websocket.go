@@ -36,6 +36,7 @@ type WebSocketConn struct {
 // that connects via vsock internet proxy (CID 3, port 8444)
 func createVSockWebSocketDialer(logger *shared.Logger) *websocket.Dialer {
 	return &websocket.Dialer{
+		TLSClientConfig: shared.GetTLSConfig(),
 		NetDial: func(network, addr string) (net.Conn, error) {
 			logger.Info("VSock WebSocket dial: connecting to proxy",
 				zap.String("target", addr),

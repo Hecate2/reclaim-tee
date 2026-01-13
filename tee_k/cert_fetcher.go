@@ -105,6 +105,7 @@ func (f *VSockProxyFetcher) FetchCertificate(urlStr string) ([]byte, error) {
 			// Use VSockConnectionManager to create internet connection
 			return f.connectionMgr.CreateInternetConnection(ctx, host)
 		},
+		TLSClientConfig: shared.GetTLSConfig(),
 	}
 
 	// Create HTTP client with custom transport
