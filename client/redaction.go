@@ -291,7 +291,7 @@ func (c *Client) finalizeRedactionSpec(ranges []shared.ResponseRedactionRange) s
 	// Consolidate overlapping ranges
 	consolidated := shared.ConsolidateResponseRedactionRanges(ranges)
 
-	c.logger.Info("✅ [REDACTION] Final redaction spec generated",
+	c.logger.Info("[REDACTION] Final redaction spec generated",
 		zap.Int("original_count", len(ranges)),
 		zap.Int("consolidated_count", len(consolidated)))
 

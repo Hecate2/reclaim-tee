@@ -146,6 +146,9 @@ type Client struct {
 	// Phase 4: Response handling
 	responseSeqNum       uint64 // TLS sequence number for response AEAD
 	firstApplicationData bool   // Track if this is the first ApplicationData record
+	requestSeqNum        uint64 // TLS sequence number for request AEAD (starts at 1 after handshake)
+	fragmentsReceived    int    // Number of request fragments received from TEE_T
+	expectedFragments    int    // Total number of request fragments expected (set by first fragment)
 
 	// Protocol completion signaling
 	completionChan chan error // Signals when protocol is complete (nil = success, non-nil = error)
@@ -250,6 +253,7 @@ func NewClient(teekURL string) *Client {
 		// Response processing success tracking
 		responseProcessingSuccessful: false,
 		reconstructedResponseSize:    0,
+		requestSeqNum:                1, // Start at 1 for first application data after handshake
 
 		clientMode:                  ModeAuto, // Default to auto-detect
 		providerParams:              nil,

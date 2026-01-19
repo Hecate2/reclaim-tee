@@ -19,10 +19,10 @@ func startEnclaveMode(config *TEETConfig, logger *shared.Logger) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	logger.Info("Starting enclave mode", zap.String("platform", config.Platform), zap.String("kms_provider", config.KMSProvider))
+	logger.Info("Starting enclave mode", zap.String("kms_provider", config.KMSProvider))
 
 	platformConfig := &shared.PlatformConfig{
-		Platform:         config.Platform,
+		Platform:         "gcp",
 		KMSProvider:      config.KMSProvider,
 		GoogleProjectID:  config.GoogleProjectID,
 		GoogleLocation:   config.GoogleLocation,
@@ -37,12 +37,6 @@ func startEnclaveMode(config *TEETConfig, logger *shared.Logger) {
 		HTTPPort:    uint32(config.HTTPPort),
 		HTTPSPort:   uint32(config.HTTPSPort),
 		Platform:    platformConfig,
-	}
-
-	if config.Platform == "nitro" {
-		enclaveConfig.ParentCID = 3
-		enclaveConfig.InternetPort = 8444
-		enclaveConfig.KMSPort = 5000
 	}
 
 	enclaveManager, err := shared.NewEnclaveManager(ctx, enclaveConfig, config.KMSKey)

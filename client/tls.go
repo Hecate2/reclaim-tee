@@ -19,8 +19,12 @@ func (c *Client) handleHandshakeComplete(msg *shared.Message) {
 	}
 
 	if completeData.Success {
-		c.logger.Info("Handshake completed successfully",
-			zap.Uint16("cipher_suite", completeData.CipherSuite))
+		cs := minitls.GetCipherSuiteInfo(completeData.CipherSuite)
+		if cs != nil {
+			c.logger.Info("Handshake completed successfully",
+				zap.String("cipher_suite", cs.Name),
+				zap.Bool("tls13", cs.IsTLS13))
+		}
 
 		// Store cipher suite for consolidated verification (replaces handshakeDisclosure)
 		c.cipherSuite = completeData.CipherSuite
@@ -76,9 +80,6 @@ func (c *Client) sendRedactedRequest() {
 			}
 		}
 	}
-
-	c.logger.Info("TEE_K redacted request content",
-		zap.String("redacted_request", string(prettyRedactedRequest)))
 
 	// Log redaction ranges details
 	for i, r := range redactedData.RedactionRanges {
@@ -300,28 +301,6 @@ func (c *Client) sendBatchedResponses() error {
 	// Clear the batch after successful send
 	c.batchedResponses = make([]shared.EncryptedResponseData, 0)
 	return nil
-}
-
-// getClientAlertDescription returns alert description strings
-func getClientAlertDescription(code byte) string {
-	switch code {
-	case 0:
-		return "CLOSE_NOTIFY"
-	case 20:
-		return "BAD_RECORD_MAC"
-	case 21:
-		return "DECRYPTION_FAILED"
-	case 22:
-		return "RECORD_OVERFLOW"
-	case 40:
-		return "HANDSHAKE_FAILURE"
-	case 50:
-		return "DECODE_ERROR"
-	case 51:
-		return "DECRYPT_ERROR"
-	default:
-		return "UNKNOWN"
-	}
 }
 
 // removeTLSPadding removes TLS 1.3 padding from decrypted content (TLS 1.2 has no padding)

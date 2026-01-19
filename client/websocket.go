@@ -205,8 +205,8 @@ func (c *Client) handleTEETMessages() {
 		}
 
 		switch p := env.Payload.(type) {
-		case *teeproto.Envelope_EncryptedData:
-			c.handleEncryptedRequest(env.GetSessionId(), p.EncryptedData)
+		case *teeproto.Envelope_BatchedEncryptedData:
+			c.handleBatchedEncryptedRequest(env.GetSessionId(), p.BatchedEncryptedData)
 		case *teeproto.Envelope_SignedMessage:
 			// Handle SignedMessage from TEE_T (T_OUTPUT)
 			sm := p.SignedMessage
@@ -423,57 +423,60 @@ func (c *Client) sendPendingConnectionRequest() error {
 	return nil
 }
 
-// handleEncryptedData handles encrypted data from TEE_T
-func (c *Client) handleEncryptedRequest(sessionID string, encData *teeproto.EncryptedDataResponse) {
-
-	if !encData.GetSuccess() {
-		c.logger.Error("TEE_T reported failure in encrypted data")
+func (c *Client) handleBatchedEncryptedRequest(sessionID string, batchData *teeproto.BatchedEncryptedDataResponse) {
+	if !batchData.GetSuccess() {
+		c.logger.Error("TEE_T reported failure in batched encrypted data")
+		c.terminateConnectionWithError("TEE_T reported failure in batched encrypted data", fmt.Errorf("batchData.Success=false"))
 		return
 	}
 
-	c.logger.Info("Received encrypted request from TEE_T",
-		zap.Int("encrypted_bytes", len(encData.GetEncryptedData())),
-		zap.Int("tag_bytes", len(encData.GetAuthTag())))
+	fragments := batchData.GetFragments()
+	if len(fragments) == 0 {
+		c.logger.Error("TEE_T returned empty fragments in batched encrypted data")
+		c.terminateConnectionWithError("TEE_T returned empty fragments", fmt.Errorf("no fragments in batch response"))
+		return
+	}
 
-	// TEE_T has processed the redacted request and returned encrypted version
+	baseSeqNum := batchData.GetBaseSeqNum()
 
-	// Create TLS record with encrypted data and authentication tag
-	// Format depends on TLS version and cipher suite
-	var payload []byte
+	c.logger.Info("Received batched encrypted request from TEE_T",
+		zap.Int("fragment_count", len(fragments)),
+		zap.Uint64("base_seq_num", baseSeqNum))
 
-	// Create payload based on cipher suite (handles TLS version differences internally)
-	seqNum := uint64(1) // Application data sequence number after handshake
-	payload = minitls.CreateAEADPayload(c.cipherSuite, seqNum, encData.GetEncryptedData(), encData.GetAuthTag())
+	// Process each fragment and send as separate TLS records
+	for i, fragment := range fragments {
+		seqNum := baseSeqNum + uint64(i)
 
-	tlsRecord := minitls.CreateApplicationDataRecord(payload)
+		payload := minitls.CreateAEADPayload(c.cipherSuite, seqNum, fragment.GetEncryptedData(), fragment.GetAuthTag())
+		tlsRecord := minitls.CreateApplicationDataRecord(payload)
 
-	c.logger.Info("Sending TLS record", zap.Int("bytes", len(tlsRecord)))
+		c.logger.Info("Sending TLS record fragment",
+			zap.Int("fragment", i+1),
+			zap.Int("of", len(fragments)),
+			zap.Uint64("seq_num", seqNum),
+			zap.Int("bytes", len(tlsRecord)))
 
-	// TEE_T expects individual TLS records for application data, not raw TCP chunks
-	c.capturedTraffic = append(c.capturedTraffic, tlsRecord)
-	c.logger.Info("Captured outgoing application data record",
-		zap.Int("type", int(tlsRecord[0])),
-		zap.Int("bytes", len(tlsRecord)))
-	c.logger.Info("Total captured records now", zap.Int("count", len(c.capturedTraffic)))
+		c.capturedTraffic = append(c.capturedTraffic, tlsRecord)
 
-	// Send to website via TCP connection
-	if c.tcpConn != nil {
-		n, err := c.tcpConn.Write(tlsRecord)
-		if err != nil {
-			c.logger.Error("Failed to write to TCP connection", zap.Error(err))
+		if c.tcpConn != nil {
+			n, err := c.tcpConn.Write(tlsRecord)
+			if err != nil {
+				c.logger.Error("Failed to write TLS fragment to TCP connection", zap.Error(err))
+				c.terminateConnectionWithError("Failed to write TLS fragment to TCP connection", err)
+				return
+			}
+			c.logger.Info("Sent fragment bytes to website", zap.Int("bytes", n))
+		} else {
+			c.logger.Error("No TCP connection available")
+			c.terminateConnectionWithError("No TCP connection available", fmt.Errorf("TCP connection to target website not established"))
 			return
 		}
-		c.logger.Info("Sent bytes to website", zap.Int("bytes", n))
-
-		// Mark that HTTP request has been sent and we're expecting a response
-		c.httpRequestSent = true
-		c.httpResponseExpected = true
-		c.logger.Info("HTTP request sent, now expecting HTTP response...")
-
-	} else {
-		c.logger.Error("No TCP connection available")
-		c.terminateConnectionWithError("No TCP connection available", fmt.Errorf("TCP connection to target website not established"))
 	}
+
+	// Mark request as sent after all fragments are sent
+	c.httpRequestSent = true
+	c.httpResponseExpected = true
+	c.logger.Info("HTTP request sent (all fragments)", zap.Int("total_fragments", len(fragments)))
 }
 
 // validateTranscriptsAgainstCapturedTraffic performs comprehensive validation of signed transcripts

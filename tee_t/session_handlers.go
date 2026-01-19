@@ -83,12 +83,21 @@ func (t *TEET) handleRedactionStreams(sessionID string, msg *shared.Message) err
 	}
 
 	teetState2, err := t.getTEETSessionState(sessionID)
-	if err == nil && teetState2.PendingEncryptedRequest != nil {
-		t.logger.Info("Processing pending encrypted request with newly received streams", zap.String("session_id", sessionID))
-		if procErr := t.processEncryptedRequestWithStreams(sessionID, teetState2.PendingEncryptedRequest); procErr != nil {
-			return procErr
+	if err == nil && (teetState2.PendingEncryptedRequest != nil || len(teetState2.PendingEncryptedFragments) > 0) {
+		t.logger.Info("Processing pending encrypted request(s) with newly received streams", zap.String("session_id", sessionID))
+
+		// Process fragments if available, otherwise process single request
+		if len(teetState2.PendingEncryptedFragments) > 0 {
+			if procErr := t.processEncryptedFragmentsWithStreams(sessionID); procErr != nil {
+				return procErr
+			}
+			teetState2.PendingEncryptedFragments = make(map[uint64]*shared.EncryptedRequestData)
+		} else if teetState2.PendingEncryptedRequest != nil {
+			if procErr := t.processEncryptedRequestWithStreams(sessionID, teetState2.PendingEncryptedRequest); procErr != nil {
+				return procErr
+			}
+			teetState2.PendingEncryptedRequest = nil
 		}
-		teetState2.PendingEncryptedRequest = nil
 	}
 
 	t.logger.Debug("handleRedactionStreams completed for session",
@@ -271,30 +280,34 @@ func (t *TEET) handleKeyShareRequestSession(msg *shared.Message) error {
 	return nil
 }
 
-// handleEncryptedRequest handles encrypted request from TEE_K
-func (t *TEET) handleEncryptedRequest(msg *shared.Message) error {
+// handleBatchedEncryptedRequest handles batched encrypted request from TEE_K
+func (t *TEET) handleBatchedEncryptedRequest(msg *shared.Message) error {
 	sessionID := msg.SessionID
 	if sessionID == "" {
-		err := fmt.Errorf("encrypted request missing session ID")
-		t.terminateSessionWithError("", shared.ReasonMissingSessionID, err, "Encrypted request missing session ID")
+		err := fmt.Errorf("batched encrypted request missing session ID")
+		t.terminateSessionWithError("", shared.ReasonMissingSessionID, err, "Batched encrypted request missing session ID")
 		return err
 	}
-	t.logger.Info("Handling encrypted request for session", zap.String("session_id", sessionID))
-	var encReq shared.EncryptedRequestData
-	if err := msg.UnmarshalData(&encReq); err != nil {
-		t.terminateSessionWithError(sessionID, shared.ReasonMessageParsingFailed, err, "Failed to unmarshal encrypted request")
+
+	t.logger.Info("Handling batched encrypted request for session", zap.String("session_id", sessionID))
+
+	var batchedReq shared.BatchedEncryptedRequestData
+	if err := msg.UnmarshalData(&batchedReq); err != nil {
+		t.terminateSessionWithError(sessionID, shared.ReasonMessageParsingFailed, err, "Failed to unmarshal batched encrypted request")
 		return err
 	}
-	t.logger.Info("Computing tag for encrypted request",
+
+	t.logger.Info("Received batched encrypted request",
 		zap.String("session_id", sessionID),
-		zap.Int("ciphertext_bytes", len(encReq.EncryptedData)),
-		zap.Uint64("seq_num", encReq.SeqNum),
-		zap.Int("redaction_ranges", len(encReq.RedactionRanges)))
+		zap.Int("fragment_count", len(batchedReq.Fragments)),
+		zap.Uint64("base_seq_num", batchedReq.BaseSeqNum))
+
 	session, err := t.sessionManager.GetSession(sessionID)
 	if err != nil {
 		t.terminateSessionWithError(sessionID, shared.ReasonSessionNotFound, err, "Failed to get session")
 		return err
 	}
+
 	if session.RedactionState == nil {
 		session.RedactionState = &shared.RedactionSessionState{}
 	}
@@ -303,27 +316,60 @@ func (t *TEET) handleEncryptedRequest(msg *shared.Message) error {
 			PendingEncryptedResponses: make(map[uint64]*shared.EncryptedResponseData),
 		}
 	}
-	session.RedactionState.Ranges = encReq.RedactionRanges
-	session.RedactionState.ExpectedCommitments = encReq.Commitments
-	t.logger.Info("Stored expected commitments from TEE_K",
-		zap.String("session_id", sessionID),
-		zap.Int("commitment_count", len(encReq.Commitments)))
+
+	// Store commitments and redaction ranges from the first fragment
+	if len(batchedReq.Fragments) > 0 {
+		session.RedactionState.Ranges = batchedReq.Fragments[0].RedactionRanges
+		session.RedactionState.ExpectedCommitments = batchedReq.Commitments
+
+		t.logger.Info("Stored expected commitments from batched request",
+			zap.String("session_id", sessionID),
+			zap.Int("commitment_count", len(batchedReq.Commitments)))
+	}
+
 	if err := t.verifyCommitmentsIfReady(sessionID); err != nil {
 		t.terminateSessionWithError(sessionID, shared.ReasonCryptoCommitmentFailed, err, "Commitment verification failed")
 		return err
 	}
-	if len(session.RedactionState.RedactionStreams) == 0 {
-		teetState, err := t.getTEETSessionState(sessionID)
-		if err != nil {
-			t.terminateSessionWithError(sessionID, shared.ReasonSessionStateCorrupted, err, "Failed to get TEE_T session state")
-			return err
-		}
-		teetState.PendingEncryptedRequest = &encReq
-		t.logger.Info("Storing encrypted request for session, waiting for redaction streams...",
-			zap.String("session_id", sessionID))
-		return nil
+
+	teetState, err := t.getTEETSessionState(sessionID)
+	if err != nil {
+		t.terminateSessionWithError(sessionID, shared.ReasonSessionStateCorrupted, err, "Failed to get TEE_T session state")
+		return err
 	}
-	return t.processEncryptedRequestWithStreams(sessionID, &encReq)
+
+	// Initialize fragment map if needed
+	if teetState.PendingEncryptedFragments == nil {
+		teetState.PendingEncryptedFragments = make(map[uint64]*shared.EncryptedRequestData)
+	}
+
+	// Store all fragments
+	for i, fragment := range batchedReq.Fragments {
+		seqNum := batchedReq.BaseSeqNum + uint64(i)
+		// Update fragment with calculated sequence number and cipher suite
+		fragmentCopy := fragment
+		fragmentCopy.SeqNum = seqNum
+		fragmentCopy.CipherSuite = batchedReq.CipherSuite
+		teetState.PendingEncryptedFragments[seqNum] = &fragmentCopy
+
+		t.logger.Debug("Stored fragment from batch",
+			zap.String("session_id", sessionID),
+			zap.Uint64("seq_num", seqNum),
+			zap.Int("fragment_index", i))
+	}
+
+	t.logger.Info("Stored all fragments from batched request",
+		zap.String("session_id", sessionID),
+		zap.Int("total_fragments", len(batchedReq.Fragments)))
+
+	// If redaction streams are available, process immediately
+	if len(session.RedactionState.RedactionStreams) > 0 {
+		return t.processEncryptedFragmentsWithStreams(sessionID)
+	}
+
+	t.logger.Info("Waiting for redaction streams to process batched fragments",
+		zap.String("session_id", sessionID))
+	return nil
 }
 
 // handleBatchedTagSecrets handles batched tag secrets from TEE_K
@@ -512,12 +558,189 @@ func (t *TEET) processEncryptedRequestWithStreams(sessionID string, encReq *shar
 		zap.Int("data_length", len(reconstructedData)),
 		zap.Binary("first_32_bytes", reconstructedData[:min(32, len(reconstructedData))]))
 	envResp := &teeproto.Envelope{SessionId: sessionID, TimestampMs: time.Now().UnixMilli(),
-		Payload: &teeproto.Envelope_EncryptedData{EncryptedData: &teeproto.EncryptedDataResponse{EncryptedData: reconstructedData, AuthTag: authTag, Success: true}},
+		Payload: &teeproto.Envelope_BatchedEncryptedData{BatchedEncryptedData: &teeproto.BatchedEncryptedDataResponse{
+			Fragments:  []*teeproto.EncryptedDataResponse{{EncryptedData: reconstructedData, AuthTag: authTag, Success: true}},
+			BaseSeqNum: encReq.SeqNum,
+			Success:    true,
+		}},
 	}
 	if err := t.sessionManager.RouteToClient(sessionID, envResp); err != nil {
 		t.terminateSessionWithError(sessionID, shared.ReasonNetworkFailure, err, "Failed to send encrypted data to client")
 		return err
 	}
+	return nil
+}
+
+// processEncryptedFragmentsWithStreams processes multiple encrypted fragments with available redaction streams
+func (t *TEET) processEncryptedFragmentsWithStreams(sessionID string) error {
+	session, err := t.sessionManager.GetSession(sessionID)
+	if err != nil {
+		t.terminateSessionWithError(sessionID, shared.ReasonSessionNotFound, err, "Failed to get session")
+		return err
+	}
+
+	teetState, err := t.sessionManager.GetTEETSessionState(sessionID)
+	if err != nil {
+		t.terminateSessionWithError(sessionID, shared.ReasonSessionStateCorrupted, err, "Failed to get TEE_T session state")
+		return err
+	}
+
+	if len(teetState.PendingEncryptedFragments) == 0 {
+		t.logger.Info("No fragments to process", zap.String("session_id", sessionID))
+		return nil
+	}
+
+	if len(teetState.PendingEncryptedFragments) == 1 {
+		// Single fragment - use existing logic
+		for _, fragment := range teetState.PendingEncryptedFragments {
+			return t.processEncryptedRequestWithStreams(sessionID, fragment)
+		}
+	}
+
+	t.logger.Info("Processing multiple encrypted fragments with available redaction streams",
+		zap.String("session_id", sessionID),
+		zap.Int("fragment_count", len(teetState.PendingEncryptedFragments)))
+
+	// Sort fragments by sequence number
+	var seqNums []uint64
+	for seqNum := range teetState.PendingEncryptedFragments {
+		seqNums = append(seqNums, seqNum)
+	}
+	for i := 0; i < len(seqNums)-1; i++ {
+		for j := i + 1; j < len(seqNums); j++ {
+			if seqNums[i] > seqNums[j] {
+				seqNums[i], seqNums[j] = seqNums[j], seqNums[i]
+			}
+		}
+	}
+
+	// Verify we have consecutive fragments starting from some base
+	baseSeq := seqNums[0]
+	for i, seqNum := range seqNums {
+		if seqNum != baseSeq+uint64(i) {
+			err := fmt.Errorf("non-consecutive fragments: expected %d, got %d", baseSeq+uint64(i), seqNum)
+			t.terminateSessionWithError(sessionID, shared.ReasonCryptoTagComputationFailed, err, "Non-consecutive fragments")
+			return err
+		}
+	}
+
+	// Process each fragment and collect results
+	var allReconstructedData []byte
+	var allAuthTags []byte
+	cipherSuite := teetState.PendingEncryptedFragments[seqNums[0]].CipherSuite
+
+	for _, seqNum := range seqNums {
+		fragment := teetState.PendingEncryptedFragments[seqNum]
+
+		// Verify cipher suite consistency
+		if fragment.CipherSuite != cipherSuite {
+			err := fmt.Errorf("cipher suite mismatch in fragment %d: expected %d, got %d", seqNum, cipherSuite, fragment.CipherSuite)
+			t.terminateSessionWithError(sessionID, shared.ReasonCryptoTagComputationFailed, err, "Cipher suite mismatch")
+			return err
+		}
+
+		// Process this fragment
+		reconstructedData, err := t.reconstructFullRequestWithStreams(fragment.EncryptedData, fragment.RedactionRanges, session.RedactionState.RedactionStreams)
+		if err != nil {
+			t.terminateSessionWithError(sessionID, shared.ReasonCryptoTagComputationFailed, err, fmt.Sprintf("Failed to reconstruct fragment %d", seqNum))
+			return err
+		}
+
+		// Compute tag for this fragment
+		var additionalData []byte
+		cipherInfo := minitls.GetCipherSuiteInfo(cipherSuite)
+		if cipherInfo != nil && cipherInfo.IsTLS13 {
+			tagSize := 16
+			recordLength := len(reconstructedData) + tagSize
+			additionalData = minitls.CreateAdditionalDataTLS13(recordLength)
+		} else {
+			plaintextLength := len(reconstructedData)
+			additionalData = minitls.CreateAdditionalDataTLS12(fragment.SeqNum, plaintextLength)
+		}
+
+		authTag, err := minitls.ComputeTagFromSecrets(reconstructedData, fragment.TagSecrets, cipherSuite, additionalData)
+		if err != nil {
+			t.terminateSessionWithError(sessionID, shared.ReasonCryptoTagComputationFailed, err, fmt.Sprintf("Failed to compute tag for fragment %d", seqNum))
+			return err
+		}
+
+		t.logger.Info("Processed fragment",
+			zap.String("session_id", sessionID),
+			zap.Uint64("seq_num", seqNum),
+			zap.Int("data_bytes", len(reconstructedData)))
+
+		// Accumulate data and tags
+		allReconstructedData = append(allReconstructedData, reconstructedData...)
+		allAuthTags = append(allAuthTags, authTag...)
+	}
+
+	teetState.CipherSuite = cipherSuite
+	t.logger.Info("Successfully processed all fragments",
+		zap.String("session_id", sessionID),
+		zap.Int("total_data_bytes", len(allReconstructedData)),
+		zap.Int("total_tag_bytes", len(allAuthTags)))
+
+	// Process all fragments and send in a single batch
+	var fragments []*teeproto.EncryptedDataResponse
+
+	for _, seqNum := range seqNums {
+		fragment := teetState.PendingEncryptedFragments[seqNum]
+
+		// Process this specific fragment
+		fragmentReconstructed, err := t.reconstructFullRequestWithStreams(fragment.EncryptedData, fragment.RedactionRanges, session.RedactionState.RedactionStreams)
+		if err != nil {
+			t.terminateSessionWithError(sessionID, shared.ReasonCryptoTagComputationFailed, err, fmt.Sprintf("Failed to reconstruct fragment %d for response", seqNum))
+			return err
+		}
+
+		// Compute tag for this specific fragment
+		var additionalData []byte
+		cipherInfo := minitls.GetCipherSuiteInfo(cipherSuite)
+		if cipherInfo != nil && cipherInfo.IsTLS13 {
+			tagSize := 16
+			recordLength := len(fragmentReconstructed) + tagSize
+			additionalData = minitls.CreateAdditionalDataTLS13(recordLength)
+		} else {
+			plaintextLength := len(fragmentReconstructed)
+			additionalData = minitls.CreateAdditionalDataTLS12(seqNum, plaintextLength)
+		}
+
+		authTag, err := minitls.ComputeTagFromSecrets(fragmentReconstructed, fragment.TagSecrets, cipherSuite, additionalData)
+		if err != nil {
+			t.terminateSessionWithError(sessionID, shared.ReasonCryptoTagComputationFailed, err, fmt.Sprintf("Failed to compute tag for fragment %d response", seqNum))
+			return err
+		}
+
+		fragments = append(fragments, &teeproto.EncryptedDataResponse{
+			EncryptedData: fragmentReconstructed,
+			AuthTag:       authTag,
+			Success:       true,
+		})
+	}
+
+	// Send all fragments in a single message
+	envResp := &teeproto.Envelope{
+		SessionId:   sessionID,
+		TimestampMs: time.Now().UnixMilli(),
+		Payload: &teeproto.Envelope_BatchedEncryptedData{
+			BatchedEncryptedData: &teeproto.BatchedEncryptedDataResponse{
+				Fragments:  fragments,
+				BaseSeqNum: seqNums[0], // First sequence number
+				Success:    true,
+			},
+		},
+	}
+
+	if err := t.sessionManager.RouteToClient(sessionID, envResp); err != nil {
+		t.terminateSessionWithError(sessionID, shared.ReasonNetworkFailure, err, "Failed to send batched encrypted data to client")
+		return err
+	}
+
+	t.logger.Info("Sent batched fragments to client",
+		zap.String("session_id", sessionID),
+		zap.Int("fragment_count", len(fragments)),
+		zap.Uint64("base_seq_num", seqNums[0]))
+
 	return nil
 }
 

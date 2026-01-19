@@ -211,11 +211,6 @@ func (t *TEEK) verifyTEETAttestation(msgBytes []byte, tlsCert []byte) error {
 		if err != nil {
 			return fmt.Errorf("failed to extract userData from GCP attestation: %v", err)
 		}
-	case "nitro":
-		actualUserData, err = shared.ExtractUserDataFromNitroAttestation(attestation.Report)
-		if err != nil {
-			return fmt.Errorf("failed to extract userData from Nitro attestation: %v", err)
-		}
 	default:
 		return fmt.Errorf("unsupported attestation type: %s", attestation.Type)
 	}

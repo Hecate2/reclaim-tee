@@ -40,15 +40,15 @@ message Envelope {
 
     // Split AEAD
     KeyShareRequest key_share_request = 30;
-    EncryptedRequest encrypted_request = 31;
     KeyShareResponse key_share_response = 32;
+    BatchedEncryptedRequest batched_encrypted_request = 33;
 
     // Redaction/TEET
     RedactedRequest redacted_request = 40;
     RedactionStreams redaction_streams = 41;
     RedactionVerification redaction_verification = 44;
     ResponseRedactionSpec response_redaction_spec = 45;
-    EncryptedDataResponse encrypted_data = 42;
+    BatchedEncryptedDataResponse batched_encrypted_data = 43;
 
     // Batches
     BatchedEncryptedResponses batched_encrypted_responses = 50;
@@ -105,6 +105,12 @@ message KeyShareResponse {
   bool success = 2;
 }
 
+message BatchedEncryptedDataResponse {
+  repeated EncryptedDataResponse fragments = 1;
+  uint64 base_seq_num = 2; // Starting sequence number for fragments
+  bool success = 3;
+}
+
 message EncryptedDataResponse {
   bytes encrypted_data = 1; // R_Enc
   bytes auth_tag = 2; // T
@@ -130,6 +136,14 @@ message RedactionStreams {
 // Client to TEE_K: response redaction specification
 message ResponseRedactionSpec {
   repeated ResponseRedactionRange ranges = 1;
+}
+
+// Batched encrypted request for multiple fragments
+message BatchedEncryptedRequest {
+  repeated EncryptedRequest fragments = 1;
+  uint64 base_seq_num = 2; // Starting sequence number
+  uint32 cipher_suite = 3;
+  repeated bytes commitments = 4; // Shared commitments for all fragments
 }
 
 message EncryptedRequest {

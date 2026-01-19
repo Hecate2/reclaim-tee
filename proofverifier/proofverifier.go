@@ -3,7 +3,6 @@
 package proofverifier
 
 import (
-	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -14,7 +13,6 @@ import (
 	teeproto "tee-mpc/proto"
 	"tee-mpc/shared"
 
-	"github.com/anjuna-security/go-nitro-attestation/verifier"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -161,213 +159,184 @@ func replaceRandomGarbageWithAsterisks(content []byte, ranges []shared.ResponseR
 	return result
 }
 
-// ValidateBundleWithOPRFRanges performs verification with optional OPRF ranges for replacement.
-// oprfRanges is a map from range start position to length.
-func ValidateBundleWithOPRFRanges(bundleData []byte, oprfRanges map[int]int) error {
-	fmt.Printf("[Verifier] Validating verification bundle (%d bytes)\n", len(bundleData))
-
-	var bundlePB teeproto.VerificationBundle
-	if err := proto.Unmarshal(bundleData, &bundlePB); err != nil {
-		return fmt.Errorf("failed to decode bundle protobuf: %v", err)
-	}
-
-	// --- SECURITY: Validate required data is present ---
-	if bundlePB.TeekSigned == nil {
-		return fmt.Errorf("SECURITY ERROR: missing TEE_K signed message - verification bundle incomplete")
-	}
-	if bundlePB.TeetSigned == nil {
-		return fmt.Errorf("SECURITY ERROR: missing TEE_T signed message - verification bundle incomplete")
-	}
-
-	// --- Signed message verification ---
-	if err := verifySignedMessage(bundlePB.TeekSigned, "TEE_K"); err != nil {
-		return fmt.Errorf("TEE_K signed message invalid: %v", err)
-	}
-	if err := verifySignedMessage(bundlePB.TeetSigned, "TEE_T"); err != nil {
-		return fmt.Errorf("TEE_T signed message invalid: %v", err)
-	}
-
-	fmt.Println("[Verifier] Comprehensive signature verification successful")
-
-	// --- Timestamp validation ---
-	if err := validateTimestamps(bundlePB.TeekSigned, bundlePB.TeetSigned); err != nil {
-		return fmt.Errorf("timestamp validation failed: %v", err)
-	}
-
-	fmt.Println("[Verifier] Timestamp validation successful")
-
-	// Work directly with protobuf format - no legacy conversion needed!
-
-	if bundlePB.TeekSigned == nil {
-		// SECURITY: Missing proof components compromise verification integrity
-		return fmt.Errorf("critical security failure: TEE_K transcript missing - cannot perform proof stream application")
-	}
-
-	// --- Extract payloads ---
-	var kPayload teeproto.KOutputPayload
-	if err := proto.Unmarshal(bundlePB.TeekSigned.GetBody(), &kPayload); err != nil {
-		return fmt.Errorf("failed to unmarshal TEE_K payload: %v", err)
-	}
-
-	var tPayload teeproto.TOutputPayload
-	if err := proto.Unmarshal(bundlePB.TeetSigned.GetBody(), &tPayload); err != nil {
-		return fmt.Errorf("failed to unmarshal TEE_T payload: %v", err)
-	}
-
-	// --- SIMPLIFIED RESPONSE RECONSTRUCTION ---
-	consolidatedKeystream := kPayload.GetConsolidatedResponseKeystream()
-	consolidatedCiphertext := tPayload.GetConsolidatedResponseCiphertext()
-
-	if len(consolidatedKeystream) != len(consolidatedCiphertext) {
-		return fmt.Errorf("response keystream/ciphertext length mismatch: %d vs %d",
-			len(consolidatedKeystream), len(consolidatedCiphertext))
-	}
-
-	// Direct XOR - NO PACKET PARSING FOR RESPONSE!
-	reconstructedResponse := make([]byte, len(consolidatedCiphertext))
-	for i := range consolidatedCiphertext {
-		reconstructedResponse[i] = consolidatedCiphertext[i] ^ consolidatedKeystream[i]
-	}
-
-	fmt.Printf("[Verifier] Reconstructed %d response bytes via direct XOR\n", len(reconstructedResponse))
-
-	// --- Apply hashed range replacements first (before asterisks) ---
-
-	if bundlePB.OprfVerifications != nil && len(bundlePB.OprfVerifications) > 0 && oprfRanges != nil {
-		reconstructedResponse = replaceOPRFRanges(reconstructedResponse, bundlePB.OprfVerifications, oprfRanges)
-		fmt.Printf("[Verifier] Applied %d OPRF range replacements\n", len(bundlePB.OprfVerifications))
-	}
-
-	// --- Apply response redactions (UNCHANGED) ---
-	if len(kPayload.GetResponseRedactionRanges()) > 0 {
-		var respRanges []shared.ResponseRedactionRange
-		for i, rr := range kPayload.GetResponseRedactionRanges() {
-			respRanges = append(respRanges, shared.ResponseRedactionRange{
-				Start:  int(rr.GetStart()),
-				Length: int(rr.GetLength()),
-			})
-			fmt.Printf("[Verifier] 📋 Range from TEE_K [%d]: start=%d, length=%d, end=%d\n",
-				i, int(rr.GetStart()), int(rr.GetLength()), int(rr.GetStart())+int(rr.GetLength())-1)
-		}
-		consolidatedRanges := shared.ConsolidateResponseRedactionRanges(respRanges)
-		fmt.Printf("[Verifier] 🔧 Consolidated %d ranges into %d ranges\n", len(respRanges), len(consolidatedRanges))
-
-		for i, r := range consolidatedRanges {
-			fmt.Printf("[Verifier] 📋 Consolidated range [%d]: start=%d, length=%d, end=%d\n",
-				i, r.Start, r.Length, r.Start+r.Length-1)
-		}
-
-		fmt.Printf("[Verifier] 🔧 Applying asterisk replacement to %d byte response\n", len(reconstructedResponse))
-		reconstructedResponse = replaceRandomGarbageWithAsterisks(reconstructedResponse, consolidatedRanges, oprfRanges)
-		fmt.Printf("[Verifier] ✅ Applied %d response redaction ranges\n", len(consolidatedRanges))
-	} else {
-		fmt.Printf("[Verifier] ❌ No redaction ranges found in TEE_K payload\n")
-	}
-
-	// --- Display response ---
-	fmt.Println("[Verifier] Reconstructed response:\n---\n" + collapseAsterisks(string(reconstructedResponse)) + "\n---")
-
-	// --- Request reconstruction using TEE_T-signed proof streams ---
-	if len(tPayload.GetRequestProofStreams()) > 0 {
-		fmt.Printf("[Verifier] Found %d R_SP proof streams signed by TEE_T ✅\n", len(tPayload.GetRequestProofStreams()))
-
-		redactedRequest := kPayload.GetRedactedRequest()
-		redactionRanges := kPayload.GetRequestRedactionRanges()
-
-		if len(redactedRequest) > 0 {
-			// Create a copy of the redacted request to apply proof streams
-			revealedRequest := make([]byte, len(redactedRequest))
-			copy(revealedRequest, redactedRequest)
-
-			// Apply proof streams ONLY to sensitive_proof ranges
-			proofStreamIndex := 0
-
-			for _, r := range redactionRanges {
-				if r.GetType() == "sensitive_proof" {
-					if proofStreamIndex >= len(tPayload.GetRequestProofStreams()) {
-						return fmt.Errorf("insufficient TEE_T-signed proof streams for sensitive_proof range")
-					}
-
-					proofStream := tPayload.GetRequestProofStreams()[proofStreamIndex]
-					start := int(r.GetStart())
-					length := int(r.GetLength())
-
-					if start+length > len(revealedRequest) {
-						return fmt.Errorf("proof range [%d:%d] exceeds request length %d", start, start+length, len(revealedRequest))
-					}
-
-					if length != len(proofStream) {
-						return fmt.Errorf("proof stream length mismatch: range needs %d bytes, stream has %d", length, len(proofStream))
-					}
-
-					// Apply XOR to reveal original sensitive_proof data
-					for i := 0; i < length; i++ {
-						revealedRequest[start+i] ^= proofStream[i]
-					}
-
-					fmt.Printf("[Verifier] ✅ Revealed sensitive_proof range [%d:%d] using TEE_T-signed stream\n", start, start+length)
-					proofStreamIndex++
-				}
-			}
-
-			fmt.Printf("[Verifier] Reconstructed request with TEE_T-signed proof streams:\n---\n%s\n---\n", string(revealedRequest))
-		}
-	} else {
-		fmt.Println("[Verifier] No R_SP proof streams - only R_S verification available (sensitive data remains redacted)")
-	}
-
-	// --- Display certificate info ---
-	// SECURITY: Extract certificate info from signed TEE_K payload, not unsigned bundle field
-	certInfo := kPayload.GetCertificateInfo()
-	if certInfo != nil {
-		fmt.Printf("[Verifier] Certificate: %s (issued by %s)\n",
-			certInfo.GetCommonName(), certInfo.GetIssuerCommonName())
-		fmt.Printf("[Verifier] Valid: %s to %s\n",
-			time.Unix(int64(certInfo.GetNotBeforeUnix()), 0).Format(time.RFC3339),
-			time.Unix(int64(certInfo.GetNotAfterUnix()), 0).Format(time.RFC3339))
-	}
-
-	// --- Verify redaction ranges authenticity ---
-	if len(kPayload.GetRequestRedactionRanges()) > 0 {
-		fmt.Printf("[Verifier] Redaction ranges verified ✅ (TEE_K signed %d request and %d response ranges)\n", len(kPayload.GetRequestRedactionRanges()), len(kPayload.GetResponseRedactionRanges()))
-	}
-
-	fmt.Println("[Verifier] Verification complete – success 🥳")
-	return nil
-}
+// // ValidateBundleWithOPRFRanges performs verification with optional OPRF ranges for replacement.
+// // oprfRanges is a map from range start position to length.
+// func ValidateBundleWithOPRFRanges(bundleData []byte, oprfRanges map[int]int) error {
+// 	fmt.Printf("[Verifier] Validating verification bundle (%d bytes)\n", len(bundleData))
+//
+// 	var bundlePB teeproto.VerificationBundle
+// 	if err := proto.Unmarshal(bundleData, &bundlePB); err != nil {
+// 		return fmt.Errorf("failed to decode bundle protobuf: %v", err)
+// 	}
+//
+// 	// --- SECURITY: Validate required data is present ---
+// 	if bundlePB.TeekSigned == nil {
+// 		return fmt.Errorf("SECURITY ERROR: missing TEE_K signed message - verification bundle incomplete")
+// 	}
+// 	if bundlePB.TeetSigned == nil {
+// 		return fmt.Errorf("SECURITY ERROR: missing TEE_T signed message - verification bundle incomplete")
+// 	}
+//
+// 	// --- Signed message verification ---
+// 	if err := verifySignedMessage(bundlePB.TeekSigned, "TEE_K"); err != nil {
+// 		return fmt.Errorf("TEE_K signed message invalid: %v", err)
+// 	}
+// 	if err := verifySignedMessage(bundlePB.TeetSigned, "TEE_T"); err != nil {
+// 		return fmt.Errorf("TEE_T signed message invalid: %v", err)
+// 	}
+//
+// 	fmt.Println("[Verifier] Comprehensive signature verification successful")
+//
+// 	// --- Timestamp validation ---
+// 	if err := validateTimestamps(bundlePB.TeekSigned, bundlePB.TeetSigned); err != nil {
+// 		return fmt.Errorf("timestamp validation failed: %v", err)
+// 	}
+//
+// 	fmt.Println("[Verifier] Timestamp validation successful")
+//
+// 	// Work directly with protobuf format - no legacy conversion needed!
+//
+// 	if bundlePB.TeekSigned == nil {
+// 		// SECURITY: Missing proof components compromise verification integrity
+// 		return fmt.Errorf("critical security failure: TEE_K transcript missing - cannot perform proof stream application")
+// 	}
+//
+// 	// --- Extract payloads ---
+// 	var kPayload teeproto.KOutputPayload
+// 	if err := proto.Unmarshal(bundlePB.TeekSigned.GetBody(), &kPayload); err != nil {
+// 		return fmt.Errorf("failed to unmarshal TEE_K payload: %v", err)
+// 	}
+//
+// 	var tPayload teeproto.TOutputPayload
+// 	if err := proto.Unmarshal(bundlePB.TeetSigned.GetBody(), &tPayload); err != nil {
+// 		return fmt.Errorf("failed to unmarshal TEE_T payload: %v", err)
+// 	}
+//
+// 	// --- SIMPLIFIED RESPONSE RECONSTRUCTION ---
+// 	consolidatedKeystream := kPayload.GetConsolidatedResponseKeystream()
+// 	consolidatedCiphertext := tPayload.GetConsolidatedResponseCiphertext()
+//
+// 	if len(consolidatedKeystream) != len(consolidatedCiphertext) {
+// 		return fmt.Errorf("response keystream/ciphertext length mismatch: %d vs %d",
+// 			len(consolidatedKeystream), len(consolidatedCiphertext))
+// 	}
+//
+// 	// Direct XOR - NO PACKET PARSING FOR RESPONSE!
+// 	reconstructedResponse := make([]byte, len(consolidatedCiphertext))
+// 	for i := range consolidatedCiphertext {
+// 		reconstructedResponse[i] = consolidatedCiphertext[i] ^ consolidatedKeystream[i]
+// 	}
+//
+// 	fmt.Printf("[Verifier] Reconstructed %d response bytes via direct XOR\n", len(reconstructedResponse))
+//
+// 	// --- Apply hashed range replacements first (before asterisks) ---
+//
+// 	if bundlePB.OprfVerifications != nil && len(bundlePB.OprfVerifications) > 0 && oprfRanges != nil {
+// 		reconstructedResponse = replaceOPRFRanges(reconstructedResponse, bundlePB.OprfVerifications, oprfRanges)
+// 		fmt.Printf("[Verifier] Applied %d OPRF range replacements\n", len(bundlePB.OprfVerifications))
+// 	}
+//
+// 	// --- Apply response redactions (UNCHANGED) ---
+// 	if len(kPayload.GetResponseRedactionRanges()) > 0 {
+// 		var respRanges []shared.ResponseRedactionRange
+// 		for i, rr := range kPayload.GetResponseRedactionRanges() {
+// 			respRanges = append(respRanges, shared.ResponseRedactionRange{
+// 				Start:  int(rr.GetStart()),
+// 				Length: int(rr.GetLength()),
+// 			})
+// 			fmt.Printf("[Verifier] 📋 Range from TEE_K [%d]: start=%d, length=%d, end=%d\n",
+// 				i, int(rr.GetStart()), int(rr.GetLength()), int(rr.GetStart())+int(rr.GetLength())-1)
+// 		}
+// 		consolidatedRanges := shared.ConsolidateResponseRedactionRanges(respRanges)
+// 		fmt.Printf("[Verifier] 🔧 Consolidated %d ranges into %d ranges\n", len(respRanges), len(consolidatedRanges))
+//
+// 		for i, r := range consolidatedRanges {
+// 			fmt.Printf("[Verifier] 📋 Consolidated range [%d]: start=%d, length=%d, end=%d\n",
+// 				i, r.Start, r.Length, r.Start+r.Length-1)
+// 		}
+//
+// 		fmt.Printf("[Verifier] 🔧 Applying asterisk replacement to %d byte response\n", len(reconstructedResponse))
+// 		reconstructedResponse = replaceRandomGarbageWithAsterisks(reconstructedResponse, consolidatedRanges, oprfRanges)
+// 		fmt.Printf("[Verifier] ✅ Applied %d response redaction ranges\n", len(consolidatedRanges))
+// 	} else {
+// 		fmt.Printf("[Verifier] ❌ No redaction ranges found in TEE_K payload\n")
+// 	}
+//
+// 	// --- Display response ---
+// 	fmt.Println("[Verifier] Reconstructed response:\n---\n" + collapseAsterisks(string(reconstructedResponse)) + "\n---")
+//
+// 	// --- Request reconstruction using TEE_T-signed proof streams ---
+// 	if len(tPayload.GetRequestProofStreams()) > 0 {
+// 		fmt.Printf("[Verifier] Found %d R_SP proof streams signed by TEE_T ✅\n", len(tPayload.GetRequestProofStreams()))
+//
+// 		redactedRequest := kPayload.GetRedactedRequest()
+// 		redactionRanges := kPayload.GetRequestRedactionRanges()
+//
+// 		if len(redactedRequest) > 0 {
+// 			// Create a copy of the redacted request to apply proof streams
+// 			revealedRequest := make([]byte, len(redactedRequest))
+// 			copy(revealedRequest, redactedRequest)
+//
+// 			// Apply proof streams ONLY to sensitive_proof ranges
+// 			proofStreamIndex := 0
+//
+// 			for _, r := range redactionRanges {
+// 				if r.GetType() == "sensitive_proof" {
+// 					if proofStreamIndex >= len(tPayload.GetRequestProofStreams()) {
+// 						return fmt.Errorf("insufficient TEE_T-signed proof streams for sensitive_proof range")
+// 					}
+//
+// 					proofStream := tPayload.GetRequestProofStreams()[proofStreamIndex]
+// 					start := int(r.GetStart())
+// 					length := int(r.GetLength())
+//
+// 					if start+length > len(revealedRequest) {
+// 						return fmt.Errorf("proof range [%d:%d] exceeds request length %d", start, start+length, len(revealedRequest))
+// 					}
+//
+// 					if length != len(proofStream) {
+// 						return fmt.Errorf("proof stream length mismatch: range needs %d bytes, stream has %d", length, len(proofStream))
+// 					}
+//
+// 					// Apply XOR to reveal original sensitive_proof data
+// 					for i := 0; i < length; i++ {
+// 						revealedRequest[start+i] ^= proofStream[i]
+// 					}
+//
+// 					fmt.Printf("[Verifier] ✅ Revealed sensitive_proof range [%d:%d] using TEE_T-signed stream\n", start, start+length)
+// 					proofStreamIndex++
+// 				}
+// 			}
+//
+// 			fmt.Printf("[Verifier] Reconstructed request with TEE_T-signed proof streams:\n---\n%s\n---\n", string(revealedRequest))
+// 		}
+// 	} else {
+// 		fmt.Println("[Verifier] No R_SP proof streams - only R_S verification available (sensitive data remains redacted)")
+// 	}
+//
+// 	// --- Display certificate info ---
+// 	// SECURITY: Extract certificate info from signed TEE_K payload, not unsigned bundle field
+// 	certInfo := kPayload.GetCertificateInfo()
+// 	if certInfo != nil {
+// 		fmt.Printf("[Verifier] Certificate: %s (issued by %s)\n",
+// 			certInfo.GetCommonName(), certInfo.GetIssuerCommonName())
+// 		fmt.Printf("[Verifier] Valid: %s to %s\n",
+// 			time.Unix(int64(certInfo.GetNotBeforeUnix()), 0).Format(time.RFC3339),
+// 			time.Unix(int64(certInfo.GetNotAfterUnix()), 0).Format(time.RFC3339))
+// 	}
+//
+// 	// --- Verify redaction ranges authenticity ---
+// 	if len(kPayload.GetRequestRedactionRanges()) > 0 {
+// 		fmt.Printf("[Verifier] Redaction ranges verified ✅ (TEE_K signed %d request and %d response ranges)\n", len(kPayload.GetRequestRedactionRanges()), len(kPayload.GetResponseRedactionRanges()))
+// 	}
+//
+// 	fmt.Println("[Verifier] Verification complete – success 🥳")
+// 	return nil
+// }
 
 // verifyAttestationReportETH verifies a protobuf AttestationReport and extracts the ETH address
 func verifyAttestationReportETH(report *teeproto.AttestationReport, expectedSource string) (shared.Address, error) {
 	switch report.Type {
-	case "nitro":
-		sr, err := verifier.NewSignedAttestationReport(bytes.NewReader(report.Report))
-		if err != nil {
-			return shared.Address{}, fmt.Errorf("failed to parse nitro report: %v", err)
-		}
-		if err := verifier.Validate(sr, nil); err != nil {
-			return shared.Address{}, fmt.Errorf("nitro validation failed: %v", err)
-		}
-
-		// Extract ETH address from user data in the attestation document
-		userDataStr := string(sr.Document.UserData)
-		expectedPrefix := fmt.Sprintf("%s_public_key:", strings.ToLower(expectedSource))
-		if !strings.HasPrefix(userDataStr, expectedPrefix) {
-			return shared.Address{}, fmt.Errorf("invalid user data format, expected prefix %s", expectedPrefix)
-		}
-
-		ethAddressHex := userDataStr[len(expectedPrefix):]
-		if !strings.HasPrefix(ethAddressHex, "0x") {
-			return shared.Address{}, fmt.Errorf("invalid ETH address format, expected 0x prefix")
-		}
-
-		if !shared.IsHexAddress(ethAddressHex) {
-			return shared.Address{}, fmt.Errorf("invalid ETH address format: %s", ethAddressHex)
-		}
-
-		ethAddress := shared.HexToAddress(ethAddressHex)
-		fmt.Printf("[Verifier] Extracted ETH address from Nitro attestation: %s\n", ethAddress.Hex())
-		return ethAddress, nil
-
 	case "gcp":
 		// For GCP, we need to extract the ETH address from the attestation token
 		// This is a placeholder - GCP attestation ETH address extraction needs specific implementation

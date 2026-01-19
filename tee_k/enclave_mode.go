@@ -20,18 +20,10 @@ func startEnclaveMode(config *TEEKConfig, logger *shared.Logger) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	logger.Info("Starting enclave mode", zap.String("platform", config.Platform), zap.String("kms_provider", config.KMSProvider))
-
-	// init enclave and replace random with enclave entropy (skip for GCP)
-	if config.Platform == "nitro" {
-		_, err := shared.SafeGetEnclaveHandle()
-		if err != nil {
-			logger.Critical("Error getting enclave handle", zap.Error(err))
-		}
-	}
+	logger.Info("Starting enclave mode", zap.String("kms_provider", config.KMSProvider))
 
 	platformConfig := &shared.PlatformConfig{
-		Platform:         config.Platform,
+		Platform:         "gcp",
 		KMSProvider:      config.KMSProvider,
 		GoogleProjectID:  config.GoogleProjectID,
 		GoogleLocation:   config.GoogleLocation,
@@ -44,15 +36,9 @@ func startEnclaveMode(config *TEEKConfig, logger *shared.Logger) {
 	enclaveConfig := &shared.EnclaveConfig{
 		Domain:      config.Domain,
 		ServiceName: "tee_k",
-		HTTPPort:    8080, // For ACME challenges
-		HTTPSPort:   8443, // For production HTTPS
+		HTTPPort:    80,  // For ACME challenges (standard HTTP port for GCP)
+		HTTPSPort:   443, // For production HTTPS (standard HTTPS port for GCP)
 		Platform:    platformConfig,
-	}
-
-	if config.Platform == "nitro" {
-		enclaveConfig.ParentCID = 3       // Standard parent CID for AWS Nitro Enclaves
-		enclaveConfig.InternetPort = 8444 // Internet proxy port
-		enclaveConfig.KMSPort = 5000      // KMS proxy port
 	}
 
 	enclaveManager, err := shared.NewEnclaveManager(ctx, enclaveConfig, config.KMSKey)
@@ -171,11 +157,8 @@ func setupEnclaveRoutes(teek *TEEK, enclaveManager *shared.EnclaveManager, logge
 			zap.Int("bytes", len(attestationDoc)),
 			zap.Int("base64_chars", len(attestationBase64)))
 
-		// Determine attestation type from platform
-		attestationType := "nitro"
-		if enclaveManager.GetConfig().Platform.Platform == "gcp" {
-			attestationType = "gcp"
-		}
+		// Attestation type is always GCP
+		attestationType := "gcp"
 
 		w.Header().Set("Content-Type", "text/plain")
 		w.Header().Set("X-Enclave-Service", "tee_k")

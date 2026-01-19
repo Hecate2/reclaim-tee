@@ -11,7 +11,6 @@ import (
 	"tee-mpc/shared"
 
 	"github.com/gorilla/websocket"
-	"github.com/mdlayher/vsock"
 	"go.uber.org/zap"
 	"google.golang.org/protobuf/proto"
 )
@@ -32,33 +31,10 @@ type WebSocketConn struct {
 	sessionID   string // Session ID for per-session transcript collection
 }
 
-// createVSockWebSocketDialer creates a custom WebSocket dialer for enclave mode
-// that connects via vsock internet proxy (CID 3, port 8444)
-func createVSockWebSocketDialer(logger *shared.Logger) *websocket.Dialer {
+// createTLSWebSocketDialer creates a WebSocket dialer with TLS config for secure connections
+func createTLSWebSocketDialer() *websocket.Dialer {
 	return &websocket.Dialer{
 		TLSClientConfig: shared.GetTLSConfig(),
-		NetDial: func(network, addr string) (net.Conn, error) {
-			logger.Info("VSock WebSocket dial: connecting to proxy",
-				zap.String("target", addr),
-				zap.Int("proxy_cid", 3),
-				zap.Int("proxy_port", 8444))
-
-			// Connect to internet proxy via vsock
-			conn, err := vsock.Dial(3, 8444, nil)
-			if err != nil {
-				return nil, fmt.Errorf("failed to connect to internet proxy: %v", err)
-			}
-
-			// Send target address to internet proxy
-			logger.Info("Sending target address to internet proxy", zap.String("target", addr))
-			_, err = fmt.Fprintf(conn, "%s\n", addr)
-			if err != nil {
-				conn.Close()
-				return nil, fmt.Errorf("failed to send target address to proxy: %v", err)
-			}
-
-			return conn, nil
-		},
 	}
 }
 
@@ -224,11 +200,13 @@ func (t *TEEK) attemptTEETConnection(sessionID string, attempt int) (*websocket.
 	var conn *websocket.Conn
 	var err error
 
-	if strings.HasPrefix(t.teetURL, "wss://") && strings.Contains(t.teetURL, "reclaimprotocol.org") {
-		logger.Debug("Enclave mode - using VSock dialer")
-		dialer := createVSockWebSocketDialer(t.logger)
+	if strings.HasPrefix(t.teetURL, "wss://") {
+		// Secure connection - use TLS dialer
+		logger.Debug("Using TLS WebSocket dialer")
+		dialer := createTLSWebSocketDialer()
 		conn, _, err = dialer.Dial(t.teetURL, nil)
 	} else {
+		// Standalone mode (ws://) - use default dialer
 		logger.Debug("Standalone mode - using default dialer")
 		conn, _, err = websocket.DefaultDialer.Dial(t.teetURL, nil)
 	}

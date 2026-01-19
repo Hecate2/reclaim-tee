@@ -20,34 +20,48 @@ func (t *TEEK) sendEnvelopeToTEET(sessionID string, env *teeproto.Envelope) erro
 	return t.sendToTEET(sessionID, env)
 }
 
-// sendEncryptedRequestToTEET sends encrypted request data and tag secrets to TEE_T
-func (t *TEEK) sendEncryptedRequestToTEET(sessionID string, encryptedData, tagSecrets []byte, cipherSuite uint16, seqNum uint64, redactionRanges []shared.RequestRedactionRange, commitments [][]byte) error {
-	t.logger.WithSession(sessionID).Info("Sending encrypted request to TEE_T",
-		zap.Int("bytes", len(encryptedData)),
-		zap.Int("ranges", len(redactionRanges)),
-		zap.Int("commitments", len(commitments)))
+// sendBatchedEncryptedRequestToTEET sends multiple encrypted request fragments to TEE_T in a single message
+func (t *TEEK) sendBatchedEncryptedRequestToTEET(sessionID string, fragments []struct {
+	encryptedData   []byte
+	tagSecrets      []byte
+	redactionRanges []shared.RequestRedactionRange
+	seqNum          uint64
+}, cipherSuite uint16, baseSeqNum uint64, commitments [][]byte) error {
 
-	// Convert redaction ranges to protobuf format
-	var pbRanges []*teeproto.RequestRedactionRange
-	for _, r := range redactionRanges {
-		pbRanges = append(pbRanges, &teeproto.RequestRedactionRange{
-			Start:  int32(r.Start),
-			Length: int32(r.Length),
-			Type:   r.Type,
+	t.logger.WithSession(sessionID).Info("Sending batched encrypted request to TEE_T",
+		zap.Int("fragment_count", len(fragments)),
+		zap.Uint64("base_seq_num", baseSeqNum))
+
+	// Build protobuf fragments
+	var pbFragments []*teeproto.EncryptedRequest
+	for _, fragment := range fragments {
+		// Convert redaction ranges to protobuf format
+		var pbRanges []*teeproto.RequestRedactionRange
+		for _, r := range fragment.redactionRanges {
+			pbRanges = append(pbRanges, &teeproto.RequestRedactionRange{
+				Start:  int32(r.Start),
+				Length: int32(r.Length),
+				Type:   r.Type,
+			})
+		}
+
+		pbFragments = append(pbFragments, &teeproto.EncryptedRequest{
+			EncryptedData:   fragment.encryptedData,
+			TagSecrets:      fragment.tagSecrets,
+			RedactionRanges: pbRanges,
+			SeqNum:          fragment.seqNum,
 		})
 	}
 
 	env := &teeproto.Envelope{
 		SessionId:   sessionID,
 		TimestampMs: time.Now().UnixMilli(),
-		Payload: &teeproto.Envelope_EncryptedRequest{
-			EncryptedRequest: &teeproto.EncryptedRequest{
-				EncryptedData:   encryptedData,
-				TagSecrets:      tagSecrets,
-				Commitments:     commitments,
-				CipherSuite:     uint32(cipherSuite),
-				SeqNum:          seqNum,
-				RedactionRanges: pbRanges,
+		Payload: &teeproto.Envelope_BatchedEncryptedRequest{
+			BatchedEncryptedRequest: &teeproto.BatchedEncryptedRequest{
+				Fragments:   pbFragments,
+				BaseSeqNum:  baseSeqNum,
+				CipherSuite: uint32(cipherSuite),
+				Commitments: commitments,
 			},
 		},
 	}

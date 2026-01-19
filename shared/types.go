@@ -65,8 +65,7 @@ const (
 
 	// Phase 2: Split AEAD messages
 	// TEE_K to TEE_T messages
-	MsgKeyShareRequest  MessageType = "key_share_request"
-	MsgEncryptedRequest MessageType = "encrypted_request"
+	MsgKeyShareRequest MessageType = "key_share_request"
 
 	// Phase 3: Client to TEE_T messages
 	MsgRedactedRequest MessageType = "redacted_request"
@@ -91,6 +90,7 @@ const (
 	MsgBatchedTagSecrets         MessageType = "batched_tag_secrets"
 	MsgBatchedTagVerifications   MessageType = "batched_tag_verifications"
 	MsgBatchedDecryptionStreams  MessageType = "batched_decryption_streams"
+	MsgBatchedEncryptedRequest   MessageType = "batched_encrypted_request"
 )
 
 // Message represents a protocol message with session context
@@ -498,4 +498,12 @@ type SignedTranscriptWithStreams struct {
 	SignedTranscript                                       // Embed the existing SignedTranscript structure
 	SignedRedactedStreams []SignedRedactedDecryptionStream `json:"signed_redacted_streams,omitempty"` // Optional redacted streams
 	TotalStreamsCount     int                              `json:"total_streams_count"`               // Total number of streams included
+}
+
+// BatchedEncryptedRequestData contains multiple encrypted request fragments for batch processing
+type BatchedEncryptedRequestData struct {
+	Fragments   []EncryptedRequestData `json:"fragments"`    // Array of encrypted request fragments
+	BaseSeqNum  uint64                 `json:"base_seq_num"` // Starting sequence number for fragments
+	CipherSuite uint16                 `json:"cipher_suite"` // TLS cipher suite
+	Commitments [][]byte               `json:"commitments"`  // Shared commitments for all fragments
 }

@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
-	"os"
 	"time"
 
 	teeproto "tee-mpc/proto"
@@ -44,19 +43,14 @@ func (t *TEET) refreshAttestation() error {
 	}
 	ethAddress := t.signingKeyPair.GetEthAddress()
 	userData := fmt.Sprintf("tee_t_public_key:%s", ethAddress.Hex())
-	platform := os.Getenv("PLATFORM")
 
-	var attestationReport *teeproto.AttestationReport
 	raw, err := t.enclaveManager.GenerateAttestation(context.Background(), []byte(userData))
 	if err != nil {
 		return fmt.Errorf("failed to generate attestation: %v", err)
 	}
 
-	if platform == "gcp" {
-		attestationReport = &teeproto.AttestationReport{Type: "gcp", Report: raw}
-	} else {
-		attestationReport = &teeproto.AttestationReport{Type: "nitro", Report: raw}
-	}
+	// Attestation type is always GCP
+	attestationReport := &teeproto.AttestationReport{Type: "gcp", Report: raw}
 	t.attestationMutex.Lock()
 	t.cachedAttestation = attestationReport
 	t.attestationExpiry = time.Now().Add(5 * time.Minute)
@@ -131,11 +125,8 @@ func (t *TEET) generateAttestationForTEEK() (*teeproto.AttestationReport, error)
 		return nil, fmt.Errorf("failed to generate attestation: %v", err)
 	}
 
-	attestationType := "nitro"
-	platform := os.Getenv("PLATFORM")
-	if platform == "gcp" {
-		attestationType = "gcp"
-	}
+	// Attestation type is always GCP
+	attestationType := "gcp"
 
 	t.logger.Info("Generated attestation for TEE_K",
 		zap.String("type", attestationType),
@@ -183,10 +174,14 @@ func (t *TEET) verifyTEEKAttestation(req *teeproto.TEEKAttestationRequest) error
 	t.logger.Info("TEE_K PCR0 verified", zap.String("pcr0", pcr0))
 
 	// Verify attestation contains TEE_K public key identifier
-	if bytes.Contains(attestation.Report, []byte("tee_k_public_key:")) {
-		t.logger.Info("TEE_K attestation contains valid public key identifier")
+	// For GCP, the public key is in the eat_nonce claim of the JWT
+	userData, err := shared.ExtractUserDataFromGCPAttestation(attestation.Report, t.logger)
+	if err != nil {
+		t.logger.Warn("Failed to extract user data from TEE_K attestation", zap.Error(err))
+	} else if bytes.Contains([]byte(userData), []byte("tee_k_public_key:")) {
+		t.logger.Info("TEE_K attestation contains valid public key identifier", zap.String("userData", userData))
 	} else {
-		t.logger.Warn("TEE_K attestation missing public key identifier")
+		t.logger.Warn("TEE_K attestation missing public key identifier", zap.String("userData", userData))
 	}
 
 	return nil

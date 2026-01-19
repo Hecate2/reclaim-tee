@@ -4,14 +4,10 @@ package shared
 
 import (
 	"context"
-	"encoding/json"
-	"net"
 	"os"
 	"sync"
-	"time"
 
 	"cloud.google.com/go/logging"
-	"github.com/mdlayher/vsock"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
@@ -110,127 +106,6 @@ func (c *gcpCore) Sync() error {
 	return c.logger.Flush()
 }
 
-// cloudwatchCore implements zapcore.Core and writes to CloudWatch via VSock proxy
-type cloudwatchCore struct {
-	conn        net.Conn
-	serviceName string
-	enclaveMode bool
-	fields      []zap.Field
-	mutex       sync.Mutex
-	reconnectMu sync.Mutex
-	parentCID   uint32
-	proxyPort   uint32
-}
-
-func (c *cloudwatchCore) Enabled(level zapcore.Level) bool {
-	return true // Accept all log levels
-}
-
-func (c *cloudwatchCore) With(fields []zapcore.Field) zapcore.Core {
-	// Convert zapcore.Field to zap.Field
-	zapFields := make([]zap.Field, len(fields))
-	for i, f := range fields {
-		zapFields[i] = zap.Field(f)
-	}
-	return &cloudwatchCore{
-		conn:        c.conn,
-		serviceName: c.serviceName,
-		enclaveMode: c.enclaveMode,
-		fields:      append(c.fields, zapFields...),
-		parentCID:   c.parentCID,
-		proxyPort:   c.proxyPort,
-	}
-}
-
-func (c *cloudwatchCore) Check(entry zapcore.Entry, checked *zapcore.CheckedEntry) *zapcore.CheckedEntry {
-	if c.Enabled(entry.Level) {
-		return checked.AddCore(entry, c)
-	}
-	return checked
-}
-
-func (c *cloudwatchCore) Write(entry zapcore.Entry, fields []zapcore.Field) error {
-	// Build log entry payload
-	logFields := make(map[string]interface{})
-
-	// Add persistent fields
-	for _, f := range c.fields {
-		addFieldToPayload(logFields, f)
-	}
-
-	// Add entry fields
-	for _, f := range fields {
-		addFieldToPayload(logFields, zap.Field(f))
-	}
-
-	// Create structured log entry
-	logEntry := map[string]interface{}{
-		"timestamp":    entry.Time.Format(time.RFC3339Nano),
-		"level":        entry.Level.String(),
-		"message":      entry.Message,
-		"service":      c.serviceName,
-		"enclave_mode": c.enclaveMode,
-		"fields":       logFields,
-	}
-
-	data, err := json.Marshal(logEntry)
-	if err != nil {
-		return err
-	}
-
-	// Send to CloudWatch proxy via VSock
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
-
-	// Ensure connection is alive
-	if c.conn == nil {
-		if err := c.reconnect(); err != nil {
-			return err // Silently fail if proxy unavailable
-		}
-	}
-
-	// Write log entry (newline-delimited JSON)
-	_, err = c.conn.Write(append(data, '\n'))
-	if err != nil {
-		// Connection lost, try to reconnect
-		c.conn = nil
-		if reconErr := c.reconnect(); reconErr == nil {
-			_, err = c.conn.Write(append(data, '\n'))
-		}
-	}
-
-	return err
-}
-
-func (c *cloudwatchCore) Sync() error {
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
-
-	if c.conn != nil {
-		// CloudWatch proxy handles flushing
-		return nil
-	}
-	return nil
-}
-
-func (c *cloudwatchCore) reconnect() error {
-	c.reconnectMu.Lock()
-	defer c.reconnectMu.Unlock()
-
-	if c.conn != nil {
-		c.conn.Close()
-	}
-
-	// Connect to CloudWatch proxy via VSock
-	conn, err := vsock.Dial(c.parentCID, c.proxyPort, nil)
-	if err != nil {
-		return err
-	}
-
-	c.conn = conn
-	return nil
-}
-
 func addFieldToPayload(payload map[string]interface{}, field zap.Field) {
 	switch field.Type {
 	case zapcore.StringType:
@@ -257,35 +132,8 @@ func NewLogger(config LoggerConfig) (*Logger, error) {
 	var zapLogger *zap.Logger
 	var err error
 
-	// Check platform for cloud-specific logging
-	platform := os.Getenv("PLATFORM")
-
-	// AWS Nitro: Use CloudWatch via VSock proxy
-	if platform == "nitro" && config.EnclaveMode {
-		parentCID := uint32(3)    // Parent EC2 instance
-		proxyPort := uint32(5001) // CloudWatch proxy port
-
-		// Connect to CloudWatch proxy
-		conn, err := vsock.Dial(parentCID, proxyPort, nil)
-		if err != nil {
-			// Fall back to console logging if proxy unavailable
-			zapConfig := zap.NewProductionConfig()
-			zapConfig.EncoderConfig.TimeKey = "timestamp"
-			zapConfig.EncoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder
-			zapLogger, _ = zapConfig.Build()
-		} else {
-			// Create CloudWatch core that writes to proxy via VSock
-			core := &cloudwatchCore{
-				conn:        conn,
-				serviceName: config.ServiceName,
-				enclaveMode: config.EnclaveMode,
-				parentCID:   parentCID,
-				proxyPort:   proxyPort,
-			}
-
-			zapLogger = zap.New(core)
-		}
-	} else if platform == "gcp" && config.EnclaveMode {
+	// GCP cloud logging for enclave mode
+	if config.EnclaveMode {
 		projectID := os.Getenv("GCP_PROJECT_ID")
 		if projectID == "" {
 			projectID = os.Getenv("GOOGLE_PROJECT_ID") // Fallback

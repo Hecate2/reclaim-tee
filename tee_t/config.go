@@ -18,15 +18,12 @@ type TEETConfig struct {
 	HTTPPort    int    `json:"http_port"`
 	HTTPSPort   int    `json:"https_port"`
 
-	// KMS provider selection
-	KMSProvider     string `json:"kms_provider"` // "aws" or "google"
+	// KMS provider (Google KMS)
+	KMSProvider     string `json:"kms_provider"`
 	GoogleProjectID string `json:"google_project_id,omitempty"`
 	GoogleLocation  string `json:"google_location,omitempty"`
 	GoogleKeyRing   string `json:"google_key_ring,omitempty"`
 	GoogleKeyName   string `json:"google_key_name,omitempty"`
-
-	// Platform selection for attestation ("nitro" or "google_cvm")
-	Platform string `json:"platform,omitempty"`
 }
 
 func LoadTEETConfig() *TEETConfig {
@@ -37,19 +34,15 @@ func LoadTEETConfig() *TEETConfig {
 		log.Printf("Successfully loaded .env file")
 	}
 
-	platform := shared.GetEnvOrDefault("PLATFORM", "nitro")
+	// GCP uses Google KMS
+	kmsProvider := "google"
 
-	kmsProvider := "aws"
-	if platform == "gcp" {
-		kmsProvider = "google"
-	}
-
-	log.Printf("Configuration loaded - Platform: %s, KMSProvider: %s (derived)", platform, kmsProvider)
+	log.Printf("Configuration loaded - KMSProvider: %s", kmsProvider)
 
 	return &TEETConfig{
 		Port:            shared.GetEnvIntOrDefault("PORT", 8081),
 		EnclaveMode:     shared.GetEnvOrDefault("ENCLAVE_MODE", "false") == "true",
-		Domain:          shared.GetEnvOrDefault("ENCLAVE_DOMAIN", "tee-t.reclaimprotocol.org"),
+		Domain:          shared.GetEnvOrDefault("ENCLAVE_DOMAIN", "tt.reclaimprotocol.org"),
 		KMSKey:          shared.GetEnvOrDefault("KMS_KEY", ""),
 		HTTPPort:        shared.GetEnvIntOrDefault("HTTP_PORT", 80),
 		HTTPSPort:       shared.GetEnvIntOrDefault("HTTPS_PORT", 443),
@@ -58,6 +51,5 @@ func LoadTEETConfig() *TEETConfig {
 		GoogleLocation:  shared.GetEnvOrDefault("GOOGLE_KMS_LOCATION", ""),
 		GoogleKeyRing:   shared.GetEnvOrDefault("GOOGLE_KMS_KEYRING", ""),
 		GoogleKeyName:   shared.GetEnvOrDefault("GOOGLE_KMS_KEY", ""),
-		Platform:        platform,
 	}
 }

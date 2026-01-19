@@ -251,23 +251,23 @@ func main() {
 	logger.Info("Auto-detected TEE_T URL", zap.String("teet_url", teetURL))
 
 	providerParams := &providers.HTTPProviderParams{
-		URL:    "https://sps.unipune.ac.in/app/",
+		URL:    "https://vpic.nhtsa.dot.gov/",
 		Method: "GET",
 		ResponseMatches: []providers.ResponseMatch{
 			{
-				Value: "{{ttt}}",
+				Value: "{{addr}}",
 				Type:  "contains",
 			},
 		},
 		ResponseRedactions: []providers.ResponseRedaction{
 			{
-				XPath: "/html/body/div/div/div/section[3]/div/div/div/div/div/div/div/div[2]/strong[1]",
-				Regex: "(?<ttt>Student Profile System \\(SPS\\))",
+				XPath: "/html/body/footer/div[2]/div/div[1]/ul[3]/li[2]/a",
+				Regex: "href=\"https://(?<addr>www.trafficsafetymarketing.gov)/\"",
 				Hash:  providers.HASH_TYPE_OPRF,
 			},
 		},
 		ParamValues: map[string]string{
-			"ttt": "Student Profile System (SPS)",
+			"addr": "www.trafficsafetymarketing.gov",
 		},
 	}
 

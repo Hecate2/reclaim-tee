@@ -283,7 +283,7 @@ func (ac *AttestorClient) SubmitTeeBundle(verificationBundle *teeproto.Verificat
 	}
 
 	// DEBUG: Log the redacted response as the attestor will see it
-	ac.logAttestorViewOfRedactedResponse(verificationBundle)
+	// ac.logAttestorViewOfRedactedResponse(verificationBundle)
 
 	// 1. Serialize the verification bundle
 	bundleBytes, err := proto.Marshal(verificationBundle)

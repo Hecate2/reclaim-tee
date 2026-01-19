@@ -234,13 +234,13 @@ func (c *Client) buildVerificationBundle() ([]byte, error) {
 						zkInput := oprfData.ZKProofParams.Input
 
 						if bytes.Equal(extractedFromStream, zkInput) {
-							c.logger.Info("✅ INPUT MATCHES - attestor range is correct!",
+							c.logger.Info("INPUT MATCHES - attestor range is correct!",
 								zap.Int("range_start", oprfData.Start),
 								zap.Uint32("stream_pos", streamPos),
 								zap.Uint32("stream_length", streamLength),
 								zap.String("first_16_bytes", fmt.Sprintf("%x", extractedFromStream[:min(16, len(extractedFromStream))])))
 						} else {
-							c.logger.Error("❌ INPUT MISMATCH - range calculation is wrong",
+							c.logger.Error("INPUT MISMATCH - range calculation is wrong",
 								zap.Int("range_start", oprfData.Start),
 								zap.Uint32("stream_pos", streamPos),
 								zap.Uint32("stream_length", streamLength),

@@ -63,6 +63,7 @@ type Config struct {
 }
 
 // supportedVersions returns the list of supported TLS versions for this config
+// Versions are returned in preference order (highest/newest first) per RFC 8446
 func (c *Config) supportedVersions() []uint16 {
 	minVer := c.MinVersion
 	if minVer == 0 {
@@ -75,7 +76,8 @@ func (c *Config) supportedVersions() []uint16 {
 	}
 
 	var versions []uint16
-	for ver := minVer; ver <= maxVer; ver++ {
+	// Iterate in descending order: prefer newer versions (TLS 1.3 before TLS 1.2)
+	for ver := maxVer; ver >= minVer; ver-- {
 		if ver == VersionTLS12 || ver == VersionTLS13 {
 			versions = append(versions, ver)
 		}
@@ -89,26 +91,30 @@ func (c *Config) maxSupportedVersion() uint16 {
 	if len(versions) == 0 {
 		return VersionTLS13 // Default
 	}
-	return versions[len(versions)-1]
+	// versions[0] is the highest since supportedVersions() returns in descending order
+	return versions[0]
 }
 
 // defaultCipherSuites returns the default cipher suites for a given TLS version
+// ChaCha20-Poly1305 is preferred as client runs on mobile (no hardware AES)
 func defaultCipherSuites(version uint16) []uint16 {
 	switch version {
 	case VersionTLS13:
 		return []uint16{
+			TLS_CHACHA20_POLY1305_SHA256,
 			TLS_AES_128_GCM_SHA256,
 			TLS_AES_256_GCM_SHA384,
-			TLS_CHACHA20_POLY1305_SHA256,
 		}
 	case VersionTLS12:
 		return []uint16{
-			TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
-			TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
-			TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
-			TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
-			TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
+			// ECDSA ciphers first (smaller keys, faster on mobile)
 			TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
+			TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+			TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+			// RSA ciphers
+			TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
+			TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+			TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
 		}
 	default:
 		return nil
@@ -189,7 +195,6 @@ type CipherSuiteInfo struct {
 	IVSize    int    // IV/Nonce size in bytes
 	TagSize   int    // Auth tag size in bytes
 	HashFunc  string // Hash function name
-	IsAEAD    bool
 	IsTLS13   bool
 }
 
@@ -201,56 +206,56 @@ func GetCipherSuiteInfo(cipherSuite uint16) *CipherSuiteInfo {
 		return &CipherSuiteInfo{
 			ID: TLS_AES_128_GCM_SHA256, Name: "TLS_AES_128_GCM_SHA256",
 			KeySize: 16, BlockSize: 16, IVSize: 12, TagSize: 16,
-			HashFunc: "SHA256", IsAEAD: true, IsTLS13: true,
+			HashFunc: "SHA256", IsTLS13: true,
 		}
 	case TLS_AES_256_GCM_SHA384:
 		return &CipherSuiteInfo{
 			ID: TLS_AES_256_GCM_SHA384, Name: "TLS_AES_256_GCM_SHA384",
 			KeySize: 32, BlockSize: 16, IVSize: 12, TagSize: 16,
-			HashFunc: "SHA384", IsAEAD: true, IsTLS13: true,
+			HashFunc: "SHA384", IsTLS13: true,
 		}
 	case TLS_CHACHA20_POLY1305_SHA256:
 		return &CipherSuiteInfo{
 			ID: TLS_CHACHA20_POLY1305_SHA256, Name: "TLS_CHACHA20_POLY1305_SHA256",
 			KeySize: 32, BlockSize: 64, IVSize: 12, TagSize: 16,
-			HashFunc: "SHA256", IsAEAD: true, IsTLS13: true,
+			HashFunc: "SHA256", IsTLS13: true,
 		}
 	// TLS 1.2 cipher suites
 	case TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256:
 		return &CipherSuiteInfo{
 			ID: TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256, Name: "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256",
 			KeySize: 16, BlockSize: 16, IVSize: 12, TagSize: 16,
-			HashFunc: "SHA256", IsAEAD: true, IsTLS13: false,
+			HashFunc: "SHA256", IsTLS13: false,
 		}
 	case TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256:
 		return &CipherSuiteInfo{
 			ID: TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256, Name: "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256",
 			KeySize: 16, BlockSize: 16, IVSize: 12, TagSize: 16,
-			HashFunc: "SHA256", IsAEAD: true, IsTLS13: false,
+			HashFunc: "SHA256", IsTLS13: false,
 		}
 	case TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384:
 		return &CipherSuiteInfo{
 			ID: TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384, Name: "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384",
 			KeySize: 32, BlockSize: 16, IVSize: 12, TagSize: 16,
-			HashFunc: "SHA384", IsAEAD: true, IsTLS13: false,
+			HashFunc: "SHA384", IsTLS13: false,
 		}
 	case TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384:
 		return &CipherSuiteInfo{
 			ID: TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384, Name: "TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384",
 			KeySize: 32, BlockSize: 16, IVSize: 12, TagSize: 16,
-			HashFunc: "SHA384", IsAEAD: true, IsTLS13: false,
+			HashFunc: "SHA384", IsTLS13: false,
 		}
 	case TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256:
 		return &CipherSuiteInfo{
 			ID: TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256, Name: "TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256",
 			KeySize: 32, BlockSize: 64, IVSize: 12, TagSize: 16,
-			HashFunc: "SHA256", IsAEAD: true, IsTLS13: false,
+			HashFunc: "SHA256", IsTLS13: false,
 		}
 	case TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256:
 		return &CipherSuiteInfo{
 			ID: TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256, Name: "TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256",
 			KeySize: 32, BlockSize: 64, IVSize: 12, TagSize: 16,
-			HashFunc: "SHA256", IsAEAD: true, IsTLS13: false,
+			HashFunc: "SHA256", IsTLS13: false,
 		}
 	default:
 		return nil
@@ -638,7 +643,7 @@ func putUint24(b []byte, v uint32) {
 	b[2] = byte(v)
 }
 
-func alertDescriptionString(d uint8) string {
+func AlertDescriptionString(d uint8) string {
 	switch d {
 	case alertCloseNotify:
 		return "close_notify"

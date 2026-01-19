@@ -519,6 +519,20 @@ func (m *VSockLegoManager) GetCertificate(hello *tls.ClientHelloInfo) (*tls.Cert
 		return nil, fmt.Errorf("no ACME client available for certificate renewal")
 	}
 
+	// Start HTTP server for ACME challenge if callbacks are configured
+	if m.renewalCallbacks != nil && m.renewalCallbacks.BeforeRenewal != nil {
+		log.Printf("[%s] Starting HTTP server for certificate renewal", m.config.ServiceName)
+		if err := m.renewalCallbacks.BeforeRenewal(context.Background()); err != nil {
+			return nil, fmt.Errorf("failed to start HTTP server for renewal: %v", err)
+		}
+		defer func() {
+			if m.renewalCallbacks.AfterRenewal != nil {
+				log.Printf("[%s] Stopping HTTP server after certificate renewal", m.config.ServiceName)
+				m.renewalCallbacks.AfterRenewal(context.Background())
+			}
+		}()
+	}
+
 	// Request new certificate
 	request := certificate.ObtainRequest{
 		Domains: []string{domain},

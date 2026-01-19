@@ -70,8 +70,6 @@ func (c *Client) createRedactedRequest(httpRequest []byte) (shared.RedactedReque
 			prettyReq[i] = '*'
 		}
 	}
-	c.logger.Debug("Redacted request (pretty)",
-		zap.String("request", string(prettyReq)))
 
 	c.logger.Debug("Non-sensitive parts (unchanged)")
 	lines := strings.Split(string(httpRequest), "\r\n")

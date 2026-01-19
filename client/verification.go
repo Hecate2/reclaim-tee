@@ -170,10 +170,28 @@ func (c *Client) reconstructHTTPResponseFromDecryptedData() error {
 
 			fullResponse = append(fullResponse, parsed.ActualContent...)
 		} else if parsed.ContentType != minitls.RecordTypeApplicationData {
-			c.logger.Warn("Skipping non-ApplicationData content",
+			c.logger.Debug("Skipping non-ApplicationData content",
 				zap.Uint64("seq_num", seqNum),
 				zap.Uint8("content_type", parsed.ContentType),
-				zap.String("content_type_name", getContentTypeName(parsed.ContentType)))
+				zap.String("content_type_name", getContentTypeName(parsed.ContentType)),
+				zap.String("preview", fmt.Sprintf("%x", parsed.ActualContent)))
+
+			// If this is an alert (other than close_notify), it indicates an error
+			if parsed.ContentType == minitls.RecordTypeAlert && len(parsed.ActualContent) >= 2 {
+				alertLevel := parsed.ActualContent[0]
+				alertDesc := parsed.ActualContent[1]
+
+				// close_notify (level=1, desc=0) or a warning is normal, everything else is an error
+				if alertLevel == 2 { // Fatal
+					alertName := minitls.AlertDescriptionString(alertDesc)
+					err := fmt.Errorf("TLS alert received: level=%d, desc=%d (%s)", alertLevel, alertDesc, alertName)
+					c.logger.Error("Server sent TLS alert instead of HTTP response",
+						zap.Uint8("alert_level", alertLevel),
+						zap.Uint8("alert_desc", alertDesc),
+						zap.String("alert_name", alertName))
+					return err
+				}
+			}
 		}
 	}
 

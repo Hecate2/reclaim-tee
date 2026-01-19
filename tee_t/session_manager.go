@@ -13,9 +13,11 @@ type TEETSessionState struct {
 	TEETClientConn                 *websocket.Conn
 	KeyShare                       []byte
 	CipherSuite                    uint16
-	PendingEncryptedRequest        *shared.EncryptedRequestData
-	RequestProofStreams            [][]byte // Store R_SP streams for cryptographic signing
-	ConsolidatedResponseCiphertext []byte   // Response ciphertext consolidation
+	PendingEncryptedRequest        *shared.EncryptedRequestData            // Legacy: single request
+	PendingEncryptedFragments      map[uint64]*shared.EncryptedRequestData // New: multiple fragments by sequence number
+	ExpectedFragmentCount          int                                     // Total number of fragments expected
+	RequestProofStreams            [][]byte                                // Store R_SP streams for cryptographic signing
+	ConsolidatedResponseCiphertext []byte                                  // Response ciphertext consolidation
 }
 
 type TEETSessionManager struct {

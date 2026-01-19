@@ -1768,14 +1768,14 @@ func (c *Client) parseResponseRecords(serverAEAD *AEAD) (appData []byte, consume
 							}
 							c.logger.Debug("TLS Alert",
 								zap.String("level", levelStr),
-								zap.String("description", alertDescriptionString(alertDescription)))
+								zap.String("description", AlertDescriptionString(alertDescription)))
 
 							// In strict fail-fast mode, ANY alert should terminate connection
 							if alertLevel == 2 { // Fatal alert
-								return nil, 0, fmt.Errorf("received fatal alert: %s", alertDescriptionString(alertDescription))
-							} else { // Warning alert - also terminate in fail-fast mode
-								return nil, 0, fmt.Errorf("received warning alert (fail-fast mode): %s", alertDescriptionString(alertDescription))
+								return nil, 0, fmt.Errorf("received fatal alert: %s", AlertDescriptionString(alertDescription))
 							}
+							// Warning alert - also terminate in fail-fast mode
+							return nil, 0, fmt.Errorf("received warning alert (fail-fast mode): %s", AlertDescriptionString(alertDescription))
 						}
 					}
 				}

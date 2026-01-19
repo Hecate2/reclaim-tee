@@ -20,12 +20,25 @@ RUN go build --ldflags '-s -w -extldflags=-static' -tags 'enclave osusergo netgo
 
 FROM scratch
 
-# Copy CA certificates
+# Copy CA certificates for HTTPS
 COPY --from=app-builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+
 # Copy TEE_K enclave binary
-COPY --from=app-builder /app/tee_k/tee_k_enclave .
+COPY --from=app-builder /app/tee_k/tee_k_enclave /tee_k_enclave
 # Copy environment configuration
 COPY deploy/tee_k.env /.env
 
+# Declare environment variables that can be overridden at runtime
+# This is required for GCP Confidential Space
+ENV EXPECTED_TEET_PCR0=""
+ENV ENCLAVE_DOMAIN=""
+ENV TEET_URL=""
+
+# GCP Confidential Space launch policy: allow these env vars to be overridden
+LABEL "tee.launch_policy.allow_env_override"="EXPECTED_TEET_PCR0,ENCLAVE_DOMAIN,TEET_URL"
+
+# Expose ports
+EXPOSE 80 443
+
 # Set entrypoint
-CMD ["./tee_k_enclave"] 
+ENTRYPOINT ["/tee_k_enclave"] 
