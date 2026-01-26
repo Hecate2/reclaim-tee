@@ -53,9 +53,9 @@ import (
 	"os"
 	"unsafe"
 
-	"tee-mpc/client"
-	"tee-mpc/providers"
-	"tee-mpc/shared"
+	"github.com/reclaimprotocol/reclaim-tee/client"
+	"github.com/reclaimprotocol/reclaim-tee/providers"
+	"github.com/reclaimprotocol/reclaim-tee/shared"
 
 	"sync"
 

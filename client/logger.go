@@ -1,7 +1,7 @@
 package client
 
 import (
-	"tee-mpc/shared"
+	"github.com/reclaimprotocol/reclaim-tee/shared"
 
 	"go.uber.org/zap"
 )

@@ -1,8 +1,8 @@
 package client
 
 import (
-	"tee-mpc/providers"
-	"tee-mpc/shared"
+	"github.com/reclaimprotocol/reclaim-tee/providers"
+	"github.com/reclaimprotocol/reclaim-tee/shared"
 	"time"
 )
 

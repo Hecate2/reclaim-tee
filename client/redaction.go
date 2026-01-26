@@ -2,10 +2,10 @@ package client
 
 import (
 	"fmt"
+	"github.com/reclaimprotocol/reclaim-tee/minitls"
+	teeproto "github.com/reclaimprotocol/reclaim-tee/proto"
+	"github.com/reclaimprotocol/reclaim-tee/shared"
 	"sort"
-	"tee-mpc/minitls"
-	teeproto "tee-mpc/proto"
-	"tee-mpc/shared"
 	"time"
 
 	"github.com/gorilla/websocket"

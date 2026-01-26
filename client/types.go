@@ -1,6 +1,6 @@
 package client
 
-import "tee-mpc/shared"
+import "github.com/reclaimprotocol/reclaim-tee/shared"
 
 // TLSToHTTPMapping tracks the relationship between TLS and HTTP positions
 type TLSToHTTPMapping struct {

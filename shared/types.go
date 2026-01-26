@@ -3,10 +3,10 @@ package shared
 import (
 	"context"
 	"fmt"
+	teeproto "github.com/reclaimprotocol/reclaim-tee/proto"
 	"reflect"
 	"sort"
 	"sync"
-	teeproto "tee-mpc/proto"
 	"time"
 
 	"github.com/gorilla/websocket"

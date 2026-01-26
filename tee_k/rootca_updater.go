@@ -17,7 +17,7 @@ import (
 	"strings"
 	"time"
 
-	"tee-mpc/shared"
+	"github.com/reclaimprotocol/reclaim-tee/shared"
 
 	"github.com/gorilla/websocket"
 	"go.uber.org/zap"

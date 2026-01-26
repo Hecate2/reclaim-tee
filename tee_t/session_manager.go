@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"sync"
 
-	"tee-mpc/shared"
+	"github.com/reclaimprotocol/reclaim-tee/shared"
 
 	"github.com/gorilla/websocket"
 )

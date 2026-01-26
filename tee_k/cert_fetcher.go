@@ -6,8 +6,8 @@ import (
 	"net/http"
 	"time"
 
-	"tee-mpc/minitls"
-	"tee-mpc/shared"
+	"github.com/reclaimprotocol/reclaim-tee/minitls"
+	"github.com/reclaimprotocol/reclaim-tee/shared"
 )
 
 // StandardHTTPFetcher fetches certificates using standard HTTP client

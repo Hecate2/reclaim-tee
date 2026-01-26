@@ -5,11 +5,11 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"github.com/reclaimprotocol/reclaim-tee/shared"
 	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
-	"tee-mpc/shared"
 	"time"
 
 	"go.uber.org/zap"

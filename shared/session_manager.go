@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	teeproto "tee-mpc/proto"
+	teeproto "github.com/reclaimprotocol/reclaim-tee/proto"
 
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"

@@ -2,7 +2,7 @@ package providers
 
 import (
 	"encoding/json"
-	"tee-mpc/shared"
+	"github.com/reclaimprotocol/reclaim-tee/shared"
 )
 
 var oprfHashType = "oprf"

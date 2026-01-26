@@ -6,7 +6,7 @@ import (
 	"crypto/tls"
 	"fmt"
 
-	teeproto "tee-mpc/proto"
+	teeproto "github.com/reclaimprotocol/reclaim-tee/proto"
 
 	"github.com/gorilla/websocket"
 )

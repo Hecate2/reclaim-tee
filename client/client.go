@@ -3,12 +3,12 @@ package client
 import (
 	"encoding/json"
 	"fmt"
+	teeproto "github.com/reclaimprotocol/reclaim-tee/proto"
+	"github.com/reclaimprotocol/reclaim-tee/providers"
+	"github.com/reclaimprotocol/reclaim-tee/shared"
 	"net"
 	"sync"
 	"sync/atomic"
-	teeproto "tee-mpc/proto"
-	"tee-mpc/providers"
-	"tee-mpc/shared"
 	"time"
 
 	"github.com/gorilla/websocket"

@@ -3,8 +3,8 @@ package providers
 import (
 	"encoding/base64"
 	"fmt"
+	"github.com/reclaimprotocol/reclaim-tee/shared"
 	"regexp"
-	"tee-mpc/shared"
 
 	"go.uber.org/zap"
 )

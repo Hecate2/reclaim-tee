@@ -1,4 +1,4 @@
-module tee-mpc
+module github.com/reclaimprotocol/reclaim-tee
 
 go 1.25.3
 

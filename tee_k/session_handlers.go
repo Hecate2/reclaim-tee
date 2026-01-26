@@ -5,8 +5,8 @@ import (
 	"strings"
 	"time"
 
-	teeproto "tee-mpc/proto"
-	"tee-mpc/shared"
+	teeproto "github.com/reclaimprotocol/reclaim-tee/proto"
+	"github.com/reclaimprotocol/reclaim-tee/shared"
 
 	"go.uber.org/zap"
 )

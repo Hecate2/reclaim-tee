@@ -4,9 +4,9 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"github.com/reclaimprotocol/reclaim-tee/shared"
 	"regexp"
 	"strings"
-	"tee-mpc/shared"
 	"testing"
 )
 

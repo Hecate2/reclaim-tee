@@ -5,10 +5,10 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"github.com/reclaimprotocol/reclaim-tee/minitls"
+	teeproto "github.com/reclaimprotocol/reclaim-tee/proto"
+	"github.com/reclaimprotocol/reclaim-tee/providers"
 	"sort"
-	"tee-mpc/minitls"
-	teeproto "tee-mpc/proto"
-	"tee-mpc/providers"
 
 	prover "github.com/reclaimprotocol/zk-symmetric-crypto/gnark/libraries/prover/impl"
 	"go.uber.org/zap"

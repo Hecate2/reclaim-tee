@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"tee-mpc/shared"
+	"github.com/reclaimprotocol/reclaim-tee/shared"
 )
 
 // TestTLS12Integration tests the complete TLS 1.2 implementation against real servers

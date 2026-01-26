@@ -3,7 +3,7 @@ package shared
 import (
 	"crypto/ecdsa"
 	"fmt"
-	teeproto "tee-mpc/proto"
+	teeproto "github.com/reclaimprotocol/reclaim-tee/proto"
 
 	"google.golang.org/protobuf/proto"
 )

@@ -4,12 +4,12 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"github.com/reclaimprotocol/reclaim-tee/shared"
 	"maps"
 	"net"
 	"net/url"
 	"sort"
 	"strconv"
-	"tee-mpc/shared"
 
 	"go.uber.org/zap"
 )

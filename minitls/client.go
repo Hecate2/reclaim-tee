@@ -9,10 +9,10 @@ import (
 	"crypto/sha512"
 	"crypto/x509"
 	"fmt"
+	teeproto "github.com/reclaimprotocol/reclaim-tee/proto"
+	"github.com/reclaimprotocol/reclaim-tee/shared"
 	"io"
 	"net"
-	teeproto "tee-mpc/proto"
-	"tee-mpc/shared"
 
 	"go.uber.org/zap"
 )

@@ -5,9 +5,9 @@ import (
 	"sort"
 	"time"
 
-	"tee-mpc/minitls"
-	teeproto "tee-mpc/proto"
-	"tee-mpc/shared"
+	"github.com/reclaimprotocol/reclaim-tee/minitls"
+	teeproto "github.com/reclaimprotocol/reclaim-tee/proto"
+	"github.com/reclaimprotocol/reclaim-tee/shared"
 
 	"go.uber.org/zap"
 	"google.golang.org/protobuf/proto"

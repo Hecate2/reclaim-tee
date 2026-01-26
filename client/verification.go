@@ -2,10 +2,10 @@ package client
 
 import (
 	"fmt"
+	"github.com/reclaimprotocol/reclaim-tee/minitls"
+	"github.com/reclaimprotocol/reclaim-tee/shared"
 	"sort"
 	"strings"
-	"tee-mpc/minitls"
-	"tee-mpc/shared"
 
 	"go.uber.org/zap"
 )

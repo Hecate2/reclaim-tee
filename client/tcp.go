@@ -3,11 +3,11 @@ package client
 import (
 	"errors"
 	"fmt"
+	teeproto "github.com/reclaimprotocol/reclaim-tee/proto"
+	"github.com/reclaimprotocol/reclaim-tee/shared"
 	"io"
 	"net"
 	"strings"
-	teeproto "tee-mpc/proto"
-	"tee-mpc/shared"
 	"time"
 
 	"go.uber.org/zap"

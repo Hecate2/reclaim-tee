@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"net/url"
 
-	"tee-mpc/shared"
+	"github.com/reclaimprotocol/reclaim-tee/shared"
 
 	"go.mozilla.org/pkcs7"
 	"go.uber.org/zap"

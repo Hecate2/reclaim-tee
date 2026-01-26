@@ -2,11 +2,11 @@ package client
 
 import (
 	"fmt"
+	"github.com/reclaimprotocol/reclaim-tee/minitls"
+	teeproto "github.com/reclaimprotocol/reclaim-tee/proto"
+	"github.com/reclaimprotocol/reclaim-tee/shared"
 	"net/url"
 	"strings"
-	"tee-mpc/minitls"
-	teeproto "tee-mpc/proto"
-	"tee-mpc/shared"
 	"time"
 
 	"go.uber.org/zap"

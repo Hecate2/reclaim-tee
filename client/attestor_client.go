@@ -5,15 +5,15 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/reclaimprotocol/reclaim-tee/providers"
 	"math/rand/v2"
 	"net/url"
 	"strings"
 	"sync"
-	"tee-mpc/providers"
 	"time"
 
-	teeproto "tee-mpc/proto"
-	"tee-mpc/shared"
+	teeproto "github.com/reclaimprotocol/reclaim-tee/proto"
+	"github.com/reclaimprotocol/reclaim-tee/shared"
 
 	"github.com/gorilla/websocket"
 	"github.com/reclaimprotocol/zk-symmetric-crypto/gnark/utils"

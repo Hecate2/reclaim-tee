@@ -3,9 +3,9 @@ package client
 import (
 	"encoding/json"
 	"fmt"
-	teeproto "tee-mpc/proto"
-	"tee-mpc/providers"
-	"tee-mpc/shared"
+	teeproto "github.com/reclaimprotocol/reclaim-tee/proto"
+	"github.com/reclaimprotocol/reclaim-tee/providers"
+	"github.com/reclaimprotocol/reclaim-tee/shared"
 	"time"
 
 	"go.uber.org/zap"

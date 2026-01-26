@@ -5,8 +5,8 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"fmt"
+	"github.com/reclaimprotocol/reclaim-tee/shared"
 	"strings"
-	"tee-mpc/shared"
 
 	"go.uber.org/zap"
 )

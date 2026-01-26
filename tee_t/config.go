@@ -1,8 +1,8 @@
 package main
 
 import (
+	"github.com/reclaimprotocol/reclaim-tee/shared"
 	"log"
-	"tee-mpc/shared"
 
 	"github.com/joho/godotenv"
 )

@@ -10,7 +10,7 @@ import (
 	"syscall"
 	"time"
 
-	"tee-mpc/shared"
+	"github.com/reclaimprotocol/reclaim-tee/shared"
 
 	"go.uber.org/zap"
 )

@@ -4,9 +4,9 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"github.com/reclaimprotocol/reclaim-tee/shared"
 	"strconv"
 	"strings"
-	"tee-mpc/shared"
 
 	"go.uber.org/zap"
 )

@@ -2,7 +2,7 @@ package main
 
 import (
 	"fmt"
-	"tee-mpc/minitls"
+	"github.com/reclaimprotocol/reclaim-tee/minitls"
 )
 
 // configureCipherSuites configures the TLS config with specific cipher suites

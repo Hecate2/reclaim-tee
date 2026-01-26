@@ -3,8 +3,8 @@ package client
 import (
 	"encoding/json"
 	"fmt"
-	"tee-mpc/minitls"
-	teeproto "tee-mpc/proto"
+	"github.com/reclaimprotocol/reclaim-tee/minitls"
+	teeproto "github.com/reclaimprotocol/reclaim-tee/proto"
 
 	"github.com/consensys/gnark/logger"
 	prover "github.com/reclaimprotocol/zk-symmetric-crypto/gnark/libraries/prover/impl"

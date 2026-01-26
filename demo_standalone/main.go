@@ -2,14 +2,14 @@ package main
 
 import (
 	"fmt"
+	"github.com/reclaimprotocol/reclaim-tee/client"
+	"github.com/reclaimprotocol/reclaim-tee/minitls"
+	"github.com/reclaimprotocol/reclaim-tee/providers"
+	"github.com/reclaimprotocol/reclaim-tee/shared"
 	"log"
 	"os"
 	"path/filepath"
 	"strings"
-	"tee-mpc/client"
-	"tee-mpc/minitls"
-	"tee-mpc/providers"
-	"tee-mpc/shared"
 
 	"github.com/reclaimprotocol/zk-symmetric-crypto/gnark/libraries/prover/impl"
 	"go.uber.org/zap"
