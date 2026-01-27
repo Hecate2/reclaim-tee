@@ -21,3 +21,8 @@ func GetEnvIntOrDefault(key string, defaultValue int) int {
 	}
 	return defaultValue
 }
+
+// GetHTTPSProxyURL returns the HTTPS proxy URL template from env
+func GetHTTPSProxyURL() string {
+	return os.Getenv("HTTPS_PROXY_URL")
+}

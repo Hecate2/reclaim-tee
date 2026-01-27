@@ -3,13 +3,20 @@ package client
 import (
 	"encoding/json"
 	"fmt"
+	"time"
+
+	"github.com/joho/godotenv"
 	teeproto "github.com/reclaimprotocol/reclaim-tee/proto"
 	"github.com/reclaimprotocol/reclaim-tee/providers"
 	"github.com/reclaimprotocol/reclaim-tee/shared"
-	"time"
 
 	"go.uber.org/zap"
 )
+
+func init() {
+	// Load .env file if present (ignore error if absent)
+	_ = godotenv.Load()
+}
 
 // ClientMode represents the operational mode of the client
 type ClientMode int
@@ -60,6 +67,7 @@ func NewReclaimClient(config ClientConfig) *ReclaimClient {
 	// Store config for later use
 	client.forceTLSVersion = config.ForceTLSVersion
 	client.forceCipherSuite = config.ForceCipherSuite
+	client.proxyURL = shared.GetHTTPSProxyURL()
 	client.SetMode(config.Mode)
 
 	// Set provider params for automatic response redactions
@@ -88,8 +96,8 @@ type ConfigJSON struct {
 // Default URLs for TEE services
 const (
 	DefaultAttestorURL = "wss://attestor.reclaimprotocol.org:444/ws"
-	DefaultTEEKURL     = "wss://tee-k.reclaimprotocol.org/ws"
-	DefaultTEETURL     = "wss://tee-t-gcp.reclaimprotocol.org/ws"
+	DefaultTEEKURL     = "wss://tk.reclaimprotocol.org/ws"
+	DefaultTEETURL     = "wss://tt.reclaimprotocol.org/ws"
 )
 
 // NewReclaimClientFromJSON creates a new ReclaimClient with JSON-encoded provider params and optional config

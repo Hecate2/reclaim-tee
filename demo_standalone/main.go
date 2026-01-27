@@ -2,14 +2,15 @@ package main
 
 import (
 	"fmt"
-	"github.com/reclaimprotocol/reclaim-tee/client"
-	"github.com/reclaimprotocol/reclaim-tee/minitls"
-	"github.com/reclaimprotocol/reclaim-tee/providers"
-	"github.com/reclaimprotocol/reclaim-tee/shared"
 	"log"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/reclaimprotocol/reclaim-tee/client"
+	"github.com/reclaimprotocol/reclaim-tee/minitls"
+	"github.com/reclaimprotocol/reclaim-tee/providers"
+	"github.com/reclaimprotocol/reclaim-tee/shared"
 
 	"github.com/reclaimprotocol/zk-symmetric-crypto/gnark/libraries/prover/impl"
 	"go.uber.org/zap"
@@ -251,8 +252,9 @@ func main() {
 	logger.Info("Auto-detected TEE_T URL", zap.String("teet_url", teetURL))
 
 	providerParams := &providers.HTTPProviderParams{
-		URL:    "https://vpic.nhtsa.dot.gov/",
-		Method: "GET",
+		URL:         "https://vpic.nhtsa.dot.gov/",
+		Method:      "GET",
+		GeoLocation: "US",
 		ResponseMatches: []providers.ResponseMatch{
 			{
 				Value: "{{addr}}",

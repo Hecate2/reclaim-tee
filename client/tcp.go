@@ -36,12 +36,21 @@ func (c *Client) sendTCPReady() {
 
 	// Establish TCP connection to website to act as proxy for TEE_K
 	tcpAddr := fmt.Sprintf("%s:%d", c.targetHost, c.targetPort)
-	c.logger.Info("Attempting TCP dial", zap.String("addr", tcpAddr))
+	c.logger.Info("Attempting TCP connection", zap.String("addr", tcpAddr))
 
-	d := net.Dialer{Timeout: time.Second * 5, Deadline: time.Now().Add(time.Second * 5)}
-	tcpConn, err := d.Dial("tcp", tcpAddr)
+	var tcpConn net.Conn
+	var err error
 
-	c.logger.Info("TCP dial completed", zap.Bool("success", err == nil))
+	if c.shouldUseProxy() {
+		// Connect via BrightData proxy
+		tcpConn, err = c.connectViaProxy(c.targetHost, c.targetPort)
+	} else {
+		// Direct connection
+		d := net.Dialer{Timeout: time.Second * 5, Deadline: time.Now().Add(time.Second * 5)}
+		tcpConn, err = d.Dial("tcp", tcpAddr)
+	}
+
+	c.logger.Info("TCP connection completed", zap.Bool("success", err == nil), zap.Bool("via_proxy", c.shouldUseProxy()))
 
 	if err != nil {
 		c.logger.Error("Failed to establish TCP connection to website", zap.Error(err))
