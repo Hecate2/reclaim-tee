@@ -144,8 +144,7 @@ func (c *Client) connectViaProxy(targetHost string, targetPort int) (net.Conn, e
 	connectReq += "\r\n"
 
 	c.logger.Debug("Sending CONNECT request to proxy",
-		zap.String("target", targetAddr),
-		zap.String("request", connectReq))
+		zap.String("target", targetAddr))
 
 	n, err := proxyConn.Write([]byte(connectReq))
 	if err != nil {
