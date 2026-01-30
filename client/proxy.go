@@ -138,7 +138,13 @@ func (c *Client) connectViaProxy(targetHost string, targetPort int) (net.Conn, e
 
 	// Add proxy authentication
 	if username != "" {
-		auth := base64.StdEncoding.EncodeToString([]byte(username + ":" + password))
+		// Append session ID to username if requestId is set (keeps same IP for session)
+		authUsername := username
+		if c.requestId != "" {
+			authUsername = username + "-session-" + c.requestId
+			c.logger.Debug("Using proxy session ID", zap.String("session", c.requestId))
+		}
+		auth := base64.StdEncoding.EncodeToString([]byte(authUsername + ":" + password))
 		connectReq += fmt.Sprintf("Proxy-Authorization: Basic %s\r\n", auth)
 	}
 	connectReq += "\r\n"
