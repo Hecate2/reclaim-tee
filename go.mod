@@ -1,6 +1,6 @@
 module github.com/reclaimprotocol/reclaim-tee
 
-go 1.25.3
+go 1.26
 
 require (
 	cloud.google.com/go/kms v1.25.0

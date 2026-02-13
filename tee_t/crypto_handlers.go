@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/hmac"
 	"crypto/sha256"
+	"crypto/subtle"
 	"fmt"
 
 	"github.com/reclaimprotocol/reclaim-tee/minitls"
@@ -68,15 +69,7 @@ func (t *TEET) verifyTagForResponse(sessionID string, encryptedResp *shared.Encr
 			zap.Error(err))
 		success = false
 	} else {
-		success = len(computedTag) == len(encryptedResp.Tag)
-		if success {
-			for i := 0; i < len(computedTag); i++ {
-				if computedTag[i] != encryptedResp.Tag[i] {
-					success = false
-					break
-				}
-			}
-		}
+		success = subtle.ConstantTimeCompare(computedTag, encryptedResp.Tag) == 1
 		if success {
 			t.logger.Info("Tag verification succeeded",
 				zap.String("session_id", sessionID),

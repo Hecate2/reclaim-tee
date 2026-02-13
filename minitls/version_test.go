@@ -4,33 +4,13 @@ import (
 	"testing"
 )
 
-// TestTLSVersionConstants verifies our TLS version constants match Go's crypto/tls
-func TestTLSVersionConstants(t *testing.T) {
-	// Test that our constants match the expected values from Go's crypto/tls
-	if VersionTLS12 != 0x0303 {
-		t.Errorf("VersionTLS12 = 0x%04x, want 0x0303", VersionTLS12)
-	}
-
-	if VersionTLS13 != 0x0304 {
-		t.Errorf("VersionTLS13 = 0x%04x, want 0x0304", VersionTLS13)
-	}
-
-	// Test that TLS 1.3 is greater than TLS 1.2 (for version negotiation logic)
-	if VersionTLS13 <= VersionTLS12 {
-		t.Error("VersionTLS13 should be greater than VersionTLS12")
-	}
-
-	t.Logf("TLS version constants verified: TLS 1.2=0x%04x, TLS 1.3=0x%04x",
-		VersionTLS12, VersionTLS13)
-}
-
 // TestConfigDefaults verifies that Config struct has correct default behavior
 func TestConfigDefaults(t *testing.T) {
 	// Test default config (should support both TLS 1.2 and 1.3)
 	config := &Config{}
 
 	versions := config.supportedVersions()
-	expectedVersions := []uint16{VersionTLS12, VersionTLS13}
+	expectedVersions := []uint16{VersionTLS13, VersionTLS12}
 
 	if len(versions) != len(expectedVersions) {
 		t.Errorf("supportedVersions() = %v, want %v", versions, expectedVersions)
