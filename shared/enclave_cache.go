@@ -26,7 +26,7 @@ type EnclaveCache struct {
 }
 
 // NewEnclaveCacheWithProvider creates a new enclave cache with GCP Secret Manager
-func NewEnclaveCacheWithProvider(provider KMSProvider, connectionMgr interface{}, serviceName string, platformConfig *PlatformConfig) *EnclaveCache {
+func NewEnclaveCacheWithProvider(provider KMSProvider, connectionMgr any, serviceName string, platformConfig *PlatformConfig) *EnclaveCache {
 	cache := &EnclaveCache{
 		serviceName: serviceName,
 		memoryCache: make(map[string][]byte),

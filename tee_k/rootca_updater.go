@@ -350,19 +350,19 @@ func findPackageInIndex(content []byte) (*pkgInfo, error) {
 	// C:checksum (base64 encoded, Q1 prefix = SHA1)
 	// P:package-name
 	// V:version
-	blocks := strings.Split(string(content), "\n\n")
+	blocks := strings.SplitSeq(string(content), "\n\n")
 
-	for _, block := range blocks {
+	for block := range blocks {
 		lines := strings.Split(block, "\n")
 		var name, version, checksumStr string
 
 		for _, line := range lines {
-			if strings.HasPrefix(line, "P:") {
-				name = strings.TrimPrefix(line, "P:")
-			} else if strings.HasPrefix(line, "V:") {
-				version = strings.TrimPrefix(line, "V:")
-			} else if strings.HasPrefix(line, "C:") {
-				checksumStr = strings.TrimPrefix(line, "C:")
+			if after, ok := strings.CutPrefix(line, "P:"); ok {
+				name = after
+			} else if after, ok := strings.CutPrefix(line, "V:"); ok {
+				version = after
+			} else if after, ok := strings.CutPrefix(line, "C:"); ok {
+				checksumStr = after
 			}
 		}
 

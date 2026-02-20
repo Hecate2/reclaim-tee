@@ -35,7 +35,7 @@ func (c *Client) handleConnectionReady(msg *shared.Message) {
 func (c *Client) sendTCPReady() {
 
 	// Establish TCP connection to website to act as proxy for TEE_K
-	tcpAddr := fmt.Sprintf("%s:%d", c.targetHost, c.targetPort)
+	tcpAddr := net.JoinHostPort(c.targetHost, fmt.Sprintf("%d", c.targetPort))
 	c.logger.Info("Attempting TCP connection", zap.String("addr", tcpAddr))
 
 	var tcpConn net.Conn

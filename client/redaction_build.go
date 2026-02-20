@@ -72,8 +72,8 @@ func (c *Client) createRedactedRequest(httpRequest []byte) (shared.RedactedReque
 	}
 
 	c.logger.Debug("Non-sensitive parts (unchanged)")
-	lines := strings.Split(string(httpRequest), "\r\n")
-	for _, line := range lines {
+	lines := strings.SplitSeq(string(httpRequest), "\r\n")
+	for line := range lines {
 		if strings.HasPrefix(line, "GET ") || strings.HasPrefix(line, "Host: ") ||
 			strings.HasPrefix(line, "Connection: ") || line == "" {
 			c.logger.Debug("Non-sensitive line", zap.String("line", line))
@@ -204,9 +204,9 @@ func (c *Client) parseHTTPResponse(data []byte) *HTTPResponse {
 			break
 		}
 		if i > 0 {
-			if colonIdx := strings.Index(line, ":"); colonIdx != -1 {
-				key := strings.TrimSpace(line[:colonIdx])
-				value := strings.TrimSpace(line[colonIdx+1:])
+			if before, after, ok := strings.Cut(line, ":"); ok {
+				key := strings.TrimSpace(before)
+				value := strings.TrimSpace(after)
 				response.Headers[key] = value
 
 			}

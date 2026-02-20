@@ -294,7 +294,7 @@ func (a *AEAD) Encrypt(plaintext, additionalData []byte) []byte {
 	copy(nonce, a.iv)
 
 	// XOR sequence number into nonce
-	for i := 0; i < 8; i++ {
+	for i := range 8 {
 		nonce[len(nonce)-1-i] ^= byte(a.seq >> (8 * i))
 	}
 
@@ -308,7 +308,7 @@ func (a *AEAD) Decrypt(ciphertext, additionalData []byte) ([]byte, error) {
 	copy(nonce, a.iv)
 
 	// XOR sequence number into nonce
-	for i := 0; i < 8; i++ {
+	for i := range 8 {
 		nonce[len(nonce)-1-i] ^= byte(a.seq >> (8 * i))
 	}
 
@@ -455,7 +455,7 @@ func (sa *SplitAEAD) constructNonce(seqNum uint64) []byte {
 	case TLS_AES_128_GCM_SHA256, TLS_AES_256_GCM_SHA384, TLS_CHACHA20_POLY1305_SHA256:
 		nonce := make([]byte, len(sa.iv))
 		copy(nonce, sa.iv)
-		for i := 0; i < 8; i++ {
+		for i := range 8 {
 			nonce[len(nonce)-1-i] ^= byte(seqNum >> (8 * i))
 		}
 		return nonce
@@ -474,7 +474,7 @@ func (sa *SplitAEAD) constructNonce(seqNum uint64) []byte {
 	case TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256, TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256:
 		nonce := make([]byte, len(sa.iv))
 		copy(nonce, sa.iv)
-		for i := 0; i < 8; i++ {
+		for i := range 8 {
 			nonce[len(nonce)-1-i] ^= byte(seqNum >> (8 * i))
 		}
 		return nonce
@@ -483,7 +483,7 @@ func (sa *SplitAEAD) constructNonce(seqNum uint64) []byte {
 		// Fallback to TLS 1.3 style for unknown cipher suites
 		nonce := make([]byte, len(sa.iv))
 		copy(nonce, sa.iv)
-		for i := 0; i < 8; i++ {
+		for i := range 8 {
 			nonce[len(nonce)-1-i] ^= byte(seqNum >> (8 * i))
 		}
 		return nonce
@@ -637,10 +637,7 @@ func GenerateSingleBlockKeystream(cipherSuite uint16, serverKey, nonce []byte, c
 		}
 		// Extract just the block we need (counter-1 since ChaCha20 counter starts at 1)
 		start := int(counter-1) * blockSize
-		end := start + blockSize
-		if end > len(fullKeystream) {
-			end = len(fullKeystream)
-		}
+		end := min(start+blockSize, len(fullKeystream))
 		return fullKeystream[start:end], nil
 	} else {
 		// AES-GCM: Account for counter offset
@@ -754,7 +751,7 @@ func ComputeTagFromSecrets(ciphertext, tagSecrets []byte, cipherSuite uint16, ad
 
 		// Step 3: Final GCM tag = GHASH ⊕ E_K(IV || 0^31 || 1)
 		tag := make([]byte, 16)
-		for i := 0; i < 16; i++ {
+		for i := range 16 {
 			tag[i] = ghashResult[i] ^ encryptedCounter[i]
 		}
 
@@ -849,7 +846,7 @@ var ghashReductionTable = []uint16{
 
 func ghashMul(productTable *[16]gcmFieldElement, y *gcmFieldElement) {
 	var z gcmFieldElement
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		word := y.high
 		if i == 1 {
 			word = y.low
@@ -928,7 +925,7 @@ func computePoly1305Tag(key []byte, additionalData, ciphertext []byte) ([]byte, 
 
 	// Pad AAD to 16-byte boundary
 	aadPadding := (16 - (len(additionalData) % 16)) % 16
-	for i := 0; i < aadPadding; i++ {
+	for range aadPadding {
 		polyData = append(polyData, 0)
 	}
 
@@ -937,7 +934,7 @@ func computePoly1305Tag(key []byte, additionalData, ciphertext []byte) ([]byte, 
 
 	// Pad ciphertext to 16-byte boundary
 	ctPadding := (16 - (len(ciphertext) % 16)) % 16
-	for i := 0; i < ctPadding; i++ {
+	for range ctPadding {
 		polyData = append(polyData, 0)
 	}
 

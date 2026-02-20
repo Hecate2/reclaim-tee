@@ -403,8 +403,8 @@ func (m *VSockLegoManager) CreateVSockHTTPHandler(fallback http.Handler) http.Ha
 		log.Printf("[%s] VSock HTTP request: %s %s from %s", m.config.ServiceName, r.Method, r.URL.Path, r.RemoteAddr)
 
 		// Check if this is an ACME challenge request
-		if strings.HasPrefix(r.URL.Path, "/.well-known/acme-challenge/") {
-			token := strings.TrimPrefix(r.URL.Path, "/.well-known/acme-challenge/")
+		if after, ok := strings.CutPrefix(r.URL.Path, "/.well-known/acme-challenge/"); ok {
+			token := after
 
 			log.Printf("[%s] VSock ACME challenge request for token: %s", m.config.ServiceName, token[:8]+"...")
 

@@ -145,7 +145,7 @@ func (t *TEET) verifyCommitments(streams, keys, expectedCommitments [][]byte) er
 	if len(expectedCommitments) != len(streams) {
 		return fmt.Errorf("expected commitments length mismatch: expected %d, got %d", len(streams), len(expectedCommitments))
 	}
-	for i := 0; i < len(streams); i++ {
+	for i := range streams {
 		h := hmac.New(sha256.New, keys[i])
 		h.Write(streams[i])
 		computedCommitment := h.Sum(nil)

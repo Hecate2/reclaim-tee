@@ -251,7 +251,7 @@ func (t *TEET) handleTEEKWebSocket(w http.ResponseWriter, r *http.Request) {
 		var msg *shared.Message
 		switch p := env.Payload.(type) {
 		case *teeproto.Envelope_SessionCreated:
-			msg = &shared.Message{SessionID: sessionID, Type: shared.MsgSessionCreated, Data: map[string]interface{}{"session_id": sessionID}}
+			msg = &shared.Message{SessionID: sessionID, Type: shared.MsgSessionCreated, Data: map[string]any{"session_id": sessionID}}
 			activeSessionsMutex.Lock()
 			activeSessions[sessionID] = true
 			activeSessionsMutex.Unlock()

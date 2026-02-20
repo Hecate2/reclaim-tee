@@ -79,6 +79,6 @@ type ConfigurationError struct {
 // ValidationError represents validation errors
 type ValidationError struct {
 	*ReclaimError
-	Field string      `json:"field"` // Field that failed validation
-	Value interface{} `json:"value"` // Invalid value
+	Field string `json:"field"` // Field that failed validation
+	Value any    `json:"value"` // Invalid value
 }

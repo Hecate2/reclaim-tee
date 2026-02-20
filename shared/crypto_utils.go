@@ -19,10 +19,7 @@ func calculateBackoff(attempt int) time.Duration {
 	}
 
 	// Exponential backoff: 2^(attempt-1) * initialDelay
-	delay := time.Duration(float64(initialBackoffDelay) * math.Pow(2, float64(attempt-1)))
-	if delay > maxBackoffDelay {
-		delay = maxBackoffDelay
-	}
+	delay := min(time.Duration(float64(initialBackoffDelay)*math.Pow(2, float64(attempt-1))), maxBackoffDelay)
 
 	// Add crypto-secure jitter (10% of delay)
 	jitter := cryptoJitter(float64(delay) * 0.1)

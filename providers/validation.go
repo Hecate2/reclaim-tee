@@ -25,7 +25,7 @@ func init() {
 
 type urlFormatChecker struct{}
 
-func (urlFormatChecker) IsFormat(input interface{}) bool {
+func (urlFormatChecker) IsFormat(input any) bool {
 	str, ok := input.(string)
 	if !ok {
 		return false
@@ -42,13 +42,13 @@ func (urlFormatChecker) IsFormat(input interface{}) bool {
 
 type binaryFormatChecker struct{}
 
-func (binaryFormatChecker) IsFormat(input interface{}) bool {
+func (binaryFormatChecker) IsFormat(input any) bool {
 	_, ok := input.([]byte)
 	return ok
 }
 
 // ValidateProviderParams mirrors TS assertValidateProviderParams
-func ValidateProviderParams(providerName string, params interface{}) error {
+func ValidateProviderParams(providerName string, params any) error {
 	logger.Info("Starting ValidateProviderParams", zap.String("component", "Validation"), zap.String("operation", "ValidateProviderParams"), zap.String("provider", providerName))
 
 	validatorMutex.RLock()
@@ -106,7 +106,7 @@ func ValidateProviderParams(providerName string, params interface{}) error {
 }
 
 // ValidateProviderSecretParams mirrors TS secret params validation
-func ValidateProviderSecretParams(providerName string, secretParams interface{}) error {
+func ValidateProviderSecretParams(providerName string, secretParams any) error {
 	logger.Info("Starting ValidateProviderSecretParams", zap.String("component", "Validation"), zap.String("operation", "ValidateProviderSecretParams"), zap.String("provider", providerName))
 
 	sch, ok := PROVIDER_SCHEMAS[providerName]
@@ -147,8 +147,8 @@ func ValidateProviderSecretParams(providerName string, secretParams interface{})
 }
 
 // Helper function to validate and unmarshal JSON params in one step
-func ValidateAndUnmarshalParams(providerName string, jsonData []byte, target interface{}) error {
-	var params interface{}
+func ValidateAndUnmarshalParams(providerName string, jsonData []byte, target any) error {
+	var params any
 	if err := json.Unmarshal(jsonData, &params); err != nil {
 		return fmt.Errorf("invalid JSON: %w", err)
 	}
@@ -162,8 +162,8 @@ func ValidateAndUnmarshalParams(providerName string, jsonData []byte, target int
 }
 
 // Helper function for secret params
-func ValidateAndUnmarshalSecretParams(providerName string, jsonData []byte, target interface{}) error {
-	var params interface{}
+func ValidateAndUnmarshalSecretParams(providerName string, jsonData []byte, target any) error {
+	var params any
 	if err := json.Unmarshal(jsonData, &params); err != nil {
 		return fmt.Errorf("invalid JSON: %w", err)
 	}

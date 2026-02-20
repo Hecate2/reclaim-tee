@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
@@ -41,10 +42,8 @@ func validateGeoLocation(geoLocation string) error {
 
 	// Use countries library to validate against known ISO 3166-1 alpha-2 codes
 	code := countries.ISO2CountryCode(strings.ToUpper(geoLocation))
-	for _, valid := range countries.AllISO2Countries {
-		if code == valid {
-			return nil
-		}
+	if slices.Contains(countries.AllISO2Countries, code) {
+		return nil
 	}
 
 	return fmt.Errorf("invalid ISO 3166-1 alpha-2 country code: %q", geoLocation)
@@ -115,7 +114,7 @@ func (c *Client) connectViaProxy(targetHost string, targetPort int) (net.Conn, e
 		zap.String("target", fmt.Sprintf("%s:%d", targetHost, targetPort)))
 
 	// Connect to proxy using plain TCP (HTTP CONNECT)
-	proxyAddr := fmt.Sprintf("%s:%s", proxyHost, proxyPort)
+	proxyAddr := net.JoinHostPort(proxyHost, proxyPort)
 	d := net.Dialer{Timeout: time.Second * 30}
 	proxyConn, err := d.Dial("tcp", proxyAddr)
 	if err != nil {

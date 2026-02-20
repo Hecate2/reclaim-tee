@@ -78,7 +78,7 @@ func (c *gcpCore) Write(entry zapcore.Entry, fields []zapcore.Field) error {
 	}
 
 	// Build payload from fields
-	payload := make(map[string]interface{})
+	payload := make(map[string]any)
 	payload["message"] = entry.Message
 	payload["service"] = c.serviceName
 	payload["enclave_mode"] = c.enclaveMode
@@ -106,7 +106,7 @@ func (c *gcpCore) Sync() error {
 	return c.logger.Flush()
 }
 
-func addFieldToPayload(payload map[string]interface{}, field zap.Field) {
+func addFieldToPayload(payload map[string]any, field zap.Field) {
 	switch field.Type {
 	case zapcore.StringType:
 		payload[field.Key] = field.String

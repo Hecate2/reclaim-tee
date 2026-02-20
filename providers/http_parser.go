@@ -4,9 +4,10 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"github.com/reclaimprotocol/reclaim-tee/shared"
 	"strconv"
 	"strings"
+
+	"github.com/reclaimprotocol/reclaim-tee/shared"
 
 	"go.uber.org/zap"
 )
@@ -210,14 +211,14 @@ func (p *HTTPResponseParser) parseStatusLine(line string) error {
 
 // parseHeaderLine parses a single HTTP header line
 func (p *HTTPResponseParser) parseHeaderLine(line string) error {
-	colonIdx := strings.Index(line, ": ")
-	if colonIdx == -1 {
+	before, after, ok := strings.Cut(line, ": ")
+	if !ok {
 		logger.Warn("Header line missing colon separator", zap.String("component", "Parser"), zap.String("operation", "parseHeaderLine"), zap.String("line", line))
 		return nil // Skip malformed headers
 	}
 
-	key := strings.ToLower(line[:colonIdx])
-	value := line[colonIdx+2:]
+	key := strings.ToLower(before)
+	value := after
 
 	// Store header value for processing
 	p.Response.Headers[key] = value
@@ -377,8 +378,8 @@ func (p *HTTPResponseParser) processChunkedBody() error {
 
 		// Parse chunk size (handle extensions)
 		sizeStr := line
-		if semiIdx := strings.IndexByte(line, ';'); semiIdx != -1 {
-			sizeStr = line[:semiIdx]
+		if before, _, ok := strings.Cut(line, ";"); ok {
+			sizeStr = before
 		}
 		sizeStr = strings.TrimSpace(sizeStr)
 
@@ -430,64 +431,4 @@ func (p *HTTPResponseParser) getLine() (string, bool) {
 	p.currentByteIdx += crlfIdx + 2
 
 	return line, true
-}
-
-// Helper function for min operation
-func min(a, b int64) int64 {
-	if a < b {
-		return a
-	}
-	return b
-}
-
-// MakeHTTPResponseParser creates a new HTTP response parser (TypeScript compatibility)
-func MakeHTTPResponseParser() *HTTPResponseParser {
-	return NewHTTPResponseParser()
-}
-
-// ParseHTTPResponse parses a complete HTTP response (TypeScript compatibility)
-func ParseHTTPResponse(data []byte) (*HTTPParsedResponse, error) {
-	parser := NewHTTPResponseParser()
-
-	if err := parser.OnChunk(data); err != nil {
-		return nil, err
-	}
-
-	if err := parser.StreamEnded(); err != nil {
-		return nil, err
-	}
-
-	return parser.Response, nil
-}
-
-// StreamingHTTPResponseExample shows how to use the streaming parser
-func StreamingHTTPResponseExample() {
-	logger.Info("Demonstrating streaming HTTP response parsing", zap.String("component", "Parser"), zap.String("operation", "Example"))
-
-	// Example usage:
-	parser := NewHTTPResponseParser()
-
-	// Simulate receiving data in chunks
-	chunk1 := []byte("HTTP/1.1 200 OK\r\nContent-Length: 13\r\n\r\nHello")
-	chunk2 := []byte(" World!")
-
-	// Process first chunk
-	if err := parser.OnChunk(chunk1); err != nil {
-		logger.Error("Error processing chunk 1", zap.String("component", "Parser"), zap.String("operation", "Example"), zap.Error(err))
-		return
-	}
-
-	// Process second chunk
-	if err := parser.OnChunk(chunk2); err != nil {
-		logger.Error("Error processing chunk 2", zap.String("component", "Parser"), zap.String("operation", "Example"), zap.Error(err))
-		return
-	}
-
-	// Signal end of stream
-	if err := parser.StreamEnded(); err != nil {
-		logger.Error("Error finalizing response", zap.String("component", "Parser"), zap.String("operation", "Example"), zap.Error(err))
-		return
-	}
-
-	logger.Info("Successfully parsed streaming response", zap.String("component", "Parser"), zap.String("operation", "Example"), zap.Int("status_code", parser.Response.StatusCode), zap.String("body", string(parser.Response.Body)))
 }

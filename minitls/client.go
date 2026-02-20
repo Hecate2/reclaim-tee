@@ -13,6 +13,7 @@ import (
 	"github.com/reclaimprotocol/reclaim-tee/shared"
 	"io"
 	"net"
+	"slices"
 
 	"go.uber.org/zap"
 )
@@ -1167,13 +1168,7 @@ func (c *Client) parseServerHelloExtensions(extensionsData []byte) (*ecdh.Public
 			if len(offeredProtos) == 0 {
 				offeredProtos = []string{"http/1.1"}
 			}
-			validChoice := false
-			for _, proto := range offeredProtos {
-				if proto == c.negotiatedProtocol {
-					validChoice = true
-					break
-				}
-			}
+			validChoice := slices.Contains(offeredProtos, c.negotiatedProtocol)
 			if !validChoice {
 				return nil, fmt.Errorf("ALPN: server selected protocol '%s' that we didn't offer", c.negotiatedProtocol)
 			}
@@ -1876,10 +1871,7 @@ func (c *Client) handleHelloRetryRequestFlow(hrrData []byte, serverName string) 
 	}
 
 	// Send the new ClientHello
-	previewLen := len(newClientHello)
-	if previewLen > 50 {
-		previewLen = 50
-	}
+	previewLen := min(len(newClientHello), 50)
 	c.logger.Debug("Sending updated ClientHello",
 		zap.Int("bytes", len(newClientHello)),
 		zap.String("hex_preview", fmt.Sprintf("%x", newClientHello[:previewLen])))

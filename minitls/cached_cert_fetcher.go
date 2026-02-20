@@ -25,7 +25,7 @@ type certCacheLoader struct {
 }
 
 // Load implements shared.CacheLoader interface
-func (cl *certCacheLoader) Load(ctx context.Context, key string) (interface{}, error) {
+func (cl *certCacheLoader) Load(ctx context.Context, key string) (any, error) {
 	if cl.logger != nil {
 		cl.logger.Info("Fetching certificate from network", zap.String("url", key))
 	}
@@ -130,8 +130,8 @@ func (ccf *CachedCertificateFetcher) Shutdown(ctx context.Context) error {
 }
 
 // GetCacheStats returns cache statistics
-func (ccf *CachedCertificateFetcher) GetCacheStats() map[string]interface{} {
-	return map[string]interface{}{
+func (ccf *CachedCertificateFetcher) GetCacheStats() map[string]any {
+	return map[string]any{
 		"size": ccf.cache.Size(),
 	}
 }

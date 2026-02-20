@@ -252,9 +252,9 @@ func main() {
 	logger.Info("Auto-detected TEE_T URL", zap.String("teet_url", teetURL))
 
 	providerParams := &providers.HTTPProviderParams{
-		URL:         "https://vpic.nhtsa.dot.gov/",
-		Method:      "GET",
-		GeoLocation: "US",
+		URL:    "https://vpic.nhtsa.dot.gov/",
+		Method: "GET",
+		// GeoLocation: "US",
 		ResponseMatches: []providers.ResponseMatch{
 			{
 				Value: "{{addr}}",

@@ -14,7 +14,7 @@ func TestShouldParseXPathAndJSONPath(t *testing.T) {
 	html := `<!DOCTYPE html><html><head><title>Home | Bookface</title><script data-component-name='Navbar'>{"hasBookface":true}</script></head></html>`
 
 	// Test XPath + JSONPath integration through main function - simplified test
-	response := []byte(fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: %d\r\n\r\n%s", len(html), html))
+	response := fmt.Appendf(nil, "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: %d\r\n\r\n%s", len(html), html)
 	params := HTTPProviderParams{
 		URL:    "https://example.com/",
 		Method: "GET",
@@ -49,7 +49,7 @@ func TestShouldExtractComplexJSONPath(t *testing.T) {
     ]
 }`
 	// Test complex JSONPath through main function
-	response := []byte(fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s", len(jsonStr), jsonStr))
+	response := fmt.Appendf(nil, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s", len(jsonStr), jsonStr)
 	params := HTTPProviderParams{
 		URL:    "https://api.example.com/",
 		Method: "GET",
@@ -75,7 +75,7 @@ func TestShouldGetInnerAndOuterTagContents(t *testing.T) {
 			  <div id="content456">This is <span>some</span> other text!</div>
 			  <div id="content789">This is <span>some</span> irrelevant text!</div>
 			</body>`
-	response := []byte(fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: %d\r\n\r\n%s", len(html), html))
+	response := fmt.Appendf(nil, "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: %d\r\n\r\n%s", len(html), html)
 	params := HTTPProviderParams{
 		URL:    "https://example.com/",
 		Method: "GET",
@@ -101,7 +101,7 @@ func TestShouldGetMultipleElements(t *testing.T) {
 			  <div id="content456">This is <span>some</span> other text!</div>
 			  <div id="content789">This is <span>some</span> irrelevant text!</div>
 			</body>`
-	response := []byte(fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: %d\r\n\r\n%s", len(html), html))
+	response := fmt.Appendf(nil, "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: %d\r\n\r\n%s", len(html), html)
 	params := HTTPProviderParams{
 		URL:    "https://example.com/",
 		Method: "GET",
@@ -142,7 +142,7 @@ func TestShouldGetMultipleJSONPaths(t *testing.T) {
         }
     ]
 }`
-	response := []byte(fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s", len(jsonData), jsonData))
+	response := fmt.Appendf(nil, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s", len(jsonData), jsonData)
 	params := HTTPProviderParams{
 		URL:    "https://api.example.com/",
 		Method: "GET",
@@ -164,7 +164,7 @@ func TestShouldGetMultipleJSONPaths(t *testing.T) {
 
 func TestShouldErrorOnIncorrectJSONPath(t *testing.T) {
 	jsonStr := `{"asdf": 1}`
-	response := []byte(fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s", len(jsonStr), jsonStr))
+	response := fmt.Appendf(nil, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s", len(jsonStr), jsonStr)
 	params := HTTPProviderParams{
 		URL:    "https://api.example.com/",
 		Method: "GET",
@@ -271,20 +271,20 @@ func TestShouldPerformComplexRedactions2(t *testing.T) {
 	}
 
 	// Verify the revealed parts
-	revealed := ""
+	var revealed strings.Builder
 	start := 0
 	for _, red := range redactions {
 		if red.Start > start {
-			revealed += string(response[start:red.Start])
+			revealed.WriteString(string(response[start:red.Start]))
 		}
 		start = red.Start + red.Length
 	}
 	if start < len(response) {
-		revealed += string(response[start:])
+		revealed.WriteString(string(response[start:]))
 	}
 
 	t.Logf("Complex redactions 2 test passed with %d redactions", len(redactions))
-	t.Logf("Revealed content: %s", revealed)
+	t.Logf("Revealed content: %s", revealed.String())
 }
 
 func TestShouldPerformComplexRedactions3(t *testing.T) {
@@ -391,7 +391,7 @@ func TestShouldThrowOnInvalidURL(t *testing.T) {
 		"responseMatches": [],
 		"responseRedactions": []
 	}`
-	var params interface{}
+	var params any
 	if err := json.Unmarshal([]byte(paramsJSON), &params); err != nil {
 		t.Fatalf("failed to unmarshal test JSON: %v", err)
 	}
@@ -408,7 +408,7 @@ func TestShouldThrowOnInvalidURL(t *testing.T) {
 func TestShouldThrowOnInvalidParams(t *testing.T) {
 	// Mirror TS: assertValidateProviderParams('http', { a: 'b', body: 2 })
 	// Testing invalid param structure that should fail validation
-	paramsMap := map[string]interface{}{
+	paramsMap := map[string]any{
 		"a":    "b",
 		"body": 2, // invalid type for body
 	}
@@ -494,7 +494,7 @@ func TestShouldHandleOPRFReplacementsInChunkedResponse(t *testing.T) {
 		ResponseRedactions: []ResponseRedaction{
 			{
 				Regex: `"name":"(?<name>.+?)"`,
-				Hash:  stringPtr("oprf"),
+				Hash:  new("oprf"),
 			},
 		},
 	}
@@ -569,7 +569,7 @@ func TestShouldGracefullyErrorWhenOPRFSpansMultipleChunks(t *testing.T) {
 		ResponseRedactions: []ResponseRedaction{
 			{
 				Regex: `"house":"(?<house>.+?)"`,
-				Hash:  stringPtr("oprf"),
+				Hash:  new("oprf"),
 			},
 		},
 	}
@@ -1122,7 +1122,7 @@ Content-Length: 120
 			{Value: `<title>(?P<domain>.+)</title>`, Type: "regex"},
 		},
 		ResponseRedactions: []ResponseRedaction{
-			{Regex: `<title>(?P<domain>.+)</title>`, Hash: stringPtr("oprf")},
+			{Regex: `<title>(?P<domain>.+)</title>`, Hash: new("oprf")},
 		},
 	}
 	ctx := ProviderCtx{Version: ATTESTOR_VERSION_2_0_1}
@@ -1256,8 +1256,9 @@ func contains(s, substr string) bool {
 	return strings.Contains(s, substr)
 }
 
+//go:fix inline
 func stringPtr(s string) *string {
-	return &s
+	return new(s)
 }
 
 func TestValidateHTTPParams_Success(t *testing.T) {
@@ -1268,7 +1269,7 @@ func TestValidateHTTPParams_Success(t *testing.T) {
 			{ "type": "contains", "value": "success" }
 		]
 	}`
-	var params interface{}
+	var params any
 	if err := json.Unmarshal([]byte(paramsJSON), &params); err != nil {
 		t.Fatalf("failed to unmarshal test JSON: %v", err)
 	}
@@ -1285,7 +1286,7 @@ func TestValidateHTTPParams_InvalidURL(t *testing.T) {
 			{ "type": "contains", "value": "success" }
 		]
 	}`
-	var params interface{}
+	var params any
 	if err := json.Unmarshal([]byte(paramsJSON), &params); err != nil {
 		t.Fatalf("failed to unmarshal test JSON: %v", err)
 	}
@@ -1298,7 +1299,7 @@ func TestValidateHTTPParams_MissingRequired(t *testing.T) {
 	paramsJSON := `{
 		"url": "https://example.com/api"
 	}`
-	var params interface{}
+	var params any
 	if err := json.Unmarshal([]byte(paramsJSON), &params); err != nil {
 		t.Fatalf("failed to unmarshal test JSON: %v", err)
 	}
@@ -1312,7 +1313,7 @@ func TestValidateHTTPSecretParams_Success(t *testing.T) {
 		"cookieStr": "session=abc123",
 		"headers": { "Authorization": "Bearer token" }
 	}`
-	var secretParams interface{}
+	var secretParams any
 	if err := json.Unmarshal([]byte(secretParamsJSON), &secretParams); err != nil {
 		t.Fatalf("failed to unmarshal test JSON: %v", err)
 	}
@@ -1351,7 +1352,7 @@ func TestValidateHTTPParams_InvalidParamsType(t *testing.T) {
 			{ "type": "contains", "value": "test" }
 		]
 	}`
-	var params interface{}
+	var params any
 	if err := json.Unmarshal([]byte(paramsJSON), &params); err != nil {
 		t.Fatalf("failed to unmarshal test JSON: %v", err)
 	}
@@ -1369,7 +1370,7 @@ func TestValidateHTTPParams_BinaryBody(t *testing.T) {
 			{ "type": "contains", "value": "success" }
 		]
 	}`
-	var params interface{}
+	var params any
 	if err := json.Unmarshal([]byte(paramsJSON), &params); err != nil {
 		t.Fatalf("failed to unmarshal test JSON: %v", err)
 	}
@@ -1394,7 +1395,7 @@ func TestValidateHTTPParams_TemplateParams(t *testing.T) {
 			"param3": "title"
 		}
 	}`
-	var params interface{}
+	var params any
 	if err := json.Unmarshal([]byte(paramsJSON), &params); err != nil {
 		t.Fatalf("failed to unmarshal test JSON: %v", err)
 	}
@@ -1415,7 +1416,7 @@ func TestValidateHTTPParams_OPRFHashing(t *testing.T) {
 		],
 		"paramValues": { "domain": "Example Domain" }
 	}`
-	var params interface{}
+	var params any
 	if err := json.Unmarshal([]byte(paramsJSON), &params); err != nil {
 		t.Fatalf("failed to unmarshal test JSON: %v", err)
 	}
@@ -1432,7 +1433,7 @@ func TestValidateHTTPParams_InvalidProviderName(t *testing.T) {
 			{ "type": "contains", "value": "test" }
 		]
 	}`
-	var params interface{}
+	var params any
 	if err := json.Unmarshal([]byte(paramsJSON), &params); err != nil {
 		t.Fatalf("failed to unmarshal test JSON: %v", err)
 	}
@@ -1450,7 +1451,7 @@ func TestValidateHTTPParams_AdditionalClientOptions(t *testing.T) {
 		],
 		"additionalClientOptions": { "supportedProtocolVersions": ["TLS1_2", "TLS1_3"] }
 	}`
-	var params interface{}
+	var params any
 	if err := json.Unmarshal([]byte(paramsJSON), &params); err != nil {
 		t.Fatalf("failed to unmarshal test JSON: %v", err)
 	}

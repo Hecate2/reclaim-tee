@@ -209,7 +209,7 @@ func (t *TEET) handleBatchedEncryptedResponses(sessionID string, msg *shared.Mes
 
 // handleSessionCreation handles session creation from TEE_K
 func (t *TEET) handleSessionCreation(msg *shared.Message) error {
-	var sessionData map[string]interface{}
+	var sessionData map[string]any
 	if err := msg.UnmarshalData(&sessionData); err != nil {
 		t.terminateSessionWithError("", shared.ReasonMessageParsingFailed, err, "Failed to unmarshal session creation data")
 		return err

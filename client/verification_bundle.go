@@ -8,6 +8,7 @@ import (
 	"github.com/reclaimprotocol/reclaim-tee/minitls"
 	teeproto "github.com/reclaimprotocol/reclaim-tee/proto"
 	"github.com/reclaimprotocol/reclaim-tee/providers"
+	"slices"
 	"sort"
 
 	prover "github.com/reclaimprotocol/zk-symmetric-crypto/gnark/libraries/prover/impl"
@@ -83,7 +84,7 @@ func (c *Client) GenerateKeystreamWithMetadata() ([]byte, error) {
 }
 
 // PrepareZKProofForTOPRF prepares the ZK proof parameters for a TOPRF'd data range
-func (c *Client) PrepareZKProofForTOPRF(httpRangeStart, httpRangeEnd int, toprfMask []byte, toprfOutput []byte, toprfResponse *teeproto.TOPRFResponse) (map[string]interface{}, error) {
+func (c *Client) PrepareZKProofForTOPRF(httpRangeStart, httpRangeEnd int, toprfMask []byte, toprfOutput []byte, toprfResponse *teeproto.TOPRFResponse) (map[string]any, error) {
 	// Ensure we have the necessary data
 	if c.teekSignedMessage == nil {
 		return nil, fmt.Errorf("no TEE_K signed message available")
@@ -139,7 +140,7 @@ func (c *Client) PrepareZKProofForTOPRF(httpRangeStart, httpRangeEnd int, toprfM
 		return nil, fmt.Errorf("failed to marshal InputParams: %v", err)
 	}
 
-	var zkParams map[string]interface{}
+	var zkParams map[string]any
 	if err := json.Unmarshal(jsonData, &zkParams); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal to map: %v", err)
 	}
@@ -447,10 +448,7 @@ func (c *Client) verifyDecryptionWithGeneratedKeystream(keystream []byte) {
 		}
 
 		// Show what we decrypted
-		previewLen := 100
-		if len(plaintext[httpIndex:]) < previewLen {
-			previewLen = len(plaintext[httpIndex:])
-		}
+		previewLen := min(len(plaintext[httpIndex:]), 100)
 		c.logger.Info("Decrypted HTTP preview",
 			zap.ByteString("http_start", plaintext[httpIndex:httpIndex+previewLen]))
 	} else {
@@ -471,7 +469,7 @@ func (c *Client) compareWithTEEKKeystream(generatedKeystream []byte) {
 	for seqNum := range c.decryptionStreamBySeq {
 		seqNums = append(seqNums, seqNum)
 	}
-	sort.Slice(seqNums, func(i, j int) bool { return seqNums[i] < seqNums[j] })
+	slices.Sort(seqNums)
 
 	// Build consolidated unredacted keystream from what we received earlier
 	var teekKeystream []byte
@@ -491,7 +489,7 @@ func (c *Client) compareWithTEEKKeystream(generatedKeystream []byte) {
 	// Compare byte by byte
 	mismatchCount := 0
 	firstMismatch := -1
-	for i := 0; i < len(generatedKeystream); i++ {
+	for i := range generatedKeystream {
 		if generatedKeystream[i] != teekKeystream[i] {
 			mismatchCount++
 			if firstMismatch == -1 {
@@ -546,7 +544,7 @@ func (c *Client) getIdealBlocksForTOPRF(rangeStart, rangeEnd int, packetMetadata
 	for seqNum := range c.ciphertextBySeq {
 		seqNums = append(seqNums, seqNum)
 	}
-	sort.Slice(seqNums, func(i, j int) bool { return seqNums[i] < seqNums[j] })
+	slices.Sort(seqNums)
 
 	var originalCiphertext []byte
 	for _, seqNum := range seqNums {

@@ -39,7 +39,7 @@ func GenerateGCPAttestation(ctx context.Context, userData []byte) ([]byte, error
 
 	// Create POST request with JSON body
 	// Use PKI token type to get x5c (certificate chain) instead of kid (JWKS lookup)
-	requestBody := map[string]interface{}{
+	requestBody := map[string]any{
 		"audience":   "https://reclaimprotocol.org",
 		"token_type": "PKI",
 		"nonces":     []string{nonce},

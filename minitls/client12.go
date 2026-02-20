@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"hash"
 	"io"
+	"slices"
 
 	"go.uber.org/zap"
 )
@@ -174,10 +175,7 @@ func (c *Client) handshakeTLS12(serverName string) error {
 		// Add ClientKeyExchange to transcript temporarily for EMS calculation
 		transcriptWithCKE := append(c.transcript, clientKeyExchangeMsg...)
 
-		previewLen := len(transcriptWithCKE)
-		if previewLen > 200 {
-			previewLen = 200
-		}
+		previewLen := min(len(transcriptWithCKE), 200)
 		c.logger.Debug("EMS: Calculating session hash (including ClientKeyExchange)",
 			zap.Int("transcript_bytes", len(transcriptWithCKE)),
 			zap.String("transcript_preview", fmt.Sprintf("%x", transcriptWithCKE[:previewLen])))
@@ -724,13 +722,7 @@ func (c *Client) parseServerHelloTLS12(data []byte) (uint16, error) {
 					if len(offeredProtos) == 0 {
 						offeredProtos = []string{"http/1.1"}
 					}
-					validChoice := false
-					for _, proto := range offeredProtos {
-						if proto == c.negotiatedProtocol {
-							validChoice = true
-							break
-						}
-					}
+					validChoice := slices.Contains(offeredProtos, c.negotiatedProtocol)
 					if !validChoice {
 						return 0, fmt.Errorf("ALPN: server selected protocol '%s' that we didn't offer", c.negotiatedProtocol)
 					}
@@ -1186,7 +1178,7 @@ func compareBytes(a, b []byte) bool {
 		return false
 	}
 	var result byte
-	for i := 0; i < len(a); i++ {
+	for i := range a {
 		result |= a[i] ^ b[i]
 	}
 	return result == 0

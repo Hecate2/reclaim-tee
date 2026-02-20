@@ -78,9 +78,9 @@ func (g *GoogleAttestor) Validate(raw []byte, logger *Logger) error {
 	parser := jwt.NewParser()
 
 	// Custom keyfunc that extracts the leaf certificate from x5c header and verifies chain
-	keyfunc := func(t *jwt.Token) (interface{}, error) {
+	keyfunc := func(t *jwt.Token) (any, error) {
 		hdr := t.Header
-		x5c, ok := hdr["x5c"].([]interface{})
+		x5c, ok := hdr["x5c"].([]any)
 		if !ok || len(x5c) == 0 {
 			return nil, fmt.Errorf("missing x5c header in GCP attestation JWT")
 		}
@@ -128,7 +128,7 @@ func (g *GoogleAttestor) Validate(raw []byte, logger *Logger) error {
 		parts := strings.Split(tokenStr, ".")
 		if len(parts) >= 2 {
 			if payload, decErr := base64.RawURLEncoding.DecodeString(parts[1]); decErr == nil {
-				var claims map[string]interface{}
+				var claims map[string]any
 				if jsonErr := json.Unmarshal(payload, &claims); jsonErr == nil {
 					now := time.Now()
 					timingInfo := fmt.Sprintf("JWT validation failed, diagnosing clock skew - Current time: %s", now.Format(time.RFC3339))
@@ -227,7 +227,7 @@ func ValidateGCPAttestationAndExtractUserData(token []byte, logger *Logger) (str
 	}
 
 	// Parse claims
-	var claims map[string]interface{}
+	var claims map[string]any
 	if err := json.Unmarshal(payload, &claims); err != nil {
 		return "", fmt.Errorf("failed to unmarshal claims: %v", err)
 	}
@@ -244,7 +244,7 @@ func ValidateGCPAttestationAndExtractUserData(token []byte, logger *Logger) (str
 	}
 
 	// Handle array (multiple nonces)
-	if eatNonceArray, ok := eatNonceRaw.([]interface{}); ok {
+	if eatNonceArray, ok := eatNonceRaw.([]any); ok {
 		if len(eatNonceArray) == 0 {
 			return "", fmt.Errorf("eat_nonce array is empty")
 		}
@@ -285,18 +285,18 @@ func ExtractImageDigestFromGCPAttestation(token []byte, logger *Logger) (string,
 	}
 
 	// Parse claims
-	var claims map[string]interface{}
+	var claims map[string]any
 	if err := json.Unmarshal(payload, &claims); err != nil {
 		return "", fmt.Errorf("failed to unmarshal claims: %v", err)
 	}
 
 	// Extract submods.container.image_digest
-	submods, ok := claims["submods"].(map[string]interface{})
+	submods, ok := claims["submods"].(map[string]any)
 	if !ok {
 		return "", fmt.Errorf("submods claim not found or not an object")
 	}
 
-	container, ok := submods["container"].(map[string]interface{})
+	container, ok := submods["container"].(map[string]any)
 	if !ok {
 		return "", fmt.Errorf("submods.container claim not found or not an object")
 	}

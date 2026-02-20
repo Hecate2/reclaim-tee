@@ -97,12 +97,12 @@ const (
 type Message struct {
 	Type      MessageType `json:"type"`
 	SessionID string      `json:"session_id,omitempty"`
-	Data      interface{} `json:"data,omitempty"`
+	Data      any         `json:"data,omitempty"`
 	Timestamp time.Time   `json:"timestamp"`
 }
 
 // UnmarshalData unmarshals the Data field into the provided interface
-func (m *Message) UnmarshalData(v interface{}) error {
+func (m *Message) UnmarshalData(v any) error {
 	if v == nil {
 		return fmt.Errorf("nil destination")
 	}
@@ -114,7 +114,7 @@ func (m *Message) UnmarshalData(v interface{}) error {
 		return fmt.Errorf("no data in message")
 	}
 	rv := reflect.ValueOf(v)
-	if rv.Kind() != reflect.Ptr || rv.IsNil() {
+	if rv.Kind() != reflect.Pointer || rv.IsNil() {
 		return fmt.Errorf("destination must be non-nil pointer")
 	}
 	dv := reflect.ValueOf(m.Data)

@@ -2,6 +2,7 @@ package minitls
 
 import (
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -598,13 +599,7 @@ func (m *ClientHelloMsg) Marshal() []byte {
 	// Only send key_share extension if TLS 1.3 is advertised in supported_versions
 	if len(m.keyShares) > 0 {
 		// Check if TLS 1.3 (0x0304) is in the supported versions
-		hasTLS13 := false
-		for _, v := range m.supportedVersions {
-			if v == VersionTLS13 {
-				hasTLS13 = true
-				break
-			}
-		}
+		hasTLS13 := slices.Contains(m.supportedVersions, VersionTLS13)
 
 		// Only include key_share if advertising TLS 1.3 support
 		if hasTLS13 {

@@ -5,7 +5,7 @@ import (
 	"github.com/reclaimprotocol/reclaim-tee/minitls"
 	teeproto "github.com/reclaimprotocol/reclaim-tee/proto"
 	"github.com/reclaimprotocol/reclaim-tee/shared"
-	"sort"
+	"slices"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -71,9 +71,7 @@ func (c *Client) getSortedSequenceNumbers() []uint64 {
 	for seqNum := range c.parsedResponseBySeq {
 		seqNums = append(seqNums, seqNum)
 	}
-	sort.Slice(seqNums, func(i, j int) bool {
-		return seqNums[i] < seqNums[j]
-	})
+	slices.Sort(seqNums)
 	return seqNums
 }
 

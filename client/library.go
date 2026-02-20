@@ -292,7 +292,7 @@ func (r *ReclaimClient) GetResponseResults() (*ResponseResults, error) {
 	return r.Client.buildResponseResults()
 }
 
-func (r *ReclaimClient) PrepareZKProofForTOPRF(httpRangeStart, httpRangeEnd int, toprfMask []byte, toprfOutput []byte, toprfResponse *teeproto.TOPRFResponse) (map[string]interface{}, error) {
+func (r *ReclaimClient) PrepareZKProofForTOPRF(httpRangeStart, httpRangeEnd int, toprfMask []byte, toprfOutput []byte, toprfResponse *teeproto.TOPRFResponse) (map[string]any, error) {
 	return r.Client.PrepareZKProofForTOPRF(httpRangeStart, httpRangeEnd, toprfMask, toprfOutput, toprfResponse)
 }
 

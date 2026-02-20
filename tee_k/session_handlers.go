@@ -293,8 +293,8 @@ func extractHeader(lines []string, headerName string) string {
 		line := lines[i]
 		if strings.HasPrefix(strings.ToLower(line), headerPrefix) {
 			// Extract value after colon and trim whitespace
-			if colonIdx := strings.Index(line, ":"); colonIdx != -1 {
-				return strings.TrimSpace(line[colonIdx+1:])
+			if _, after, ok := strings.Cut(line, ":"); ok {
+				return strings.TrimSpace(after)
 			}
 		}
 	}

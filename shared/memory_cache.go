@@ -31,7 +31,7 @@ type MemoryCache struct {
 // MemoryCacheEntry represents a cached item with metadata
 type MemoryCacheEntry struct {
 	Key        string
-	data       interface{} // Keep data private for encapsulation
+	data       any // Keep data private for encapsulation
 	CreatedAt  time.Time
 	ExpiresAt  time.Time
 	LastUsedAt time.Time
@@ -42,7 +42,7 @@ type MemoryCacheEntry struct {
 
 // CacheLoader defines the interface for loading cache data
 type CacheLoader interface {
-	Load(ctx context.Context, key string) (interface{}, error)
+	Load(ctx context.Context, key string) (any, error)
 	ShouldPreload(key string, entry *MemoryCacheEntry) bool
 }
 
@@ -113,7 +113,7 @@ func (smc *MemoryCache) Start(ctx context.Context) error {
 }
 
 // Get retrieves an item from cache or loads it if missing
-func (smc *MemoryCache) Get(ctx context.Context, key string) (interface{}, error) {
+func (smc *MemoryCache) Get(ctx context.Context, key string) (any, error) {
 	// Try to get from cache first
 	smc.mu.RLock()
 	if entry, exists := smc.cache[key]; exists && !smc.isExpired(entry) {
@@ -133,7 +133,7 @@ func (smc *MemoryCache) Get(ctx context.Context, key string) (interface{}, error
 }
 
 // Put stores an item in the cache
-func (smc *MemoryCache) Put(key string, data interface{}) {
+func (smc *MemoryCache) Put(key string, data any) {
 	smc.mu.Lock()
 	defer smc.mu.Unlock()
 
@@ -223,12 +223,12 @@ func (smc *MemoryCache) Size() int {
 }
 
 // GetCacheInfo returns information about a cached item
-func (smc *MemoryCache) GetCacheInfo(key string) map[string]interface{} {
+func (smc *MemoryCache) GetCacheInfo(key string) map[string]any {
 	smc.mu.RLock()
 	defer smc.mu.RUnlock()
 
 	if entry, exists := smc.cache[key]; exists {
-		return map[string]interface{}{
+		return map[string]any{
 			"exists":       true,
 			"created_at":   entry.CreatedAt,
 			"expires_at":   entry.ExpiresAt,
@@ -240,14 +240,14 @@ func (smc *MemoryCache) GetCacheInfo(key string) map[string]interface{} {
 		}
 	}
 
-	return map[string]interface{}{
+	return map[string]any{
 		"exists": false,
 	}
 }
 
 // Private methods
 
-func (smc *MemoryCache) loadAndStore(ctx context.Context, key string) (interface{}, error) {
+func (smc *MemoryCache) loadAndStore(ctx context.Context, key string) (any, error) {
 	if smc.loader == nil {
 		return nil, fmt.Errorf("no loader configured for cache")
 	}
@@ -456,11 +456,11 @@ func (smc *MemoryCache) preloadEntry(ctx context.Context, entry *MemoryCacheEntr
 
 // DefaultCacheLoader provides a simple implementation of CacheLoader
 type DefaultCacheLoader struct {
-	loadFunc func(ctx context.Context, key string) (interface{}, error)
+	loadFunc func(ctx context.Context, key string) (any, error)
 }
 
 // Load implements CacheLoader interface
-func (dcl *DefaultCacheLoader) Load(ctx context.Context, key string) (interface{}, error) {
+func (dcl *DefaultCacheLoader) Load(ctx context.Context, key string) (any, error) {
 	if dcl.loadFunc == nil {
 		return nil, fmt.Errorf("no load function configured")
 	}

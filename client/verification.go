@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"github.com/reclaimprotocol/reclaim-tee/minitls"
 	"github.com/reclaimprotocol/reclaim-tee/shared"
-	"sort"
+	"slices"
 	"strings"
 
 	"go.uber.org/zap"
@@ -36,7 +36,7 @@ func (c *Client) handleBatchedDecryptionStreams(msg *shared.Message) {
 		// Decrypt and parse plaintext
 		if ciphertext, exists := c.ciphertextBySeq[streamData.SeqNum]; exists {
 			plaintext := make([]byte, len(ciphertext))
-			for j := 0; j < len(ciphertext); j++ {
+			for j := range ciphertext {
 				plaintext[j] = ciphertext[j] ^ streamData.DecryptionStream[j]
 			}
 
@@ -143,7 +143,7 @@ func (c *Client) reconstructHTTPResponseFromDecryptedData() error {
 	for seqNum := range c.parsedResponseBySeq {
 		seqNums = append(seqNums, seqNum)
 	}
-	sort.Slice(seqNums, func(i, j int) bool { return seqNums[i] < seqNums[j] })
+	slices.Sort(seqNums)
 
 	var fullResponse []byte
 	for _, seqNum := range seqNums {
@@ -158,10 +158,7 @@ func (c *Client) reconstructHTTPResponseFromDecryptedData() error {
 		// Only include application data, skip handshake and alerts
 		if parsed.ContentType == minitls.RecordTypeApplicationData && len(parsed.ActualContent) > 0 {
 			// Log the actual content for debugging
-			previewLen := 100
-			if len(parsed.ActualContent) < previewLen {
-				previewLen = len(parsed.ActualContent)
-			}
+			previewLen := min(len(parsed.ActualContent), 100)
 			c.logger.Debug("Decrypted ApplicationData content",
 				zap.Uint64("seq_num", seqNum),
 				zap.Int("length", len(parsed.ActualContent)),
@@ -241,10 +238,7 @@ func (c *Client) reconstructHTTPResponseFromDecryptedData() error {
 			}
 
 			// Display the raw HTTP response (redaction will be handled at TLS record level)
-			previewLen := HTTPResponsePreviewLength
-			if len(actualHTTPResponse) < previewLen {
-				previewLen = len(actualHTTPResponse)
-			}
+			previewLen := min(len(actualHTTPResponse), HTTPResponsePreviewLength)
 			c.logger.Info("Raw HTTP response preview",
 				zap.Int("total_bytes", len(actualHTTPResponse)),
 				zap.String("preview", actualHTTPResponse[:previewLen]))
@@ -253,10 +247,7 @@ func (c *Client) reconstructHTTPResponseFromDecryptedData() error {
 			c.logger.Info("Response processing successful", zap.Int("response_bytes", len(actualHTTPResponse)))
 			return nil
 		} else {
-			previewLen := 100
-			if len(responseStr) < previewLen {
-				previewLen = len(responseStr)
-			}
+			previewLen := min(len(responseStr), 100)
 			c.logger.Error("Reconstructed response doesn't look like HTTP", zap.String("preview", responseStr[:previewLen]))
 			return fmt.Errorf("corrupted response: no HTTP status line found")
 		}

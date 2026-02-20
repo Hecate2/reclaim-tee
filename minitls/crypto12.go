@@ -118,7 +118,7 @@ func (ctx *TLS12AEADContext) Encrypt(plaintext []byte, recordHeader []byte) ([]b
 		nonce = make([]byte, 12)
 		copy(nonce, ctx.writeIV) // Start with 12-byte implicit IV
 		// XOR sequence number into the nonce (same as TLS 1.3)
-		for i := 0; i < 8; i++ {
+		for i := range 8 {
 			nonce[len(nonce)-1-i] ^= byte(ctx.writeSeq >> (8 * i))
 		}
 	} else {
@@ -196,7 +196,7 @@ func (ctx *TLS12AEADContext) Decrypt(ciphertext []byte, recordHeader []byte) ([]
 		nonce = make([]byte, 12)
 		copy(nonce, ctx.readIV) // Start with 12-byte implicit IV
 		// XOR sequence number into the nonce
-		for i := 0; i < 8; i++ {
+		for i := range 8 {
 			nonce[len(nonce)-1-i] ^= byte(ctx.readSeq >> (8 * i))
 		}
 	} else {

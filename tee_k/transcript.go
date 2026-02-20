@@ -2,7 +2,7 @@ package main
 
 import (
 	"fmt"
-	"sort"
+	"slices"
 	"time"
 
 	"github.com/reclaimprotocol/reclaim-tee/minitls"
@@ -187,7 +187,7 @@ func (t *TEEK) generateComprehensiveSignatureAndSendTranscript(sessionID string)
 			for seqNum := range session.ResponseState.ResponseLengthBySeq {
 				seqNums = append(seqNums, seqNum)
 			}
-			sort.Slice(seqNums, func(i, j int) bool { return seqNums[i] < seqNums[j] })
+			slices.Sort(seqNums)
 
 			// Track position in consolidated keystream
 			currentPosition := uint32(0)

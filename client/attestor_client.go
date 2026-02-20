@@ -413,7 +413,7 @@ func (ac *AttestorClient) SubmitTeeBundle(verificationBundle *teeproto.Verificat
 }
 
 // SendOPRFRequest sends a threshold OPRF request to the attestor and returns the response
-func (ac *AttestorClient) SendOPRFRequest(data []byte, domainSeparator []byte, zkEngine teeproto.ZKProofEngine) (interface{}, *teeproto.TOPRFResponse, error) {
+func (ac *AttestorClient) SendOPRFRequest(data []byte, domainSeparator []byte, zkEngine teeproto.ZKProofEngine) (any, *teeproto.TOPRFResponse, error) {
 	// Ensure connection is established (lazy connect)
 	if err := ac.ensureConnected(); err != nil {
 		return nil, nil, fmt.Errorf("failed to connect to attestor: %v", err)

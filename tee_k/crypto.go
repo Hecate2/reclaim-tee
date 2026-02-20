@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"fmt"
+	"slices"
 	"sort"
 
 	"github.com/reclaimprotocol/reclaim-tee/minitls"
@@ -96,13 +97,10 @@ func (t *TEEK) encryptAndSendRequest(sessionID string, redactedRequest shared.Re
 		seqNum          uint64
 	}
 
-	for fragmentIndex := 0; fragmentIndex < fragmentCount; fragmentIndex++ {
+	for fragmentIndex := range fragmentCount {
 		// Calculate fragment boundaries on RAW plaintext
 		start := fragmentIndex * maxFragmentPayload
-		end := start + maxFragmentPayload
-		if end > len(rawPlaintext) {
-			end = len(rawPlaintext)
-		}
+		end := min(start+maxFragmentPayload, len(rawPlaintext))
 		fragmentPlaintext := rawPlaintext[start:end]
 
 		// Apply TLS 1.3 per-record formatting to THIS fragment (content-type + padding)
@@ -273,7 +271,7 @@ func (t *TEEK) generateResponseTagSecrets(sessionID string, responseLength int, 
 			// Use TLS 1.2 ChaCha20 nonce construction: IV XOR sequence number
 			nonce := make([]byte, len(serverAppIV))
 			copy(nonce, serverAppIV)
-			for i := 0; i < 8; i++ {
+			for i := range 8 {
 				nonce[len(nonce)-1-i] ^= byte(seqNum >> (8 * i))
 			}
 
@@ -313,7 +311,7 @@ func (t *TEEK) generateResponseTagSecrets(sessionID string, responseLength int, 
 		// Construct the nonce for TLS 1.3 (same as splitAEAD would use)
 		nonce := make([]byte, len(serverAppIV))
 		copy(nonce, serverAppIV)
-		for i := 0; i < 8; i++ {
+		for i := range 8 {
 			nonce[len(nonce)-1-i] ^= byte(seqNum >> (8 * i))
 		}
 		return tagSecrets, nonce, nil
@@ -437,9 +435,7 @@ func (t *TEEK) generateAndSendRedactedDecryptionStream(sessionID string, spec sh
 	}
 
 	// Sort sequence numbers to ensure deterministic processing order (matches TEE_T transcript order)
-	sort.Slice(seqNumbers, func(i, j int) bool {
-		return seqNumbers[i] < seqNumbers[j]
-	})
+	slices.Sort(seqNumbers)
 
 	// Clear any existing redacted streams for this session
 	session.StreamsMutex.Lock()

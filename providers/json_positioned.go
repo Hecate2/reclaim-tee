@@ -190,10 +190,7 @@ func findKeyValueRange(doc []byte, parentNode *gojson.Node, key string, valueNod
 	if keyIndex == -1 {
 		// Fallback: estimate based on key length (like before)
 		keyWithQuotesAndColon := fmt.Sprintf("\"%s\":", key)
-		estimatedKeyStart := valueStart - len(keyWithQuotesAndColon)
-		if estimatedKeyStart < parentStart {
-			estimatedKeyStart = parentStart
-		}
+		estimatedKeyStart := max(valueStart-len(keyWithQuotesAndColon), parentStart)
 		return &keyValueRange{
 			start: estimatedKeyStart,
 			end:   valueNode.End + 1,
