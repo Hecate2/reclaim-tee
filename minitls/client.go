@@ -282,8 +282,16 @@ func (c *Client) processSingleHandshakeMessage(data []byte) (bool, error) {
 	msgType := HandshakeType(data[0])
 
 	switch msgType {
-	case typeEncryptedExtensions, typeCertificateVerify:
-		c.logger.Debug("Received handshake message", zap.String("type", handshakeTypeString(msgType)))
+	case typeEncryptedExtensions:
+		c.logger.Debug("Received EncryptedExtensions")
+		c.finishedTranscript = append(c.finishedTranscript, data...)
+
+	case typeCertificateVerify:
+		c.logger.Debug("Received CertificateVerify")
+		// Verify signature BEFORE adding to transcript (signature is over transcript up to this point)
+		if err := c.verifyCertificateVerifyTLS13(data); err != nil {
+			return false, fmt.Errorf("CertificateVerify verification failed: %v", err)
+		}
 		c.finishedTranscript = append(c.finishedTranscript, data...)
 
 	case typeCertificateRequest:
@@ -1389,6 +1397,79 @@ func (c *Client) processServerCertificate(data []byte) error {
 		zap.Int("cert_count", len(certs)))
 
 	return nil
+}
+
+// verifyCertificateVerifyTLS13 verifies the TLS 1.3 CertificateVerify message signature
+// RFC 8446 Section 4.4.3: The signature is computed over:
+// - 64 spaces (0x20)
+// - Context string "TLS 1.3, server CertificateVerify"
+// - Single 0x00 byte
+// - Transcript hash (all handshake messages up to but not including CertificateVerify)
+func (c *Client) verifyCertificateVerifyTLS13(data []byte) error {
+	if len(c.serverCertificates) == 0 {
+		return fmt.Errorf("no server certificates available for CertificateVerify")
+	}
+
+	// Parse CertificateVerify message
+	// Format: handshake_type(1) + length(3) + signature_algorithm(2) + signature_length(2) + signature(variable)
+	if len(data) < 8 {
+		return fmt.Errorf("CertificateVerify message too short: %d bytes", len(data))
+	}
+
+	// Skip handshake header (type + length = 4 bytes)
+	signatureAlgorithm := uint16(data[4])<<8 | uint16(data[5])
+	signatureLength := int(data[6])<<8 | int(data[7])
+
+	if len(data) < 8+signatureLength {
+		return fmt.Errorf("CertificateVerify signature truncated: expected %d bytes, got %d", signatureLength, len(data)-8)
+	}
+
+	signature := data[8 : 8+signatureLength]
+
+	// Compute transcript hash (everything up to but not including CertificateVerify)
+	hasher := c.keySchedule.getHashFunc()()
+	hasher.Write(c.finishedTranscript)
+	transcriptHash := hasher.Sum(nil)
+
+	// Build the signed content per RFC 8446 Section 4.4.3
+	// 64 spaces + context string + 0x00 + transcript hash
+	contextString := "TLS 1.3, server CertificateVerify"
+	signedContent := make([]byte, 64+len(contextString)+1+len(transcriptHash))
+	for i := 0; i < 64; i++ {
+		signedContent[i] = 0x20 // space
+	}
+	copy(signedContent[64:], contextString)
+	signedContent[64+len(contextString)] = 0x00
+	copy(signedContent[64+len(contextString)+1:], transcriptHash)
+
+	serverCert := c.serverCertificates[0]
+
+	// Look up signature algorithm info
+	algInfo, supported := supportedSignatureAlgorithms[signatureAlgorithm]
+	if !supported {
+		return fmt.Errorf("unsupported signature algorithm in CertificateVerify: 0x%04x", signatureAlgorithm)
+	}
+
+	c.logger.Debug("Verifying CertificateVerify signature",
+		zap.Uint16("signature_algorithm", signatureAlgorithm),
+		zap.String("algorithm_name", algInfo.name),
+		zap.Int("signature_length", len(signature)),
+		zap.Int("transcript_hash_length", len(transcriptHash)))
+
+	// Dispatch to appropriate verification function based on algorithm type
+	switch algInfo.algType {
+	case sigTypeECDSA:
+		return c.verifyECDSASignature(serverCert, signedContent, signature, algInfo.hash)
+	case sigTypeRSAPSS:
+		return c.verifyRSAPSSSignature(serverCert, signedContent, signature, algInfo.hash)
+	case sigTypeRSAPKCS1:
+		// Note: RSA PKCS#1 is not allowed in TLS 1.3 CertificateVerify per RFC 8446
+		return fmt.Errorf("RSA PKCS#1 v1.5 signatures not allowed in TLS 1.3 CertificateVerify")
+	case sigTypeEd25519:
+		return c.verifyEd25519Signature(serverCert, signedContent, signature)
+	default:
+		return fmt.Errorf("unknown signature algorithm type for 0x%04x", signatureAlgorithm)
+	}
 }
 
 // GetHandshakeKey returns the server handshake key for certificate verification
