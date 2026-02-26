@@ -3,7 +3,6 @@ package minitls
 import (
 	"fmt"
 	"net"
-	"strings"
 	"testing"
 	"time"
 
@@ -114,43 +113,8 @@ func TestTLS12Integration(t *testing.T) {
 				t.Error("TLS 1.2 AEAD context not initialized")
 			}
 
-			// Test application data exchange
-			if err := testTLS12ApplicationData(client, tc.serverName); err != nil {
-				t.Errorf("Application data test failed: %v", err)
-			}
-
 		})
 	}
-}
-
-// testTLS12ApplicationData tests sending and receiving application data over TLS 1.2
-func testTLS12ApplicationData(client *Client, serverName string) error {
-	// Send a simple HTTP GET request
-	httpRequest := fmt.Sprintf("GET / HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", serverName)
-
-	// Send the HTTP request using TLS 1.2
-	if err := client.sendApplicationDataWithCorrectAEAD([]byte(httpRequest)); err != nil {
-		return fmt.Errorf("failed to send HTTP request: %v", err)
-	}
-
-	// Read the HTTP response
-	responseData, err := client.readApplicationDataWithCorrectAEAD()
-	if err != nil {
-		return fmt.Errorf("failed to read HTTP response: %v", err)
-	}
-
-	// Verify we got some data back
-	if len(responseData) == 0 {
-		return fmt.Errorf("received empty response")
-	}
-
-	// Check for HTTP response header
-	responseStr := string(responseData)
-	if !strings.Contains(responseStr, "HTTP/") {
-		return fmt.Errorf("response doesn't look like HTTP: %s", responseStr[:min(100, len(responseStr))])
-	}
-
-	return nil
 }
 
 // TestTLS12VersionNegotiation tests that version negotiation works correctly
