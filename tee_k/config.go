@@ -1,8 +1,9 @@
 package main
 
 import (
-	"github.com/reclaimprotocol/reclaim-tee/shared"
 	"log"
+
+	"github.com/reclaimprotocol/reclaim-tee/shared"
 
 	"github.com/joho/godotenv"
 )
@@ -48,14 +49,14 @@ func LoadTEEKConfig() *TEEKConfig {
 	var teetURL string
 	if enclaveMode {
 		// GCP enclave mode - use production URL from env
-		teetURL = shared.GetEnvOrDefault("TEET_URL", "wss://tt.reclaimprotocol.org/teek")
+		teetURL = shared.GetEnvOrDefault("TEET_URL", "wss://eu.tt.reclaimprotocol.org/teek")
 	} else {
 		// Standalone mode
 		teetURL = shared.GetEnvOrDefault("TEET_URL", "ws://localhost:8081/teek")
 	}
 
 	// Determine TEE_K domain from env
-	domain := shared.GetEnvOrDefault("ENCLAVE_DOMAIN", "tk.reclaimprotocol.org")
+	domain := shared.GetEnvOrDefault("ENCLAVE_DOMAIN", "eu.tk.reclaimprotocol.org")
 
 	return &TEEKConfig{
 		Port:             shared.GetEnvIntOrDefault("PORT", 8080),

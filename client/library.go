@@ -95,9 +95,9 @@ type ConfigJSON struct {
 
 // Default URLs for TEE services
 const (
-	DefaultAttestorURL = "wss://attestor.reclaimprotocol.org:444/ws"
-	DefaultTEEKURL     = "wss://tk.reclaimprotocol.org/ws"
-	DefaultTEETURL     = "wss://tt.reclaimprotocol.org/ws"
+	DefaultAttestorURL = "wss://eu.attestor.reclaimprotocol.org:444/ws"
+	DefaultTEEKURL     = "wss://eu.tk.reclaimprotocol.org/ws"
+	DefaultTEETURL     = "wss://eu.tt.reclaimprotocol.org/ws"
 )
 
 // NewReclaimClientFromJSON creates a new ReclaimClient with JSON-encoded provider params and optional config

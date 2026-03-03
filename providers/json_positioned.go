@@ -175,11 +175,7 @@ func findKeyValueRange(doc []byte, parentNode *gojson.Node, key string, valueNod
 
 	// Search backwards from valueStart within the parent range for the key
 	searchStart := parentStart
-	searchEnd := valueStart
-
-	if searchEnd > len(doc) {
-		searchEnd = len(doc)
-	}
+	searchEnd := min(valueStart, len(doc))
 	if searchStart < 0 {
 		searchStart = 0
 	}

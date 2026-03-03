@@ -1,8 +1,9 @@
 package main
 
 import (
-	"github.com/reclaimprotocol/reclaim-tee/shared"
 	"log"
+
+	"github.com/reclaimprotocol/reclaim-tee/shared"
 
 	"github.com/joho/godotenv"
 )
@@ -42,7 +43,7 @@ func LoadTEETConfig() *TEETConfig {
 	return &TEETConfig{
 		Port:            shared.GetEnvIntOrDefault("PORT", 8081),
 		EnclaveMode:     shared.GetEnvOrDefault("ENCLAVE_MODE", "false") == "true",
-		Domain:          shared.GetEnvOrDefault("ENCLAVE_DOMAIN", "tt.reclaimprotocol.org"),
+		Domain:          shared.GetEnvOrDefault("ENCLAVE_DOMAIN", "eu.tt.reclaimprotocol.org"),
 		KMSKey:          shared.GetEnvOrDefault("KMS_KEY", ""),
 		HTTPPort:        shared.GetEnvIntOrDefault("HTTP_PORT", 80),
 		HTTPSPort:       shared.GetEnvIntOrDefault("HTTPS_PORT", 443),

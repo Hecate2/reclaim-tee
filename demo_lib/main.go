@@ -247,8 +247,8 @@ func main() {
 	// - attestorUrl: ws://localhost:8001/ws
 	configData := map[string]interface{}{
 		"attestorUrl": "ws://localhost:8001/ws", // Attestor WebSocket URL
-		"teekUrl":     "wss://tk.reclaimprotocol.org/ws",
-		"teetUrl":     "wss://tt.reclaimprotocol.org/ws",
+		"teekUrl":     "wss://eu.tk.reclaimprotocol.org/ws",
+		"teetUrl":     "wss://eu.tt.reclaimprotocol.org/ws",
 	}
 
 	providerJSON, err := json.Marshal(providerData)

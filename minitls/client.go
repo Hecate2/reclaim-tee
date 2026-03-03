@@ -1436,7 +1436,7 @@ func (c *Client) verifyCertificateVerifyTLS13(data []byte) error {
 	// 64 spaces + context string + 0x00 + transcript hash
 	contextString := "TLS 1.3, server CertificateVerify"
 	signedContent := make([]byte, 64+len(contextString)+1+len(transcriptHash))
-	for i := 0; i < 64; i++ {
+	for i := range 64 {
 		signedContent[i] = 0x20 // space
 	}
 	copy(signedContent[64:], contextString)
