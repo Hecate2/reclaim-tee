@@ -102,11 +102,14 @@ func (t *TEET) getTEETSessionState(sessionID string) (*TEETSessionState, error) 
 }
 
 // cleanupSession performs complete cleanup of session resources
+// This function is idempotent - safe to call multiple times for the same session
 func (t *TEET) cleanupSession(sessionID string) {
 	// Close the session in session manager (handles connections and state cleanup)
 	if err := t.sessionManager.CloseSession(sessionID); err != nil {
-		// Log cleanup failure but don't continue with broken session
-		t.logger.WithSession(sessionID).Error("Failed to cleanup session", zap.Error(err))
+		// Session already cleaned up - this is expected in race conditions
+		// Log at debug level to avoid log spam
+		t.logger.WithSession(sessionID).Debug("Session already cleaned up", zap.Error(err))
+		return
 	}
 
 	// Cleanup session terminator tracking
@@ -119,6 +122,13 @@ func (t *TEET) cleanupSession(sessionID string) {
 // Sends error notification to both client and TEE_K, then cleans up session
 // This function implements ZERO TOLERANCE - always terminates the session
 func (t *TEET) terminateSessionWithError(sessionID string, reason shared.TerminationReason, err error, message string) {
+	// Check if session exists - if not, it's already been terminated
+	if _, sessionErr := t.sessionManager.GetSession(sessionID); sessionErr != nil {
+		t.logger.WithSession(sessionID).Debug("Session already terminated, skipping duplicate termination",
+			zap.String("reason", string(reason)))
+		return
+	}
+
 	t.logger.WithSession(sessionID).Error(message, zap.Error(err), zap.String("reason", string(reason)))
 
 	errorMsg := message
