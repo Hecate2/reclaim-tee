@@ -164,6 +164,25 @@ func (c *Client) BuildVerificationBundleData(attestorClient *AttestorClient, pro
 	return c.buildVerificationBundle()
 }
 
+// stripUnsignedFields creates a copy of SignedMessage with only the signed fields.
+// This removes ResponsePackets, ServerAppKey, and CipherSuite which are used
+// only for client-side operations and should not be sent to the attestor.
+// The attestor only verifies the signature over Body and ignores these fields anyway,
+// but we strip them to avoid sending unnecessary data (especially ServerAppKey).
+func stripUnsignedFields(msg *teeproto.SignedMessage) *teeproto.SignedMessage {
+	if msg == nil {
+		return nil
+	}
+	return &teeproto.SignedMessage{
+		BodyType:          msg.BodyType,
+		Body:              msg.Body,
+		EthAddress:        msg.EthAddress,
+		Signature:         msg.Signature,
+		AttestationReport: msg.AttestationReport,
+		// ResponsePackets, ServerAppKey, CipherSuite intentionally omitted
+	}
+}
+
 // buildVerificationBundle creates the actual verification bundle
 // SECURITY: This function validates that required data is present before creating bundle
 func (c *Client) buildVerificationBundle() ([]byte, error) {
@@ -177,11 +196,12 @@ func (c *Client) buildVerificationBundle() ([]byte, error) {
 		return nil, fmt.Errorf("SECURITY ERROR: missing TEE_T signed message - protocol incomplete")
 	}
 
-	// TEE_K signed message (K_OUTPUT) - use original protobuf SignedMessage
-	bundle.TeekSigned = c.teekSignedMessage
+	// TEE_K signed message (K_OUTPUT) - strip unsigned metadata fields before sending to attestor
+	// The unsigned fields (ResponsePackets, ServerAppKey, CipherSuite) are only used client-side
+	bundle.TeekSigned = stripUnsignedFields(c.teekSignedMessage)
 
-	// TEE_T signed message (T_OUTPUT) - use original protobuf SignedMessage
-	bundle.TeetSigned = c.teetSignedMessage
+	// TEE_T signed message (T_OUTPUT) - strip unsigned metadata fields before sending to attestor
+	bundle.TeetSigned = stripUnsignedFields(c.teetSignedMessage)
 
 	// OPRF verification data is required if there were OPRF redaction ranges
 	if len(c.oprfRedactionRanges) > 0 {
