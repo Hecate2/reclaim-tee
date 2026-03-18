@@ -63,6 +63,10 @@ type Client struct {
 	// Client certificate request flag
 	certRequestReceived bool // True if server requested client certificate
 
+	// TLS 1.3 handshake state tracking for security
+	certificateReceived       bool // True if server Certificate was received and processed
+	certificateVerifyReceived bool // True if server CertificateVerify was received and validated
+
 	// ALPN negotiation
 	negotiatedProtocol string // Server's selected ALPN protocol
 
@@ -289,10 +293,15 @@ func (c *Client) processSingleHandshakeMessage(data []byte) (bool, error) {
 
 	case typeCertificateVerify:
 		c.logger.Debug("Received CertificateVerify")
+		// SECURITY: Certificate must be received before CertificateVerify
+		if !c.certificateReceived {
+			return false, fmt.Errorf("received CertificateVerify before Certificate")
+		}
 		// Verify signature BEFORE adding to transcript (signature is over transcript up to this point)
 		if err := c.verifyCertificateVerifyTLS13(data); err != nil {
 			return false, fmt.Errorf("CertificateVerify verification failed: %v", err)
 		}
+		c.certificateVerifyReceived = true
 		c.finishedTranscript = append(c.finishedTranscript, data...)
 
 	case typeCertificateRequest:
@@ -304,10 +313,19 @@ func (c *Client) processSingleHandshakeMessage(data []byte) (bool, error) {
 		if err := c.processServerCertificate(data); err != nil {
 			return false, err
 		}
+		c.certificateReceived = true
 		c.finishedTranscript = append(c.finishedTranscript, data...)
 
 	case typeFinished:
 		c.logger.Debug("Received Finished message")
+		// SECURITY: Enforce TLS 1.3 handshake state machine
+		// Server must send Certificate and CertificateVerify before Finished
+		if !c.certificateReceived {
+			return false, fmt.Errorf("received Finished before Certificate - invalid handshake sequence")
+		}
+		if !c.certificateVerifyReceived {
+			return false, fmt.Errorf("received Finished before CertificateVerify - invalid handshake sequence")
+		}
 		hasherForVerify := c.keySchedule.getHashFunc()()
 		hasherForVerify.Write(c.finishedTranscript)
 		transcriptHashForVerify := hasherForVerify.Sum(nil)
