@@ -106,6 +106,8 @@ func (t *TEET) verifyTagForResponse(sessionID string, encryptedResp *shared.Encr
 }
 
 // verifyCommitmentsIfReady verifies commitments if both streams and expected commitments are available
+// Note: Streams arrive from client, commitments arrive from TEE_K - they may arrive in any order.
+// Deferral is correct when waiting for the other piece. TEE_K enforces commitment presence before forwarding.
 func (t *TEET) verifyCommitmentsIfReady(sessionID string) error {
 	session, err := t.sessionManager.GetSession(sessionID)
 	if err != nil {
@@ -116,15 +118,27 @@ func (t *TEET) verifyCommitmentsIfReady(sessionID string) error {
 	}
 	hasStreams := len(session.RedactionState.RedactionStreams) > 0 && len(session.RedactionState.CommitmentKeys) > 0
 	hasCommitments := len(session.RedactionState.ExpectedCommitments) > 0
+
+	// If no streams yet, defer verification until they arrive from client
 	if !hasStreams {
 		t.logger.Info("Redaction streams not yet available for commitment verification, deferring",
 			zap.String("session_id", sessionID))
 		return nil
 	}
+
+	// If no commitments yet, defer verification until they arrive from TEE_K
+	// Note: TEE_K validates that commitments are present before forwarding, so if streams
+	// exist but commitments never arrive, something is wrong with message ordering
 	if !hasCommitments {
 		t.logger.Info("Expected commitments not yet available for verification, deferring",
 			zap.String("session_id", sessionID))
 		return nil
+	}
+
+	// SECURITY: Once both are present, commitment count must match stream count
+	if len(session.RedactionState.ExpectedCommitments) != len(session.RedactionState.RedactionStreams) {
+		return fmt.Errorf("SECURITY ERROR: commitment count (%d) does not match stream count (%d)",
+			len(session.RedactionState.ExpectedCommitments), len(session.RedactionState.RedactionStreams))
 	}
 	t.logger.Info("Stream collections and expected commitments both available - verifying commitments",
 		zap.String("session_id", sessionID),

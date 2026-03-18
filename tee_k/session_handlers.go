@@ -113,6 +113,22 @@ func (t *TEEK) handleRedactedRequest(sessionID string, msg *shared.Message) erro
 		zap.Int("redaction_ranges", len(redactedRequest.RedactionRanges)),
 		zap.Int("commitments", len(redactedRequest.Commitments)))
 
+	// SECURITY: Validate commitment count matches redaction range count
+	// Each redaction range requires a corresponding commitment to bind the client to specific values
+	if len(redactedRequest.RedactionRanges) > 0 {
+		if len(redactedRequest.Commitments) == 0 {
+			err := fmt.Errorf("SECURITY ERROR: %d redaction ranges provided but no commitments", len(redactedRequest.RedactionRanges))
+			t.terminateSessionWithError(sessionID, shared.ReasonProtocolViolation, err, "Missing commitments for redaction ranges")
+			return err
+		}
+		if len(redactedRequest.Commitments) != len(redactedRequest.RedactionRanges) {
+			err := fmt.Errorf("SECURITY ERROR: commitment count (%d) does not match redaction range count (%d)",
+				len(redactedRequest.Commitments), len(redactedRequest.RedactionRanges))
+			t.terminateSessionWithError(sessionID, shared.ReasonProtocolViolation, err, "Commitment/range count mismatch")
+			return err
+		}
+	}
+
 	// Get session to access connection data for Host header validation
 	session, err := t.sessionManager.GetSession(sessionID)
 	if err != nil {
