@@ -193,7 +193,6 @@ func NewReclaimClientFromJSON(providerParamsJSON string, configJSON string) (*Re
 		ProviderContext:      context,
 		Logger:               logger,
 		RequestId:            requestID,
-		EnableProofVerifier:  false, // Disabled for library mode
 	}
 
 	return NewReclaimClient(config), nil

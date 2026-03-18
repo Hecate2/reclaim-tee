@@ -291,14 +291,13 @@ func main() {
 
 	// Create reclaimClient configuration with basic settings
 	config := client.ClientConfig{
-		TEEKURL:             teekURL,
-		TEETURL:             teetURL,
-		AttestorURL:         attestorURL,
-		Timeout:             client.DefaultConnectionTimeout,
-		Mode:                client.ModeAuto,
-		ForceTLSVersion:     forceTLSVersion,
-		ForceCipherSuite:    forceCipherSuite,
-		EnableProofVerifier: true, // Enable proof verification in standalone mode
+		TEEKURL:          teekURL,
+		TEETURL:          teetURL,
+		AttestorURL:      attestorURL,
+		Timeout:          client.DefaultConnectionTimeout,
+		Mode:             client.ModeAuto,
+		ForceTLSVersion:  forceTLSVersion,
+		ForceCipherSuite: forceCipherSuite,
 	}
 
 	// Create reclaimClient using library interface
