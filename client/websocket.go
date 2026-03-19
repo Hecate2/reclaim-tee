@@ -2,16 +2,15 @@ package client
 
 import (
 	"fmt"
-	"github.com/reclaimprotocol/reclaim-tee/minitls"
-	teeproto "github.com/reclaimprotocol/reclaim-tee/proto"
-	"github.com/reclaimprotocol/reclaim-tee/shared"
 	"net/url"
 	"strings"
 	"time"
 
-	"go.uber.org/zap"
-
 	"github.com/gorilla/websocket"
+	"github.com/reclaimprotocol/reclaim-tee/minitls"
+	teeproto "github.com/reclaimprotocol/reclaim-tee/proto"
+	"github.com/reclaimprotocol/reclaim-tee/shared"
+	"go.uber.org/zap"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -25,9 +24,18 @@ func (c *Client) ConnectToTEEK() error {
 	c.logger.Info("Attempting WebSocket connection to TEE_K",
 		zap.String("url", c.teekURL))
 
-	// Determine connection mode and use appropriate dialer
 	var conn *websocket.Conn
-	if strings.HasPrefix(c.teekURL, "wss://") && strings.Contains(c.teekURL, "reclaimprotocol.org") {
+
+	// Check if native networking is enabled (for iOS VPN compatibility)
+	if IsNativeNetworkingEnabled() {
+		c.logger.Info("Using native networking for VPN compatibility (TEE_K)")
+		dialer := createNativeNetworkDialer(c.teekURL, int(DefaultWSHandshakeTimeout.Milliseconds()))
+		conn, _, err = dialer.Dial(u.String(), nil)
+		if err != nil {
+			c.logger.Error("Native WebSocket dial failed for TEE_K", zap.String("url", c.teekURL), zap.Error(err))
+			return fmt.Errorf("native WebSocket connect failed: %w", err)
+		}
+	} else if strings.HasPrefix(c.teekURL, "wss://") && strings.Contains(c.teekURL, "reclaimprotocol.org") {
 		// Enclave mode: use custom dialer with TLS config
 		c.logger.Info("Enclave mode detected for TEE_K - using custom dialer")
 		dialer := createEnclaveWebSocketDialer()
@@ -62,9 +70,18 @@ func (c *Client) ConnectToTEET() error {
 	c.logger.Info("Attempting WebSocket connection to TEE_T",
 		zap.String("url", c.teetURL))
 
-	// Determine connection mode and use appropriate dialer
 	var conn *websocket.Conn
-	if strings.HasPrefix(c.teetURL, "wss://") && strings.Contains(c.teetURL, "reclaimprotocol.org") {
+
+	// Check if native networking is enabled (for iOS VPN compatibility)
+	if IsNativeNetworkingEnabled() {
+		c.logger.Info("Using native networking for VPN compatibility (TEE_T)")
+		dialer := createNativeNetworkDialer(c.teetURL, int(DefaultWSHandshakeTimeout.Milliseconds()))
+		conn, _, err = dialer.Dial(u.String(), nil)
+		if err != nil {
+			c.logger.Error("Native WebSocket dial failed for TEE_T", zap.String("url", c.teetURL), zap.Error(err))
+			return fmt.Errorf("native WebSocket connect failed: %w", err)
+		}
+	} else if strings.HasPrefix(c.teetURL, "wss://") && strings.Contains(c.teetURL, "reclaimprotocol.org") {
 		// Enclave mode: use custom dialer with TLS config
 		c.logger.Info("Enclave mode detected for TEE_T - using custom dialer")
 		dialer := createEnclaveWebSocketDialer()

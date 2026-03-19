@@ -751,6 +751,10 @@ func init() {
 
 	// Share the Flutter-enabled logger with other packages
 	shareLoggerWithPackages(logger)
+
+	// Register native network bridge functions with client package
+	// This enables iOS VPN compatibility when native networking is enabled
+	registerNativeNetworkBridge()
 }
 
 // shareLoggerWithPackages shares the Flutter-enabled logger with providers and libclient

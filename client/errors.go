@@ -1,8 +1,12 @@
 package client
 
 import (
+	"errors"
 	"fmt"
 )
+
+// ErrNativeNetworkNotConfigured is returned when native network functions are not registered
+var ErrNativeNetworkNotConfigured = errors.New("native network functions not configured")
 
 // ReclaimError is the base error type for all library errors
 type ReclaimError struct {

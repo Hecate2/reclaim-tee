@@ -41,7 +41,11 @@ func (c *Client) sendTCPReady() {
 	var tcpConn net.Conn
 	var err error
 
-	if c.shouldUseProxy() {
+	// Check if native networking is enabled (for iOS VPN compatibility)
+	if IsNativeNetworkingEnabled() {
+		c.logger.Info("Using native networking for TCP (VPN compatibility)")
+		tcpConn, err = NativeDialTCP(tcpAddr, 5000)
+	} else if c.shouldUseProxy() {
 		// Connect via BrightData proxy
 		tcpConn, err = c.connectViaProxy(c.targetHost, c.targetPort)
 	} else {
