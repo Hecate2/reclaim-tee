@@ -98,6 +98,21 @@ func updateRootCAs(logger *shared.Logger) {
 		return
 	}
 
+	// Count certificates before adding them to pool
+	certCount := 0
+	pemCopy := pemData
+	for {
+		block, rest := pem.Decode(pemCopy)
+		if block == nil {
+			break
+		}
+		if block.Type == "CERTIFICATE" {
+			certCount++
+		}
+		pemCopy = rest
+	}
+	logger.Info("Root CA certificates loaded", zap.Int("cert_count", certCount))
+
 	pool := x509.NewCertPool()
 	if !pool.AppendCertsFromPEM(pemData) {
 		logger.Warn("Failed to parse fetched CA certificates, keeping existing certs")

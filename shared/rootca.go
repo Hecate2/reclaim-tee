@@ -33,6 +33,14 @@ func GetRootCAPool() *x509.CertPool {
 	return sysPool
 }
 
+// IsCustomRootCAPool returns true if a custom root CA pool is set.
+func IsCustomRootCAPool() bool {
+	rootPoolMu.RLock()
+	isCustom := customRootPool != nil
+	rootPoolMu.RUnlock()
+	return isCustom
+}
+
 // GetTLSConfig returns a TLS config with the current root CA pool.
 // Use this when creating custom http.Transport or websocket.Dialer.
 func GetTLSConfig() *tls.Config {

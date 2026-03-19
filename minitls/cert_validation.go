@@ -26,7 +26,8 @@ func (c *Client) verifyCertificateChain(certs []*x509.Certificate, serverName st
 // to prevent infinite recursion via AIA fetching
 func (c *Client) verifyCertificateChainWithDepth(certs []*x509.Certificate, serverName string, config *Config, aiaDepth int) error {
 	// Protection: Prevent infinite recursion via AIA fetch
-	const maxAIADepth = 1 // Only allow ONE level of AIA fetching (no recursive fetches)
+	// Set to 2 to allow one retry after queue-based AIA fetching
+	const maxAIADepth = 2
 	if aiaDepth > maxAIADepth {
 		c.logger.Warn("Maximum AIA fetch depth reached, preventing recursion")
 		// Continue with validation without further AIA fetches
@@ -73,10 +74,18 @@ func (c *Client) verifyCertificateChainWithDepth(certs []*x509.Certificate, serv
 	intermediates := x509.NewCertPool()
 	for i := 1; i < len(certs); i++ {
 		intermediates.AddCert(certs[i])
+		c.logger.Debug("Added to intermediate pool",
+			zap.Int("index", i),
+			zap.String("subject", certs[i].Subject.String()),
+			zap.String("issuer", certs[i].Issuer.String()))
 	}
 
 	// Get root CA pool (custom if set, otherwise system)
 	roots := shared.GetRootCAPool()
+	isCustomPool := shared.IsCustomRootCAPool()
+	c.logger.Debug("Using root CA pool",
+		zap.Bool("is_custom_pool", isCustomPool),
+		zap.Int("intermediate_count", len(certs)-1))
 
 	// Verify certificate chain with hostname
 	opts := x509.VerifyOptions{
@@ -87,6 +96,23 @@ func (c *Client) verifyCertificateChainWithDepth(certs []*x509.Certificate, serv
 
 	chains, err := leafCert.Verify(opts)
 	if err != nil {
+		// Debug: Log verification failure details
+		c.logger.Debug("Certificate verification failed",
+			zap.String("leaf_subject", leafCert.Subject.String()),
+			zap.String("leaf_issuer", leafCert.Issuer.String()),
+			zap.Int("chain_length", len(certs)),
+			zap.Int("aia_depth", aiaDepth),
+			zap.Error(err))
+
+		// Log intermediate chain details for debugging
+		for i, cert := range certs {
+			c.logger.Debug("Chain certificate",
+				zap.Int("index", i),
+				zap.String("subject", cert.Subject.String()),
+				zap.String("issuer", cert.Issuer.String()),
+				zap.Bool("is_ca", cert.IsCA))
+		}
+
 		// Only try to fetch missing intermediates if:
 		// 1. Config is not nil and has CertFetcher
 		// 2. We haven't exceeded AIA fetch depth limit
@@ -94,6 +120,7 @@ func (c *Client) verifyCertificateChainWithDepth(certs []*x509.Certificate, serv
 		// 4. Error is about unknown authority (missing intermediate)
 		if config == nil || config.CertFetcher == nil {
 			// No cert fetcher configured, return error immediately
+			c.logger.Debug("No cert fetcher configured, cannot attempt AIA fetch")
 			return &CertificateError{
 				Type:    CertErrorVerification,
 				Message: fmt.Sprintf("certificate verification failed for %s", serverName),
@@ -108,7 +135,8 @@ func (c *Client) verifyCertificateChainWithDepth(certs []*x509.Certificate, serv
 			if errors.As(err, &unknownAuthorityErr) {
 				c.logger.Info("Certificate chain incomplete, fetching missing intermediates",
 					zap.String("cert", leafCert.Subject.String()),
-					zap.Int("aia_depth", aiaDepth))
+					zap.Int("aia_depth", aiaDepth),
+					zap.Strings("aia_urls", leafCert.IssuingCertificateURL))
 				completedChain, fetchErr := c.fetchMissingIntermediates(certs, config.CertFetcher)
 				if fetchErr == nil && len(completedChain) > len(certs) {
 					// Retry validation with completed chain (increment depth to prevent infinite recursion)
@@ -117,7 +145,15 @@ func (c *Client) verifyCertificateChainWithDepth(certs []*x509.Certificate, serv
 					return c.verifyCertificateChainWithDepth(completedChain, serverName, config, aiaDepth+1)
 				}
 				c.logger.Warn("Failed to complete certificate chain via AIA", zap.Error(fetchErr))
+			} else {
+				c.logger.Debug("Verification error is not UnknownAuthorityError, skipping AIA fetch",
+					zap.String("error_type", fmt.Sprintf("%T", err)))
 			}
+		} else {
+			c.logger.Debug("AIA fetch not attempted",
+				zap.Int("aia_depth", aiaDepth),
+				zap.Int("max_aia_depth", maxAIADepth),
+				zap.Int("aia_url_count", len(leafCert.IssuingCertificateURL)))
 		}
 
 		return &CertificateError{
@@ -202,10 +238,12 @@ func isValidAIAURL(urlStr string) bool {
 
 // fetchMissingIntermediates attempts to download missing intermediate certificates
 // using the Authority Information Access (AIA) extension
-// This function is called only ONCE per verification attempt (not recursive) to prevent:
-// - Infinite recursion attacks
-// - Circular AIA reference attacks
-// - Chain depth attacks
+// This function fetches from ALL certs in the chain that have AIA URLs to handle
+// cases where intermediate certificates also need their issuers fetched.
+// Protection against attacks:
+// - Infinite recursion: prevented by maxChainLength limit
+// - Circular AIA references: prevented by fingerprint tracking
+// - Chain depth attacks: prevented by maxChainLength limit
 func (c *Client) fetchMissingIntermediates(certs []*x509.Certificate, fetcher CertificateFetcher) ([]*x509.Certificate, error) {
 	if len(certs) == 0 {
 		return certs, fmt.Errorf("no certificates provided")
@@ -220,8 +258,6 @@ func (c *Client) fetchMissingIntermediates(certs []*x509.Certificate, fetcher Ce
 	result := make([]*x509.Certificate, len(certs))
 	copy(result, certs)
 
-	leafCert := certs[0]
-
 	// Protection: Track certificate fingerprints to detect circular references
 	existingFingerprints := make(map[string]bool)
 	for _, cert := range certs {
@@ -229,59 +265,100 @@ func (c *Client) fetchMissingIntermediates(certs []*x509.Certificate, fetcher Ce
 		existingFingerprints[fingerprint] = true
 	}
 
-	// Try each AIA URL until one succeeds
-	for _, url := range leafCert.IssuingCertificateURL {
-		// Protection: Only allow HTTP and HTTPS schemes
-		if !isValidAIAURL(url) {
-			c.logger.Warn("Invalid AIA URL scheme", zap.String("url", url))
+	// Queue of certificates to process AIA URLs from
+	// Start with all certs in the chain, then add newly fetched ones
+	toProcess := make([]*x509.Certificate, len(certs))
+	copy(toProcess, certs)
+	processIdx := 0
+
+	// Process all certificates (including newly fetched ones)
+	for processIdx < len(toProcess) && len(result) < maxChainLength {
+		cert := toProcess[processIdx]
+		processIdx++
+
+		if len(cert.IssuingCertificateURL) == 0 {
 			continue
 		}
-		c.logger.Info("Fetching intermediate cert(s)", zap.String("url", url))
-		certData, err := fetcher.FetchCertificate(url)
-		if err != nil {
-			c.logger.Warn("Failed to fetch intermediate cert", zap.String("url", url), zap.Error(err))
-			continue // Try next URL
-		}
+		c.logger.Debug("Checking AIA URLs for certificate",
+			zap.Int("process_index", processIdx-1),
+			zap.String("subject", cert.Subject.String()),
+			zap.Strings("aia_urls", cert.IssuingCertificateURL))
 
-		// Parse certificate(s) (supports DER, PEM, and PKCS7 formats)
-		// May return multiple certificates for PKCS7 bundles
-		intermediates, err := parseCertificateData(certData)
-		if err != nil {
-			c.logger.Warn("Failed to parse intermediate cert", zap.String("url", url), zap.Error(err))
-			continue // Try next URL
-		}
-
-		// Verify all intermediates are actually CA certificates and not duplicates
-		validIntermediates := make([]*x509.Certificate, 0, len(intermediates))
-		for _, intermediate := range intermediates {
-			if !intermediate.IsCA {
-				c.logger.Warn("Skipping non-CA certificate from bundle",
-					zap.String("subject", intermediate.Subject.String()))
+		// Try each AIA URL until one succeeds
+		for _, url := range cert.IssuingCertificateURL {
+			// Protection: Only allow HTTP and HTTPS schemes
+			if !isValidAIAURL(url) {
+				c.logger.Warn("Invalid AIA URL scheme", zap.String("url", url))
 				continue
 			}
+			c.logger.Info("Fetching intermediate cert(s)", zap.String("url", url))
+			certData, err := fetcher.FetchCertificate(url)
+			if err != nil {
+				c.logger.Warn("Failed to fetch intermediate cert", zap.String("url", url), zap.Error(err))
+				continue // Try next URL
+			}
 
-			// Protection: Check for circular reference (certificate already in chain)
-			fingerprint := fmt.Sprintf("%x", intermediate.SerialNumber)
-			if existingFingerprints[fingerprint] {
-				c.logger.Warn("Skipping duplicate certificate (circular reference protection)",
+			// Parse certificate(s) (supports DER, PEM, and PKCS7 formats)
+			// May return multiple certificates for PKCS7 bundles
+			intermediates, err := parseCertificateData(certData)
+			if err != nil {
+				c.logger.Warn("Failed to parse intermediate cert", zap.String("url", url), zap.Error(err))
+				continue // Try next URL
+			}
+
+			// Log fetched intermediate details
+			for _, intermediate := range intermediates {
+				c.logger.Debug("Fetched intermediate certificate",
 					zap.String("subject", intermediate.Subject.String()),
-					zap.String("serial", fingerprint))
-				continue
+					zap.String("issuer", intermediate.Issuer.String()),
+					zap.Bool("is_ca", intermediate.IsCA),
+					zap.Strings("issuer_aia", intermediate.IssuingCertificateURL))
 			}
 
-			validIntermediates = append(validIntermediates, intermediate)
-		}
+			// Verify all intermediates are actually CA certificates and not duplicates
+			for _, intermediate := range intermediates {
+				if !intermediate.IsCA {
+					c.logger.Warn("Skipping non-CA certificate from bundle",
+						zap.String("subject", intermediate.Subject.String()))
+					continue
+				}
 
-		if len(validIntermediates) == 0 {
-			c.logger.Warn("No valid CA certificates found in bundle", zap.String("url", url))
-			continue // Try next URL
-		}
+				// SECURITY: Skip self-signed certificates (roots)
+				// Roots must come from the trusted store, NOT from AIA fetching
+				if intermediate.Subject.String() == intermediate.Issuer.String() {
+					c.logger.Info("Skipping self-signed certificate (root CA) - must come from trusted store",
+						zap.String("subject", intermediate.Subject.String()))
+					continue
+				}
 
-		// Add all valid intermediates to chain (insert after leaf)
-		result = append(result, validIntermediates...)
-		c.logger.Info("Successfully fetched intermediate cert(s)",
-			zap.String("url", url),
-			zap.Int("count", len(validIntermediates)))
+				// Protection: Check for circular reference (certificate already in chain)
+				fingerprint := fmt.Sprintf("%x", intermediate.SerialNumber)
+				if existingFingerprints[fingerprint] {
+					c.logger.Warn("Skipping duplicate certificate (circular reference protection)",
+						zap.String("subject", intermediate.Subject.String()),
+						zap.String("serial", fingerprint))
+					continue
+				}
+
+				// Track this fingerprint for future duplicates
+				existingFingerprints[fingerprint] = true
+
+				// Add to result and queue for AIA processing
+				result = append(result, intermediate)
+				toProcess = append(toProcess, intermediate)
+
+				c.logger.Info("Added intermediate to chain",
+					zap.String("subject", intermediate.Subject.String()),
+					zap.String("issuer", intermediate.Issuer.String()),
+					zap.Int("total_chain_length", len(result)))
+			}
+		}
+	}
+
+	if len(result) > len(certs) {
+		c.logger.Info("AIA fetch complete",
+			zap.Int("original_chain_length", len(certs)),
+			zap.Int("final_chain_length", len(result)))
 		return result, nil
 	}
 
