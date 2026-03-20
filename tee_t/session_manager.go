@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"maps"
 	"sync"
 
 	"github.com/reclaimprotocol/reclaim-tee/oprfmpc"
@@ -160,9 +161,7 @@ func (s *TEETSessionState) GetAllOPRFResults() map[int]*shared.OPRFResult {
 	s.oprfMu.Lock()
 	defer s.oprfMu.Unlock()
 	results := make(map[int]*shared.OPRFResult, len(s.OPRFResults))
-	for k, v := range s.OPRFResults {
-		results[k] = v
-	}
+	maps.Copy(results, s.OPRFResults)
 	return results
 }
 

@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"maps"
 	"sync"
 
 	"github.com/reclaimprotocol/reclaim-tee/minitls"
@@ -157,8 +158,6 @@ func (s *TEEKSessionState) GetAllOPRFResults() map[int]*shared.OPRFResult {
 	s.oprfMu.Lock()
 	defer s.oprfMu.Unlock()
 	results := make(map[int]*shared.OPRFResult, len(s.OPRFResults))
-	for k, v := range s.OPRFResults {
-		results[k] = v
-	}
+	maps.Copy(results, s.OPRFResults)
 	return results
 }

@@ -268,7 +268,7 @@ func CMACGarblerRound3(rng io.Reader, curve elliptic.Curve, state *CMACGarblerSe
 	}
 
 	garblerLabels := make([]ot.Label, gBits)
-	for i := 0; i < gBits; i++ {
+	for i := range gBits {
 		garblerLabels[i] = circuit.LabelForBit(garbled.Wires[i], bits[i])
 	}
 
@@ -349,7 +349,7 @@ func CMACEvaluatorRound4(curve elliptic.Curve, state *CMACEvaluatorSession, msg 
 func cmacBytesToBits(data []byte) []bool {
 	bits := make([]bool, len(data)*8)
 	for i, b := range data {
-		for j := 0; j < 8; j++ {
+		for j := range 8 {
 			bits[i*8+j] = (b>>j)&1 == 1
 		}
 	}
