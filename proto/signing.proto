@@ -11,23 +11,29 @@ message KOutputPayload {
   // For single request-response mode
   bytes redacted_request = 1; // R_red
   repeated RequestRedactionRange request_redaction_ranges = 2;
-  
+
   // REPLACED: repeated SignedRedactedDecryptionStream redacted_streams = 3; (individual response streams - CONSOLIDATE)
   // REPLACED: repeated bytes packets = 4; (TLS handshake packets - REMOVE)
   bytes consolidated_response_keystream = 3;  // NEW: Single response decryption keystream
   CertificateInfo certificate_info = 4;      // NEW: Structured cert data instead of handshake packets
-  
+
   repeated ResponseRedactionRange response_redaction_ranges = 5;
   uint64 timestamp_ms = 6; // Unix timestamp in milliseconds when payload was created (SIGNED)
+
+  // MPC OPRF outputs
+  repeated OPRFOutput oprf_outputs = 10;
 }
 
 message TOutputPayload {
   // REPLACED: repeated bytes packets = 1; (TLS packets for BOTH request and response - REMOVE ALL)
   bytes consolidated_response_ciphertext = 1;  // NEW: Single response ciphertext stream
-  
+
   // PRESERVE: Individual R_SP streams for R_S vs R_SP distinction
   repeated bytes request_proof_streams = 2;    // UNCHANGED: Individual R_SP streams for revealing sensitive_proof ranges
   uint64 timestamp_ms = 3;                     // UNCHANGED
+
+  // MPC OPRF outputs
+  repeated OPRFOutput oprf_outputs = 10;
 }
 
 // Attestation report with structured data
@@ -49,6 +55,13 @@ message TLSPacketInfo {
   uint32 position = 2;
   uint32 length = 3;
   bytes nonce = 4;
+}
+
+// MPC OPRF output included in signed transcripts
+message OPRFOutput {
+  int32 tls_start = 1;
+  int32 tls_length = 2;
+  bytes hash_output = 3;  // 32 bytes SHA256(CMAC)
 }
 
 message SignedMessage {

@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/reclaimprotocol/reclaim-tee/oprfmpc"
+	teeproto "github.com/reclaimprotocol/reclaim-tee/proto"
 	"github.com/reclaimprotocol/reclaim-tee/shared"
 
 	"github.com/gorilla/websocket"
@@ -18,6 +20,21 @@ type TEETSessionState struct {
 	ExpectedFragmentCount          int                                     // Total number of fragments expected
 	RequestProofStreams            [][]byte                                // Store R_SP streams for cryptographic signing
 	ConsolidatedResponseCiphertext []byte                                  // Response ciphertext consolidation
+
+	// MPC OPRF state
+	OPRFKeyShare         []byte                                // 16-byte key share for MPC OPRF
+	EvaluatorSessions    map[int]*oprfmpc.CMACEvaluatorSession // Per-range evaluator sessions
+	ClientOPRFRanges     []*teeproto.OPRFRangeSpec             // Client-provided OPRF ranges
+	ClientRangesReceived bool                                  // Whether client has sent ranges
+	PendingRound1s       []*teeproto.OPRFMPCRound1             // Queued Round1 messages before client ranges arrive
+	OPRFResults          map[int]*shared.OPRFResult            // Completed OPRF results by range index
+	OPRFState            shared.OPRFSessionState               // Current OPRF processing state
+	OPRFExpectedCount    int                                   // Number of OPRF results expected
+	TLSSessionHash       []byte                                // Cached TLS session hash for replay protection
+
+	// Per-session mutex for thread-safe access to OPRF state
+	// Must be held when accessing EvaluatorSessions, OPRFResults, ClientOPRFRanges, or PendingRound1s
+	oprfMu sync.Mutex
 }
 
 type TEETSessionManager struct {
@@ -68,4 +85,84 @@ func (s *TEETSessionState) AppendResponseCiphertext(ciphertext []byte) {
 // AddRequestProofStream adds an R_SP stream for cryptographic verification
 func (s *TEETSessionState) AddRequestProofStream(stream []byte) {
 	s.RequestProofStreams = append(s.RequestProofStreams, stream)
+}
+
+// LockOPRF acquires the per-session OPRF mutex
+func (s *TEETSessionState) LockOPRF() {
+	s.oprfMu.Lock()
+}
+
+// UnlockOPRF releases the per-session OPRF mutex
+func (s *TEETSessionState) UnlockOPRF() {
+	s.oprfMu.Unlock()
+}
+
+// SetEvaluatorSession safely sets an evaluator session for the given range index
+func (s *TEETSessionState) SetEvaluatorSession(rangeIdx int, session *oprfmpc.CMACEvaluatorSession) {
+	s.oprfMu.Lock()
+	defer s.oprfMu.Unlock()
+	if s.EvaluatorSessions == nil {
+		s.EvaluatorSessions = make(map[int]*oprfmpc.CMACEvaluatorSession)
+	}
+	s.EvaluatorSessions[rangeIdx] = session
+}
+
+// GetEvaluatorSession safely retrieves an evaluator session for the given range index
+func (s *TEETSessionState) GetEvaluatorSession(rangeIdx int) (*oprfmpc.CMACEvaluatorSession, bool) {
+	s.oprfMu.Lock()
+	defer s.oprfMu.Unlock()
+	session, ok := s.EvaluatorSessions[rangeIdx]
+	return session, ok
+}
+
+// SetOPRFResult safely sets an OPRF result for the given range index
+func (s *TEETSessionState) SetOPRFResult(rangeIdx int, result *shared.OPRFResult) {
+	s.oprfMu.Lock()
+	defer s.oprfMu.Unlock()
+	if s.OPRFResults == nil {
+		s.OPRFResults = make(map[int]*shared.OPRFResult)
+	}
+	s.OPRFResults[rangeIdx] = result
+}
+
+// GetOPRFResult safely retrieves an OPRF result for the given range index
+func (s *TEETSessionState) GetOPRFResult(rangeIdx int) (*shared.OPRFResult, bool) {
+	s.oprfMu.Lock()
+	defer s.oprfMu.Unlock()
+	result, ok := s.OPRFResults[rangeIdx]
+	return result, ok
+}
+
+// GetOPRFResultCount safely returns the number of completed OPRF results
+func (s *TEETSessionState) GetOPRFResultCount() int {
+	s.oprfMu.Lock()
+	defer s.oprfMu.Unlock()
+	return len(s.OPRFResults)
+}
+
+// GetAllOPRFResults safely returns a copy of all OPRF results
+func (s *TEETSessionState) GetAllOPRFResults() map[int]*shared.OPRFResult {
+	s.oprfMu.Lock()
+	defer s.oprfMu.Unlock()
+	results := make(map[int]*shared.OPRFResult, len(s.OPRFResults))
+	for k, v := range s.OPRFResults {
+		results[k] = v
+	}
+	return results
+}
+
+// AddPendingRound1 safely adds a pending Round1 message
+func (s *TEETSessionState) AddPendingRound1(round1 *teeproto.OPRFMPCRound1) {
+	s.oprfMu.Lock()
+	defer s.oprfMu.Unlock()
+	s.PendingRound1s = append(s.PendingRound1s, round1)
+}
+
+// GetAndClearPendingRound1s safely retrieves and clears pending Round1 messages
+func (s *TEETSessionState) GetAndClearPendingRound1s() []*teeproto.OPRFMPCRound1 {
+	s.oprfMu.Lock()
+	defer s.oprfMu.Unlock()
+	pending := s.PendingRound1s
+	s.PendingRound1s = nil
+	return pending
 }

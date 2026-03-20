@@ -63,6 +63,9 @@ const (
 	ReasonRedactionVerificationFailed   TerminationReason = "redaction_verification_failed"
 	ReasonTagComputationFailed          TerminationReason = "tag_computation_failed"
 	ReasonStreamReconstructionFailed    TerminationReason = "stream_reconstruction_failed"
+
+	// MPC OPRF Protocol Errors - ZERO TOLERANCE
+	ReasonOPRFProtocolFailed TerminationReason = "oprf_protocol_failed"
 )
 
 // TerminationSeverity indicates how critical the termination reason is
@@ -145,7 +148,8 @@ func (r TerminationReason) GetSeverity() TerminationSeverity {
 		ReasonAttestationVerificationFailed,
 		ReasonRedactionVerificationFailed,
 		ReasonTagComputationFailed,
-		ReasonStreamReconstructionFailed:
+		ReasonStreamReconstructionFailed,
+		ReasonOPRFProtocolFailed:
 		return SeverityHigh
 
 	default:
@@ -364,7 +368,8 @@ func (r TerminationReason) IsTEEProtocolError() bool {
 		ReasonAttestationVerificationFailed,
 		ReasonRedactionVerificationFailed,
 		ReasonTagComputationFailed,
-		ReasonStreamReconstructionFailed:
+		ReasonStreamReconstructionFailed,
+		ReasonOPRFProtocolFailed:
 		return true
 	default:
 		return false

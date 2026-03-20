@@ -83,8 +83,10 @@ type KOutputPayload struct {
 	CertificateInfo               *CertificateInfo          `protobuf:"bytes,4,opt,name=certificate_info,json=certificateInfo,proto3" json:"certificate_info,omitempty"`                                             // NEW: Structured cert data instead of handshake packets
 	ResponseRedactionRanges       []*ResponseRedactionRange `protobuf:"bytes,5,rep,name=response_redaction_ranges,json=responseRedactionRanges,proto3" json:"response_redaction_ranges,omitempty"`
 	TimestampMs                   uint64                    `protobuf:"varint,6,opt,name=timestamp_ms,json=timestampMs,proto3" json:"timestamp_ms,omitempty"` // Unix timestamp in milliseconds when payload was created (SIGNED)
-	unknownFields                 protoimpl.UnknownFields
-	sizeCache                     protoimpl.SizeCache
+	// MPC OPRF outputs
+	OprfOutputs   []*OPRFOutput `protobuf:"bytes,10,rep,name=oprf_outputs,json=oprfOutputs,proto3" json:"oprf_outputs,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *KOutputPayload) Reset() {
@@ -159,6 +161,13 @@ func (x *KOutputPayload) GetTimestampMs() uint64 {
 	return 0
 }
 
+func (x *KOutputPayload) GetOprfOutputs() []*OPRFOutput {
+	if x != nil {
+		return x.OprfOutputs
+	}
+	return nil
+}
+
 type TOutputPayload struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// REPLACED: repeated bytes packets = 1; (TLS packets for BOTH request and response - REMOVE ALL)
@@ -166,8 +175,10 @@ type TOutputPayload struct {
 	// PRESERVE: Individual R_SP streams for R_S vs R_SP distinction
 	RequestProofStreams [][]byte `protobuf:"bytes,2,rep,name=request_proof_streams,json=requestProofStreams,proto3" json:"request_proof_streams,omitempty"` // UNCHANGED: Individual R_SP streams for revealing sensitive_proof ranges
 	TimestampMs         uint64   `protobuf:"varint,3,opt,name=timestamp_ms,json=timestampMs,proto3" json:"timestamp_ms,omitempty"`                          // UNCHANGED
-	unknownFields       protoimpl.UnknownFields
-	sizeCache           protoimpl.SizeCache
+	// MPC OPRF outputs
+	OprfOutputs   []*OPRFOutput `protobuf:"bytes,10,rep,name=oprf_outputs,json=oprfOutputs,proto3" json:"oprf_outputs,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *TOutputPayload) Reset() {
@@ -219,6 +230,13 @@ func (x *TOutputPayload) GetTimestampMs() uint64 {
 		return x.TimestampMs
 	}
 	return 0
+}
+
+func (x *TOutputPayload) GetOprfOutputs() []*OPRFOutput {
+	if x != nil {
+		return x.OprfOutputs
+	}
+	return nil
 }
 
 // Attestation report with structured data
@@ -343,6 +361,67 @@ func (x *TLSPacketInfo) GetNonce() []byte {
 	return nil
 }
 
+// MPC OPRF output included in signed transcripts
+type OPRFOutput struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	TlsStart      int32                  `protobuf:"varint,1,opt,name=tls_start,json=tlsStart,proto3" json:"tls_start,omitempty"`
+	TlsLength     int32                  `protobuf:"varint,2,opt,name=tls_length,json=tlsLength,proto3" json:"tls_length,omitempty"`
+	HashOutput    []byte                 `protobuf:"bytes,3,opt,name=hash_output,json=hashOutput,proto3" json:"hash_output,omitempty"` // 32 bytes SHA256(CMAC)
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *OPRFOutput) Reset() {
+	*x = OPRFOutput{}
+	mi := &file_signing_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *OPRFOutput) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*OPRFOutput) ProtoMessage() {}
+
+func (x *OPRFOutput) ProtoReflect() protoreflect.Message {
+	mi := &file_signing_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use OPRFOutput.ProtoReflect.Descriptor instead.
+func (*OPRFOutput) Descriptor() ([]byte, []int) {
+	return file_signing_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *OPRFOutput) GetTlsStart() int32 {
+	if x != nil {
+		return x.TlsStart
+	}
+	return 0
+}
+
+func (x *OPRFOutput) GetTlsLength() int32 {
+	if x != nil {
+		return x.TlsLength
+	}
+	return 0
+}
+
+func (x *OPRFOutput) GetHashOutput() []byte {
+	if x != nil {
+		return x.HashOutput
+	}
+	return nil
+}
+
 type SignedMessage struct {
 	state             protoimpl.MessageState `protogen:"open.v1"`
 	BodyType          BodyType               `protobuf:"varint,1,opt,name=body_type,json=bodyType,proto3,enum=teeproto.BodyType" json:"body_type,omitempty"`
@@ -360,7 +439,7 @@ type SignedMessage struct {
 
 func (x *SignedMessage) Reset() {
 	*x = SignedMessage{}
-	mi := &file_signing_proto_msgTypes[4]
+	mi := &file_signing_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -372,7 +451,7 @@ func (x *SignedMessage) String() string {
 func (*SignedMessage) ProtoMessage() {}
 
 func (x *SignedMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_signing_proto_msgTypes[4]
+	mi := &file_signing_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -385,7 +464,7 @@ func (x *SignedMessage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SignedMessage.ProtoReflect.Descriptor instead.
 func (*SignedMessage) Descriptor() ([]byte, []int) {
-	return file_signing_proto_rawDescGZIP(), []int{4}
+	return file_signing_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *SignedMessage) GetBodyType() BodyType {
@@ -448,18 +527,22 @@ var File_signing_proto protoreflect.FileDescriptor
 
 const file_signing_proto_rawDesc = "" +
 	"\n" +
-	"\rsigning.proto\x12\bteeproto\x1a\fcommon.proto\"\xa5\x03\n" +
+	"\rsigning.proto\x12\bteeproto\x1a\fcommon.proto\"\xde\x03\n" +
 	"\x0eKOutputPayload\x12)\n" +
 	"\x10redacted_request\x18\x01 \x01(\fR\x0fredactedRequest\x12Y\n" +
 	"\x18request_redaction_ranges\x18\x02 \x03(\v2\x1f.teeproto.RequestRedactionRangeR\x16requestRedactionRanges\x12F\n" +
 	"\x1fconsolidated_response_keystream\x18\x03 \x01(\fR\x1dconsolidatedResponseKeystream\x12D\n" +
 	"\x10certificate_info\x18\x04 \x01(\v2\x19.teeproto.CertificateInfoR\x0fcertificateInfo\x12\\\n" +
 	"\x19response_redaction_ranges\x18\x05 \x03(\v2 .teeproto.ResponseRedactionRangeR\x17responseRedactionRanges\x12!\n" +
-	"\ftimestamp_ms\x18\x06 \x01(\x04R\vtimestampMs\"\xb1\x01\n" +
+	"\ftimestamp_ms\x18\x06 \x01(\x04R\vtimestampMs\x127\n" +
+	"\foprf_outputs\x18\n" +
+	" \x03(\v2\x14.teeproto.OPRFOutputR\voprfOutputs\"\xea\x01\n" +
 	"\x0eTOutputPayload\x12H\n" +
 	" consolidated_response_ciphertext\x18\x01 \x01(\fR\x1econsolidatedResponseCiphertext\x122\n" +
 	"\x15request_proof_streams\x18\x02 \x03(\fR\x13requestProofStreams\x12!\n" +
-	"\ftimestamp_ms\x18\x03 \x01(\x04R\vtimestampMs\"?\n" +
+	"\ftimestamp_ms\x18\x03 \x01(\x04R\vtimestampMs\x127\n" +
+	"\foprf_outputs\x18\n" +
+	" \x03(\v2\x14.teeproto.OPRFOutputR\voprfOutputs\"?\n" +
 	"\x11AttestationReport\x12\x12\n" +
 	"\x04type\x18\x01 \x01(\tR\x04type\x12\x16\n" +
 	"\x06report\x18\x02 \x01(\fR\x06report\"r\n" +
@@ -467,7 +550,14 @@ const file_signing_proto_rawDesc = "" +
 	"\aseq_num\x18\x01 \x01(\x04R\x06seqNum\x12\x1a\n" +
 	"\bposition\x18\x02 \x01(\rR\bposition\x12\x16\n" +
 	"\x06length\x18\x03 \x01(\rR\x06length\x12\x14\n" +
-	"\x05nonce\x18\x04 \x01(\fR\x05nonce\"\xec\x02\n" +
+	"\x05nonce\x18\x04 \x01(\fR\x05nonce\"i\n" +
+	"\n" +
+	"OPRFOutput\x12\x1b\n" +
+	"\ttls_start\x18\x01 \x01(\x05R\btlsStart\x12\x1d\n" +
+	"\n" +
+	"tls_length\x18\x02 \x01(\x05R\ttlsLength\x12\x1f\n" +
+	"\vhash_output\x18\x03 \x01(\fR\n" +
+	"hashOutput\"\xec\x02\n" +
 	"\rSignedMessage\x12/\n" +
 	"\tbody_type\x18\x01 \x01(\x0e2\x12.teeproto.BodyTypeR\bbodyType\x12\x12\n" +
 	"\x04body\x18\x02 \x01(\fR\x04body\x12\x1f\n" +
@@ -496,30 +586,33 @@ func file_signing_proto_rawDescGZIP() []byte {
 }
 
 var file_signing_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_signing_proto_msgTypes = make([]protoimpl.MessageInfo, 5)
+var file_signing_proto_msgTypes = make([]protoimpl.MessageInfo, 6)
 var file_signing_proto_goTypes = []any{
 	(BodyType)(0),                  // 0: teeproto.BodyType
 	(*KOutputPayload)(nil),         // 1: teeproto.KOutputPayload
 	(*TOutputPayload)(nil),         // 2: teeproto.TOutputPayload
 	(*AttestationReport)(nil),      // 3: teeproto.AttestationReport
 	(*TLSPacketInfo)(nil),          // 4: teeproto.TLSPacketInfo
-	(*SignedMessage)(nil),          // 5: teeproto.SignedMessage
-	(*RequestRedactionRange)(nil),  // 6: teeproto.RequestRedactionRange
-	(*CertificateInfo)(nil),        // 7: teeproto.CertificateInfo
-	(*ResponseRedactionRange)(nil), // 8: teeproto.ResponseRedactionRange
+	(*OPRFOutput)(nil),             // 5: teeproto.OPRFOutput
+	(*SignedMessage)(nil),          // 6: teeproto.SignedMessage
+	(*RequestRedactionRange)(nil),  // 7: teeproto.RequestRedactionRange
+	(*CertificateInfo)(nil),        // 8: teeproto.CertificateInfo
+	(*ResponseRedactionRange)(nil), // 9: teeproto.ResponseRedactionRange
 }
 var file_signing_proto_depIdxs = []int32{
-	6, // 0: teeproto.KOutputPayload.request_redaction_ranges:type_name -> teeproto.RequestRedactionRange
-	7, // 1: teeproto.KOutputPayload.certificate_info:type_name -> teeproto.CertificateInfo
-	8, // 2: teeproto.KOutputPayload.response_redaction_ranges:type_name -> teeproto.ResponseRedactionRange
-	0, // 3: teeproto.SignedMessage.body_type:type_name -> teeproto.BodyType
-	3, // 4: teeproto.SignedMessage.attestation_report:type_name -> teeproto.AttestationReport
-	4, // 5: teeproto.SignedMessage.response_packets:type_name -> teeproto.TLSPacketInfo
-	6, // [6:6] is the sub-list for method output_type
-	6, // [6:6] is the sub-list for method input_type
-	6, // [6:6] is the sub-list for extension type_name
-	6, // [6:6] is the sub-list for extension extendee
-	0, // [0:6] is the sub-list for field type_name
+	7, // 0: teeproto.KOutputPayload.request_redaction_ranges:type_name -> teeproto.RequestRedactionRange
+	8, // 1: teeproto.KOutputPayload.certificate_info:type_name -> teeproto.CertificateInfo
+	9, // 2: teeproto.KOutputPayload.response_redaction_ranges:type_name -> teeproto.ResponseRedactionRange
+	5, // 3: teeproto.KOutputPayload.oprf_outputs:type_name -> teeproto.OPRFOutput
+	5, // 4: teeproto.TOutputPayload.oprf_outputs:type_name -> teeproto.OPRFOutput
+	0, // 5: teeproto.SignedMessage.body_type:type_name -> teeproto.BodyType
+	3, // 6: teeproto.SignedMessage.attestation_report:type_name -> teeproto.AttestationReport
+	4, // 7: teeproto.SignedMessage.response_packets:type_name -> teeproto.TLSPacketInfo
+	8, // [8:8] is the sub-list for method output_type
+	8, // [8:8] is the sub-list for method input_type
+	8, // [8:8] is the sub-list for extension type_name
+	8, // [8:8] is the sub-list for extension extendee
+	0, // [0:8] is the sub-list for field type_name
 }
 
 func init() { file_signing_proto_init() }
@@ -534,7 +627,7 @@ func file_signing_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_signing_proto_rawDesc), len(file_signing_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   5,
+			NumMessages:   6,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

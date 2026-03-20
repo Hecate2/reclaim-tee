@@ -73,6 +73,9 @@ func (t *TEET) handleClientWebSocket(w http.ResponseWriter, r *http.Request) {
 				arr = append(arr, shared.EncryptedResponseData{EncryptedData: r.GetEncryptedData(), Tag: r.GetTag(), RecordHeader: r.GetRecordHeader(), SeqNum: r.GetSeqNum(), ExplicitIV: r.GetExplicitIv()})
 			}
 			msg = &shared.Message{SessionID: env.GetSessionId(), Type: shared.MsgBatchedEncryptedResponses, Data: shared.BatchedEncryptedResponseData{Responses: arr, SessionID: p.BatchedEncryptedResponses.GetSessionId(), TotalCount: int(p.BatchedEncryptedResponses.GetTotalCount())}}
+		case *teeproto.Envelope_OprfRangesSubmission:
+			// Create a message to go through session validation first
+			msg = &shared.Message{SessionID: env.GetSessionId(), Type: shared.MsgOPRFRanges, Data: p.OprfRangesSubmission}
 		default:
 			t.sendErrorToClient(sessionID, "Unknown message type")
 		}
@@ -118,6 +121,16 @@ func (t *TEET) handleClientWebSocket(w http.ResponseWriter, r *http.Request) {
 		case shared.MsgBatchedEncryptedResponses:
 			t.logger.Info("Handling MsgBatchedEncryptedResponses", zap.String("session_id", sessionID))
 			handlerErr = t.handleBatchedEncryptedResponses(sessionID, msg)
+		case shared.MsgOPRFRanges:
+			// Handle OPRF ranges from client (after session validation)
+			// ZERO ERROR POLICY: Any error terminates the session immediately
+			t.logger.Info("Handling MsgOPRFRanges", zap.String("session_id", sessionID))
+			oprfRanges, ok := msg.Data.(*teeproto.OPRFRangesSubmission)
+			if !ok {
+				handlerErr = fmt.Errorf("invalid OPRF ranges data type")
+			} else {
+				handlerErr = t.handleOPRFRangesFromClient(sessionID, oprfRanges)
+			}
 		default:
 			err := fmt.Errorf("unknown message type: %s", string(msg.Type))
 			t.terminateSessionWithError(sessionID, shared.ReasonUnknownMessageType, err, "Unknown message type")
@@ -302,6 +315,18 @@ func (t *TEET) handleTEEKWebSocket(w http.ResponseWriter, r *http.Request) {
 			// Terminate session locally without sending error back (avoid infinite loop)
 			t.logger.WithSession(sessionID).Info("Received error from TEE_K, cleaning up session", zap.String("error", p.Error.GetMessage()))
 			t.cleanupSession(sessionID)
+			continue
+		case *teeproto.Envelope_OprfMpcRound1:
+			// Handle MPC OPRF Round1 from TEE_K
+			if err := t.handleOPRFRound1(sessionID, p.OprfMpcRound1); err != nil {
+				t.terminateSessionWithError(sessionID, shared.ReasonOPRFEvaluationFailed, err, "Failed to handle OPRF Round1")
+			}
+			continue
+		case *teeproto.Envelope_OprfMpcRound3:
+			// Handle MPC OPRF Round3 from TEE_K
+			if err := t.handleOPRFRound3(sessionID, p.OprfMpcRound3); err != nil {
+				t.terminateSessionWithError(sessionID, shared.ReasonOPRFEvaluationFailed, err, "Failed to handle OPRF Round3")
+			}
 			continue
 		default:
 			t.logger.Error("Unknown message type from TEE_K",

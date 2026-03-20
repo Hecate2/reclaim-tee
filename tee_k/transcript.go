@@ -117,6 +117,16 @@ func (t *TEEK) generateComprehensiveSignatureAndSendTranscript(sessionID string)
 		t.logger.WithSession(sessionID).Info("Included response redaction ranges in signed payload", zap.Int("ranges", len(session.ResponseState.ResponseRedactionRanges)))
 	}
 
+	// Include OPRF outputs in signed payload
+	teekState, err := t.sessionManager.GetTEEKSessionState(sessionID)
+	if err == nil {
+		oprfOutputs := t.buildOPRFOutputsForSigning(teekState)
+		if len(oprfOutputs) > 0 {
+			kPayload.OprfOutputs = oprfOutputs
+			t.logger.WithSession(sessionID).Info("Included OPRF outputs in signed payload", zap.Int("count", len(oprfOutputs)))
+		}
+	}
+
 	// Create protobuf body and sign it directly
 	body, err := proto.Marshal(kPayload)
 	if err != nil {

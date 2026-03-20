@@ -194,6 +194,12 @@ func (t *TEEK) checkAndSendSignatureIfReady(sessionID string) error {
 		return fmt.Errorf("session %s not found: %v", sessionID, err)
 	}
 
+	// Get TEE_K state for OPRF check
+	teekState, err := t.sessionManager.GetTEEKSessionState(sessionID)
+	if err != nil {
+		return fmt.Errorf("TEE_K session state not found: %v", err)
+	}
+
 	// Check if all required processing is complete and atomically set signature flag
 	session.StreamsMutex.Lock()
 
@@ -205,12 +211,16 @@ func (t *TEEK) checkAndSendSignatureIfReady(sessionID string) error {
 	hasRedactedStreams := len(session.RedactedStreams) > 0
 	signatureAlreadySent := session.SignatureSent
 
+	// Check if OPRF is ready (complete, not needed, or failed)
+	oprfReady := isOPRFReady(teekState.OPRFState)
+
 	// All processing is complete when:
 	// 1. We have transcript data (from finished message)
 	// 2. Redaction processing is complete
 	// 3. We have redacted streams
 	// 4. We haven't already sent a signature
-	allProcessingComplete := transcriptReady && redactionComplete && hasRedactedStreams && !signatureAlreadySent
+	// 5. OPRF processing is complete (or not needed)
+	allProcessingComplete := transcriptReady && redactionComplete && hasRedactedStreams && !signatureAlreadySent && oprfReady
 
 	if allProcessingComplete {
 		t.logger.WithSession(sessionID).Info("All processing complete, generating and sending signature")
@@ -224,7 +234,9 @@ func (t *TEEK) checkAndSendSignatureIfReady(sessionID string) error {
 			zap.Bool("transcript_ready", transcriptReady),
 			zap.Bool("redaction_complete", redactionComplete),
 			zap.Bool("has_redacted_streams", hasRedactedStreams),
-			zap.Bool("signature_already_sent", signatureAlreadySent))
+			zap.Bool("signature_already_sent", signatureAlreadySent),
+			zap.Bool("oprf_ready", oprfReady),
+			zap.String("oprf_state", string(teekState.OPRFState)))
 		// Don't set SignatureSent = true if we're not actually sending a signature
 		session.StreamsMutex.Unlock()
 	}

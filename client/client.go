@@ -214,15 +214,24 @@ type Client struct {
 	// Request data from libreclaim library
 	requestData []byte
 
-	// Redaction ranges that need OPRF processing
+	// Redaction ranges that need OPRF processing (client-side TOPRF)
 	// Map from range start position to length
 	oprfRedactionRanges map[int]int
+
+	// MPC OPRF redaction ranges (TEE-to-TEE MPC OPRF)
+	// Map from HTTP range start position to length
+	oprfMpcRedactionRanges map[int]int
 
 	// HTTP to TLS position mapping from response analysis
 	httpToTlsMapping []TLSToHTTPMapping
 
 	// OPRF processed data for each hashed range
 	oprfRanges map[int]*OPRFRangeData
+
+	// MPC OPRF state
+	oprfMpcRangesSent    bool                      // Track if ranges were sent
+	oprfMpcRangesSpec    []*teeproto.OPRFRangeSpec // Ranges sent to TEEs
+	oprfMpcRangeMappings []OPRFMPCRangeMapping     // HTTP <-> TLS position mappings for OPRF
 }
 
 func NewClient(teekURL string) *Client {
@@ -488,22 +497,32 @@ func (c *Client) getResponseRedactions(response *HTTPResponse) ([]shared.Respons
 		return nil, fmt.Errorf("failed to get automatic response redactions: %v", err)
 	}
 
-	// Initialize oprfRedactionRanges map if needed
+	// Initialize OPRF redaction maps if needed
 	if c.oprfRedactionRanges == nil {
 		c.oprfRedactionRanges = make(map[int]int)
+	}
+	if c.oprfMpcRedactionRanges == nil {
+		c.oprfMpcRedactionRanges = make(map[int]int)
 	}
 
 	// Process OPRF redactions - store ranges that need OPRF processing
 	for _, r := range ranges {
 		// Check if this range requires OPRF processing (Hash field indicates OPRF type)
-		// Hash field is set to "oprf" when OPRF processing is needed
-		if r.Hash == *providers.HASH_TYPE_OPRF {
-			// Store the range for OPRF processing
-			if r.Start >= 0 && r.Start+r.Length <= len(response.FullResponse) {
-				c.oprfRedactionRanges[r.Start] = r.Length
+		if r.Start >= 0 && r.Start+r.Length <= len(response.FullResponse) {
+			dataToProcess := response.FullResponse[r.Start : r.Start+r.Length]
 
-				dataToProcess := response.FullResponse[r.Start : r.Start+r.Length]
-				c.logger.Info("Marked range for OPRF processing",
+			if r.Hash == *providers.HASH_TYPE_OPRF {
+				// Client-side TOPRF processing
+				c.oprfRedactionRanges[r.Start] = r.Length
+				c.logger.Info("Marked range for TOPRF processing",
+					zap.Int("start", r.Start),
+					zap.Int("length", r.Length),
+					zap.String("hash_type", r.Hash),
+					zap.String("data", string(dataToProcess)))
+			} else if r.Hash == *providers.HASH_TYPE_OPRF_MPC {
+				// TEE-to-TEE MPC OPRF processing
+				c.oprfMpcRedactionRanges[r.Start] = r.Length
+				c.logger.Info("Marked range for MPC OPRF processing",
 					zap.Int("start", r.Start),
 					zap.Int("length", r.Length),
 					zap.String("hash_type", r.Hash),

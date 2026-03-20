@@ -554,6 +554,18 @@ func (t *TEEK) generateAndSendRedactedDecryptionStream(sessionID string, spec sh
 
 	session.ConsolidatedResponseKeystream = consolidatedKeystream
 
+	// Also copy to TEEKSessionState for MPC OPRF access
+	teekState, err := t.sessionManager.GetTEEKSessionState(sessionID)
+	if err == nil {
+		teekState.ConsolidatedKeystream = consolidatedKeystream
+		// Process any queued OPRF ranges now that keystream is available
+		if teekState.ClientRangesReceived && len(teekState.OPRFRanges) > 0 {
+			if err := t.processQueuedOPRFRanges(sessionID, teekState); err != nil {
+				return fmt.Errorf("failed to process queued OPRF ranges: %w", err)
+			}
+		}
+	}
+
 	t.logger.WithSession(sessionID).Info("Consolidated response keystreams",
 		zap.Int("individual_streams", len(session.RedactedStreams)),
 		zap.Int("consolidated_keystream_bytes", len(consolidatedKeystream)))

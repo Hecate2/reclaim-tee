@@ -283,8 +283,14 @@ func (c *Client) prepareZKProofForRange(oprfData *OPRFRangeData) (*prover.InputP
 	// Convert HTTP range to TLS ciphertext position
 	httpRangeStart := oprfData.Start
 	httpRangeEnd := oprfData.Start + oprfData.Length
-	tlsStart := c.httpPositionToTlsPosition(httpRangeStart)
-	tlsEnd := c.httpPositionToTlsPosition(httpRangeEnd)
+	tlsStart, err := c.httpPositionToTlsPosition(httpRangeStart)
+	if err != nil {
+		return nil, fmt.Errorf("failed to convert HTTP range start to TLS: %w", err)
+	}
+	tlsEnd, err := c.httpPositionToTlsPosition(httpRangeEnd)
+	if err != nil {
+		return nil, fmt.Errorf("failed to convert HTTP range end to TLS: %w", err)
+	}
 
 	c.logger.Info("OPRF range mapping",
 		zap.Int("http_start", httpRangeStart),

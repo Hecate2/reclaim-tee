@@ -64,19 +64,27 @@ func (t *TEET) checkFinishedCondition(sessionID string) error {
 		t.terminateSessionWithError(sessionID, shared.ReasonSessionNotFound, err, "Failed to get session for finished condition check")
 		return err
 	}
+
+	// Get TEE_T state for OPRF check
+	teetState, err := t.sessionManager.GetTEETSessionState(sessionID)
+	if err != nil {
+		t.terminateSessionWithError(sessionID, shared.ReasonSessionStateCorrupted, err, "Failed to get TEE_T session state for finished condition check")
+		return err
+	}
+
 	session.FinishedStateMutex.Lock()
 	teekFinished := session.TEEKFinished
 	session.FinishedStateMutex.Unlock()
-	if teekFinished {
-		t.logger.Info("TEE_K has sent finished - starting transcript signing",
-			zap.String("session_id", sessionID))
 
-		// Get TEE_T session state for consolidated ciphertext
-		teetState, err := t.sessionManager.GetTEETSessionState(sessionID)
-		if err != nil {
-			t.terminateSessionWithError(sessionID, shared.ReasonSessionStateCorrupted, err, "Failed to get TEE_T session state for transcript signing")
-			return err
-		}
+	// Check if OPRF is ready (complete, not needed, or failed)
+	oprfReady := isOPRFReadyT(teetState.OPRFState)
+
+	if teekFinished && oprfReady {
+		t.logger.Info("TEE_K has sent finished and OPRF ready - starting transcript signing",
+			zap.String("session_id", sessionID),
+			zap.String("oprf_state", string(teetState.OPRFState)))
+
+		// teetState already obtained above for OPRF check
 
 		if len(teetState.ConsolidatedResponseCiphertext) == 0 {
 			t.logger.WarnIf("No consolidated response ciphertext to sign for session",
@@ -96,8 +104,15 @@ func (t *TEET) checkFinishedCondition(sessionID string) error {
 		timestampMs := time.Now().UnixMilli()
 		tOutput := &teeproto.TOutputPayload{
 			ConsolidatedResponseCiphertext: teetState.ConsolidatedResponseCiphertext, // Consolidated response ciphertext
-			RequestProofStreams:            teetState.RequestProofStreams,            // ✅ TEE_T signs R_SP streams
+			RequestProofStreams:            teetState.RequestProofStreams,            // TEE_T signs R_SP streams
 			TimestampMs:                    uint64(timestampMs),                      // Include signed timestamp
+		}
+
+		// Include OPRF outputs in signed payload
+		oprfOutputs := t.buildOPRFOutputsForSigning(teetState)
+		if len(oprfOutputs) > 0 {
+			tOutput.OprfOutputs = oprfOutputs
+			t.logger.WithSession(sessionID).Info("Included OPRF outputs in TEE_T signed payload", zap.Int("count", len(oprfOutputs)))
 		}
 
 		t.logger.Info("Including consolidated response ciphertext and R_SP streams in TEE_T signature",

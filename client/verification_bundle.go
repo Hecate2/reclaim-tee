@@ -33,7 +33,10 @@ type zkInputTOPRFParams struct {
 // getStreamPosition calculates the position of an HTTP range in the consolidated TLS stream
 func (c *Client) getStreamPosition(httpStart int) (uint32, error) {
 	// Convert HTTP position to TLS position
-	tlsPosition := c.httpPositionToTlsPosition(httpStart)
+	tlsPosition, err := c.httpPositionToTlsPosition(httpStart)
+	if err != nil {
+		return 0, fmt.Errorf("failed to convert HTTP position to TLS: %w", err)
+	}
 
 	// The TLS position is already the position in the consolidated stream
 	// since httpPositionToTlsPosition maps HTTP offsets to TLS stream offsets
@@ -105,8 +108,14 @@ func (c *Client) PrepareZKProofForTOPRF(httpRangeStart, httpRangeEnd int, toprfM
 	}
 
 	// Convert HTTP range to TLS ciphertext position
-	tlsStart := c.httpPositionToTlsPosition(httpRangeStart)
-	tlsEnd := c.httpPositionToTlsPosition(httpRangeEnd)
+	tlsStart, err := c.httpPositionToTlsPosition(httpRangeStart)
+	if err != nil {
+		return nil, fmt.Errorf("failed to convert HTTP range start to TLS: %w", err)
+	}
+	tlsEnd, err := c.httpPositionToTlsPosition(httpRangeEnd)
+	if err != nil {
+		return nil, fmt.Errorf("failed to convert HTTP range end to TLS: %w", err)
+	}
 
 	// Get the ideal blocks for TOPRF
 	inputParams, err := c.getIdealBlocksForTOPRF(tlsStart, tlsEnd, packetMetadata, cipherSuite, serverKey)
@@ -150,7 +159,12 @@ func (c *Client) PrepareZKProofForTOPRF(httpRangeStart, httpRangeEnd int, toprfM
 
 // BuildVerificationBundleData collects all artefacts and processes OPRF for hashed ranges
 func (c *Client) BuildVerificationBundleData(attestorClient *AttestorClient, providerParams *providers.HTTPProviderParams) ([]byte, error) {
-	// Process OPRF for all hashed ranges first
+	// Verify MPC OPRF outputs match between TEE_K and TEE_T
+	if err := c.verifyOPRFMPCOutputsMatch(); err != nil {
+		return nil, fmt.Errorf("MPC OPRF verification failed: %w", err)
+	}
+
+	// Process OPRF for all hashed ranges first (client-side TOPRF)
 	if err := c.ProcessOPRFForHashedRanges(attestorClient); err != nil {
 		return nil, fmt.Errorf("failed to process OPRF for hashed ranges: %v", err)
 	}
@@ -162,6 +176,123 @@ func (c *Client) BuildVerificationBundleData(attestorClient *AttestorClient, pro
 
 	// Then build the verification bundle
 	return c.buildVerificationBundle()
+}
+
+// verifyOPRFMPCOutputsMatch verifies that MPC OPRF outputs from both TEEs match
+func (c *Client) verifyOPRFMPCOutputsMatch() error {
+	// Skip if no MPC OPRF was used
+	if len(c.oprfMpcRedactionRanges) == 0 {
+		return nil
+	}
+
+	// Ensure we have both signed messages
+	if c.teekSignedMessage == nil {
+		return fmt.Errorf("missing TEE_K signed message")
+	}
+	if c.teetSignedMessage == nil {
+		return fmt.Errorf("missing TEE_T signed message")
+	}
+
+	// Extract OPRF outputs from signed payloads
+	var kPayload teeproto.KOutputPayload
+	if err := proto.Unmarshal(c.teekSignedMessage.GetBody(), &kPayload); err != nil {
+		return fmt.Errorf("failed to unmarshal TEE_K payload: %w", err)
+	}
+
+	var tPayload teeproto.TOutputPayload
+	if err := proto.Unmarshal(c.teetSignedMessage.GetBody(), &tPayload); err != nil {
+		return fmt.Errorf("failed to unmarshal TEE_T payload: %w", err)
+	}
+
+	kOutputs := kPayload.GetOprfOutputs()
+	tOutputs := tPayload.GetOprfOutputs()
+
+	// Count must match
+	if len(kOutputs) != len(tOutputs) {
+		return fmt.Errorf("MPC OPRF count mismatch: K=%d T=%d", len(kOutputs), len(tOutputs))
+	}
+
+	// Each output must match (both TEEs computed same result)
+	for i := range kOutputs {
+		if kOutputs[i].TlsStart != tOutputs[i].TlsStart ||
+			kOutputs[i].TlsLength != tOutputs[i].TlsLength {
+			return fmt.Errorf("MPC OPRF range mismatch at index %d", i)
+		}
+		if !bytes.Equal(kOutputs[i].HashOutput, tOutputs[i].HashOutput) {
+			return fmt.Errorf("MPC OPRF hash mismatch at index %d", i)
+		}
+	}
+
+	c.logger.Info("Verified MPC OPRF outputs match between TEE_K and TEE_T",
+		zap.Int("count", len(kOutputs)))
+
+	// Populate oprfRanges for ParamValue replacement
+	return c.populateOPRFMPCRanges(kOutputs)
+}
+
+// populateOPRFMPCRanges populates oprfRanges from MPC OPRF outputs
+// This enables replaceParamValuesWithOPRF to work with MPC OPRF just like ZK OPRF
+func (c *Client) populateOPRFMPCRanges(oprfOutputs []*teeproto.OPRFOutput) error {
+	if len(oprfOutputs) == 0 {
+		return nil
+	}
+
+	// Need HTTP response data to extract original values
+	if c.lastResponseData == nil || len(c.lastResponseData.FullResponse) == 0 {
+		c.logger.Warn("No HTTP response data available for MPC OPRF ParamValue replacement")
+		return nil
+	}
+
+	// Need mappings from buildMPCOPRFRanges
+	if len(c.oprfMpcRangeMappings) != len(oprfOutputs) {
+		return fmt.Errorf("MPC OPRF mapping count mismatch: mappings=%d outputs=%d",
+			len(c.oprfMpcRangeMappings), len(oprfOutputs))
+	}
+
+	// Initialize oprfRanges if needed
+	if c.oprfRanges == nil {
+		c.oprfRanges = make(map[int]*OPRFRangeData)
+	}
+
+	// Match OPRF outputs to HTTP positions using stored mappings
+	// Both are ordered by TLS position (sorted in buildMPCOPRFRanges)
+	for i, output := range oprfOutputs {
+		mapping := c.oprfMpcRangeMappings[i]
+
+		// Verify TLS positions match
+		if int(output.TlsStart) != mapping.TLSStart || int(output.TlsLength) != mapping.TLSLength {
+			return fmt.Errorf("MPC OPRF position mismatch at index %d: expected TLS[%d:%d], got TLS[%d:%d]",
+				i, mapping.TLSStart, mapping.TLSStart+mapping.TLSLength,
+				output.TlsStart, output.TlsStart+output.TlsLength)
+		}
+
+		// Extract original data from HTTP response
+		httpEnd := mapping.HTTPStart + mapping.HTTPLength
+		if httpEnd > len(c.lastResponseData.FullResponse) {
+			return fmt.Errorf("MPC OPRF HTTP range exceeds response data: start=%d length=%d response_len=%d",
+				mapping.HTTPStart, mapping.HTTPLength, len(c.lastResponseData.FullResponse))
+		}
+		originalData := c.lastResponseData.FullResponse[mapping.HTTPStart:httpEnd]
+
+		// Create OPRFRangeData with MPC OPRF output
+		// Note: Only Data and FinalOutput are used by replaceParamValuesWithOPRF
+		c.oprfRanges[mapping.HTTPStart] = &OPRFRangeData{
+			Start:       mapping.HTTPStart,
+			Length:      mapping.HTTPLength,
+			Data:        originalData,
+			FinalOutput: output.HashOutput, // MPC OPRF uses SHA256(CMAC) as final output
+		}
+
+		c.logger.Debug("Populated MPC OPRF range for ParamValue replacement",
+			zap.Int("http_start", mapping.HTTPStart),
+			zap.Int("http_length", mapping.HTTPLength),
+			zap.String("data", string(originalData)),
+			zap.Int("hash_len", len(output.HashOutput)))
+	}
+
+	c.logger.Info("Populated oprfRanges from MPC OPRF outputs",
+		zap.Int("count", len(oprfOutputs)))
+	return nil
 }
 
 // stripUnsignedFields creates a copy of SignedMessage with only the signed fields.
@@ -203,16 +334,23 @@ func (c *Client) buildVerificationBundle() ([]byte, error) {
 	// TEE_T signed message (T_OUTPUT) - strip unsigned metadata fields before sending to attestor
 	bundle.TeetSigned = stripUnsignedFields(c.teetSignedMessage)
 
-	// OPRF verification data is required if there were OPRF redaction ranges
-	if len(c.oprfRedactionRanges) > 0 {
+	// OPRF verification data handles two types:
+	// 1. Legacy TOPRF (oprfRedactionRanges) - uses ZK proofs, requires ZKProofParams
+	// 2. MPC OPRF (oprfMpcRedactionRanges) - verified via TEE signatures in teekSigned/teetSigned
+	// Both populate oprfRanges for ParamValue replacement, but only legacy TOPRF goes in bundle.OprfVerifications
+	expectedOprfCount := len(c.oprfRedactionRanges) + len(c.oprfMpcRedactionRanges)
+	if expectedOprfCount > 0 {
 		if len(c.oprfRanges) == 0 {
 			return nil, fmt.Errorf("SECURITY ERROR: OPRF redaction ranges present but OPRF processing was not completed")
 		}
-		if len(c.oprfRanges) != len(c.oprfRedactionRanges) {
-			return nil, fmt.Errorf("SECURITY ERROR: OPRF range count mismatch - expected %d, got %d", len(c.oprfRedactionRanges), len(c.oprfRanges))
+		if len(c.oprfRanges) != expectedOprfCount {
+			return nil, fmt.Errorf("SECURITY ERROR: OPRF range count mismatch - expected %d (legacy=%d + mpc=%d), got %d",
+				expectedOprfCount, len(c.oprfRedactionRanges), len(c.oprfMpcRedactionRanges), len(c.oprfRanges))
 		}
-		c.logger.Info("Adding OPRF verification data to bundle",
-			zap.Int("num_ranges", len(c.oprfRanges)))
+		c.logger.Info("OPRF ranges ready for bundle",
+			zap.Int("total_oprf_ranges", len(c.oprfRanges)),
+			zap.Int("legacy_toprf", len(c.oprfRedactionRanges)),
+			zap.Int("mpc_oprf", len(c.oprfMpcRedactionRanges)))
 
 		// Sort by range start for consistent ordering
 		var sortedStarts []int
@@ -221,15 +359,19 @@ func (c *Client) buildVerificationBundle() ([]byte, error) {
 		}
 		sort.Ints(sortedStarts)
 
-		// Create OPRF verification entries
+		// Create OPRF verification entries (only for legacy TOPRF with ZK proofs)
+		// MPC OPRF ranges don't have ZKProofParams - they're verified via TEE signatures
+		legacyToprfCount := 0
 		for _, start := range sortedStarts {
 			oprfData := c.oprfRanges[start]
 
-			// Get stream range that corresponds to the ZK Input blocks
-			// The attestor needs to extract the same block structure used for ZK proof
+			// Skip MPC OPRF ranges (no ZK proofs - verified via TEE signatures)
 			if oprfData.ZKProofParams == nil || len(oprfData.ZKProofParams.Input) == 0 {
-				return nil, fmt.Errorf("missing ZK proof input for range %d", oprfData.Start)
+				c.logger.Debug("Skipping MPC OPRF range in bundle verification entries",
+					zap.Int("range_start", oprfData.Start))
+				continue
 			}
+			legacyToprfCount++
 
 			// The stream position and length must match exactly what was extracted for ZK proof
 			// This is the actual length without padding - boundary fields handle incomplete blocks
@@ -333,6 +475,14 @@ func (c *Client) buildVerificationBundle() ([]byte, error) {
 				zap.Uint32("stream_pos", streamPos),
 				zap.Uint32("stream_length", streamLength))
 		}
+
+		// Validate we processed the expected number of legacy TOPRF ranges
+		if legacyToprfCount != len(c.oprfRedactionRanges) {
+			return nil, fmt.Errorf("SECURITY ERROR: legacy TOPRF count mismatch - expected %d, processed %d",
+				len(c.oprfRedactionRanges), legacyToprfCount)
+		}
+		c.logger.Info("Added OPRF verification entries to bundle",
+			zap.Int("legacy_toprf_entries", legacyToprfCount))
 	}
 
 	// Verify that keystream generation using metadata produces same result as TEE_K
@@ -542,17 +692,18 @@ func (c *Client) compareWithTEEKKeystream(generatedKeystream []byte) {
 }
 
 // httpPositionToTlsPosition converts HTTP response position to TLS stream position
-func (c *Client) httpPositionToTlsPosition(httpPos int) int {
+// Returns an error if no mapping is found for the position
+func (c *Client) httpPositionToTlsPosition(httpPos int) (int, error) {
 	for _, mapping := range c.httpToTlsMapping {
 		mappingEnd := mapping.HTTPPos + mapping.Length
 		if httpPos >= mapping.HTTPPos && httpPos < mappingEnd {
 			// Position is within this mapping
 			offset := httpPos - mapping.HTTPPos
-			return mapping.TLSPos + offset
+			return mapping.TLSPos + offset, nil
 		}
 	}
 
-	panic("No HTTP-to-TLS mapping found for position")
+	return -1, fmt.Errorf("no HTTP-to-TLS mapping found for position %d", httpPos)
 }
 
 // getIdealBlocksForTOPRF extracts the ideal cipher blocks for TOPRF proof generation
@@ -969,7 +1120,13 @@ func (c *Client) mapHashedRangesToBlocks(packetMetadata []*teeproto.TLSPacketInf
 	// Process each OPRF range
 	for rangeStart, rangeLength := range c.oprfRedactionRanges {
 		// Convert HTTP position to TLS position using stored mapping
-		adjustedStart := c.httpPositionToTlsPosition(rangeStart)
+		adjustedStart, err := c.httpPositionToTlsPosition(rangeStart)
+		if err != nil {
+			c.logger.Error("Failed to convert OPRF range start to TLS",
+				zap.Int("range_start", rangeStart),
+				zap.Error(err))
+			continue // Skip this range - can't process without valid TLS position
+		}
 		adjustedEnd := adjustedStart + rangeLength
 
 		c.logger.Info("Processing OPRF range",

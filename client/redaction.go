@@ -419,6 +419,22 @@ func (c *Client) sendRedactionSpec() error {
 		return fmt.Errorf("no websocket connection to TEE_K")
 	}
 
+	// IMPORTANT: Send MPC OPRF ranges BEFORE redaction spec
+	// This allows TEEs to set OPRF state before processing redaction,
+	// preventing premature signature sending
+	mpcRanges := c.buildOPRFMPCRanges()
+	if len(mpcRanges) > 0 {
+		if err := c.sendOPRFRangesToBothTEEs(mpcRanges); err != nil {
+			return fmt.Errorf("send MPC OPRF ranges: %w", err)
+		}
+		c.logger.Info("Sent MPC OPRF ranges to both TEEs", zap.Int("count", len(mpcRanges)))
+	} else {
+		// Send empty submission so TEEs know to skip OPRF
+		if err := c.sendOPRFRangesToBothTEEs(nil); err != nil {
+			return fmt.Errorf("send empty MPC OPRF ranges: %w", err)
+		}
+	}
+
 	// Map ranges
 	pr := make([]*teeproto.ResponseRedactionRange, 0, len(redactionSpec.Ranges))
 	for _, r := range redactionSpec.Ranges {
@@ -437,10 +453,77 @@ func (c *Client) sendRedactionSpec() error {
 	}
 
 	c.logger.Info("Sent redaction specification to TEE_K", zap.Int("consolidated_ranges", len(redactionSpec.Ranges)))
-	c.logger.Info("Redaction specification sent successfully")
 
 	c.advanceToPhase(PhaseReceivingRedacted)
 
 	c.logger.Info("Entering redacted receiving phase - waiting for TEE_K to send 'finished' to TEE_T")
 	return nil
+}
+
+// buildOPRFMPCRanges converts HTTP response redaction ranges with hash="oprf-mpc" to TLS positions
+// Also stores the HTTP <-> TLS position mappings for later use in ParamValue replacement
+func (c *Client) buildOPRFMPCRanges() []*teeproto.OPRFRangeSpec {
+	var ranges []*teeproto.OPRFRangeSpec
+	c.oprfMpcRangeMappings = nil // Reset mappings
+
+	// Sort HTTP starts for deterministic ordering (map iteration is random)
+	// This ensures OPRF outputs match the same order as our mappings
+	httpStarts := make([]int, 0, len(c.oprfMpcRedactionRanges))
+	for httpStart := range c.oprfMpcRedactionRanges {
+		httpStarts = append(httpStarts, httpStart)
+	}
+	slices.Sort(httpStarts)
+
+	// Iterate in sorted order for deterministic TLS range ordering
+	for _, httpStart := range httpStarts {
+		httpLength := c.oprfMpcRedactionRanges[httpStart]
+		httpEnd := httpStart + httpLength - 1
+
+		// Convert HTTP range to TLS stream positions
+		tlsStart, err := c.httpPositionToTlsPosition(httpStart)
+		if err != nil {
+			c.logger.Error("Failed to convert HTTP start position to TLS",
+				zap.Int("http_start", httpStart),
+				zap.Error(err))
+			continue
+		}
+		tlsEnd, err := c.httpPositionToTlsPosition(httpEnd)
+		if err != nil {
+			c.logger.Error("Failed to convert HTTP end position to TLS",
+				zap.Int("http_end", httpEnd),
+				zap.Error(err))
+			continue
+		}
+		tlsEnd++ // Include the end byte
+
+		// Validate length fits in single OPRF (max 64 bytes)
+		tlsLength := tlsEnd - tlsStart
+		if tlsLength > 64 {
+			c.logger.Error("MPC OPRF range too long",
+				zap.Int("tls_length", tlsLength),
+				zap.Int("max", 64))
+			continue
+		}
+		if tlsLength <= 0 {
+			c.logger.Error("Invalid MPC OPRF range",
+				zap.Int("tls_start", tlsStart),
+				zap.Int("tls_end", tlsEnd))
+			continue
+		}
+
+		// Store mapping for later use in ParamValue replacement
+		c.oprfMpcRangeMappings = append(c.oprfMpcRangeMappings, OPRFMPCRangeMapping{
+			HTTPStart:  httpStart,
+			HTTPLength: httpLength,
+			TLSStart:   tlsStart,
+			TLSLength:  tlsLength,
+		})
+
+		ranges = append(ranges, &teeproto.OPRFRangeSpec{
+			TlsStart:  int32(tlsStart),
+			TlsLength: int32(tlsLength),
+		})
+	}
+
+	return ranges
 }

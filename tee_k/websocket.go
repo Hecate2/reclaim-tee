@@ -154,12 +154,33 @@ func (t *TEEK) handleSharedTEETMessage(msgBytes []byte) {
 				return out
 			}(),
 		}
-		handlerErr = t.handleBatchedTagVerifications(sessionID, msg)
+		if handlerErr = t.handleBatchedTagVerifications(sessionID, msg); handlerErr != nil {
+			t.terminateSessionWithError(sessionID, shared.ReasonCryptoTagVerificationFailed, handlerErr, "Tag verification processing failed")
+		}
+		return
 
 	case *teeproto.Envelope_Error:
 		// TEE_T encountered an error (likely a response to our earlier error)
 		// Log it but don't terminate again (session is likely already terminating)
 		t.logger.WithSession(sessionID).Info("Received error from TEE_T", zap.String("error", p.Error.GetMessage()))
+		return
+
+	case *teeproto.Envelope_OprfMpcRound2:
+		if handlerErr = t.handleOPRFRound2(sessionID, p.OprfMpcRound2); handlerErr != nil {
+			t.terminateSessionWithError(sessionID, shared.ReasonOPRFProtocolFailed, handlerErr, "MPC OPRF Round2 failed")
+		}
+		return
+
+	case *teeproto.Envelope_OprfMpcResult:
+		if handlerErr = t.handleOPRFResult(sessionID, p.OprfMpcResult); handlerErr != nil {
+			t.terminateSessionWithError(sessionID, shared.ReasonOPRFProtocolFailed, handlerErr, "MPC OPRF result handling failed")
+		}
+		return
+
+	case *teeproto.Envelope_CiphertextReady:
+		if handlerErr = t.handleCiphertextReady(sessionID, p.CiphertextReady); handlerErr != nil {
+			t.terminateSessionWithError(sessionID, shared.ReasonResponseValidationFailed, handlerErr, "Ciphertext verification failed")
+		}
 		return
 
 	default:
@@ -168,9 +189,10 @@ func (t *TEEK) handleSharedTEETMessage(msgBytes []byte) {
 		return
 	}
 
-	// If handler returned error, session already terminated
+	// ZERO ERROR POLICY: Any handler error terminates the session immediately
+	// This catches handleBatchedResponseLengths errors
 	if handlerErr != nil {
-		t.logger.WithSession(sessionID).Debug("Handler returned error, session terminated")
+		t.terminateSessionWithError(sessionID, shared.ReasonResponseValidationFailed, handlerErr, "Response processing failed")
 	}
 }
 
@@ -394,6 +416,8 @@ func (t *TEEK) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			// Protocol specification: No client finished messages in single session mode
 			// TEE_K only sends finished to TEE_T, doesn't receive from client
 			t.logger.WithSession(sessionID).Info("Ignoring finished message from client (not needed in single session mode)")
+		case *teeproto.Envelope_OprfRangesSubmission:
+			handlerErr = t.handleOPRFRangesFromClient(sessionID, p.OprfRangesSubmission)
 		default:
 			unknownMsgErr := fmt.Errorf("unknown message type: %T", p)
 			t.terminateSessionWithError(sessionID, shared.ReasonUnknownMessageType, unknownMsgErr, "Unknown message type")
