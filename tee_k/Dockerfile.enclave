@@ -6,6 +6,7 @@ WORKDIR /app
 # Copy shared dependencies first
 COPY shared/ /app/shared/
 COPY minitls/ /app/minitls/
+COPY oprfmpc/ /app/oprfmpc/
 COPY proto/*.go /app/proto/
 
 # Copy TEE_K source files
@@ -18,6 +19,9 @@ WORKDIR /app/tee_k
 # Build TEE_K enclave binary
 RUN go build --ldflags '-s -w -extldflags=-static' -tags 'enclave osusergo netgo static_build' -o tee_k_enclave .
 
+# Copy MPC pkg directory for runtime circuit compilation
+RUN mkdir -p /mpcl && cp -r $(go env GOMODCACHE)/github.com/markkurossi/mpc@*/pkg /mpcl/
+
 FROM scratch
 
 # Copy CA certificates for HTTPS
@@ -27,6 +31,12 @@ COPY --from=app-builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 COPY --from=app-builder /app/tee_k/tee_k_enclave /tee_k_enclave
 # Copy environment configuration
 COPY deploy/tee_k.env /.env
+
+# Copy MPC pkg directory for circuit compilation
+COPY --from=app-builder /mpcl/pkg /mpcl/pkg
+
+# Set MPCLDIR for MPC circuit compiler
+ENV MPCLDIR=/mpcl
 
 # Declare environment variables that can be overridden at runtime
 # This is required for GCP Confidential Space
