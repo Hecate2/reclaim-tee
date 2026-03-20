@@ -136,8 +136,11 @@ func (t *TEET) processOPRFRound1(sessionID string, teetState *TEETSessionState, 
 	// Extract ciphertext for range
 	ciphertext := teetState.ConsolidatedResponseCiphertext[msg.TlsStart : msg.TlsStart+msg.TlsLength]
 
-	// Pad to 64 bytes using oprfmpc.PadZeros64
-	paddedCiphertext, _ := oprfmpc.PadZeros64(ciphertext, int(msg.TlsLength))
+	// Pad to 64 bytes - error only occurs if length > 64, which is validated in handleOPRFRangesFromClient
+	paddedCiphertext, err := oprfmpc.PadZeros64(ciphertext, int(msg.TlsLength))
+	if err != nil {
+		return fmt.Errorf("failed to pad ciphertext: %w", err)
+	}
 
 	// Build evaluator input: [64 bytes data][16 bytes key]
 	var evaluatorInput [80]byte
@@ -237,11 +240,10 @@ func (t *TEET) handleOPRFRound3(sessionID string, msg *teeproto.OPRFMPCRound3) e
 		return err
 	}
 
-	// Check if all OPRF computations are complete (thread-safe)
-	if teetState.GetOPRFResultCount() >= teetState.OPRFExpectedCount {
-		teetState.OPRFState = shared.OPRFStateComplete
+	// Check if all OPRF computations are complete (atomic check-and-set)
+	if teetState.TryMarkOPRFComplete() {
 		t.logger.WithSession(sessionID).Info("All MPC OPRF computations complete",
-			zap.Int("count", len(teetState.OPRFResults)))
+			zap.Int("count", teetState.GetOPRFResultCount()))
 
 		// Check if we can finalize now
 		t.checkFinishedCondition(sessionID)

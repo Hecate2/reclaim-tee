@@ -239,8 +239,7 @@ func (c *Client) populateOPRFMPCRanges(oprfOutputs []*teeproto.OPRFOutput) error
 
 	// Need HTTP response data to extract original values
 	if c.lastResponseData == nil || len(c.lastResponseData.FullResponse) == 0 {
-		c.logger.Warn("No HTTP response data available for MPC OPRF ParamValue replacement")
-		return nil
+		return fmt.Errorf("no HTTP response data available for MPC OPRF ParamValue replacement")
 	}
 
 	// Need mappings from buildMPCOPRFRanges

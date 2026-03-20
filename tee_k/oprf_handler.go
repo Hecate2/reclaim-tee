@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
@@ -163,7 +162,11 @@ func (t *TEEK) handleOPRFRound2(sessionID string, msg *teeproto.OPRFMPCRound2) e
 	// Extract keystream for range and build garbler input
 	r := teekState.OPRFRanges[rangeIndex]
 	keystream := teekState.ConsolidatedKeystream[r.TlsStart : r.TlsStart+r.TlsLength]
-	paddedKeystream, _ := oprfmpc.PadZeros64(keystream, int(r.TlsLength))
+	// PadZeros64 pads to 64 bytes - error only occurs if length > 64, which is validated earlier
+	paddedKeystream, err := oprfmpc.PadZeros64(keystream, int(r.TlsLength))
+	if err != nil {
+		return fmt.Errorf("failed to pad keystream: %w", err)
+	}
 
 	var garblerInput [80]byte
 	copy(garblerInput[:64], paddedKeystream[:])
@@ -228,11 +231,10 @@ func (t *TEEK) handleOPRFResult(sessionID string, msg *teeproto.OPRFMPCResult) e
 		HashOutput: hashOutput,
 	})
 
-	// Check if all OPRF computations are complete (thread-safe)
-	if teekState.GetOPRFResultCount() >= teekState.OPRFExpectedCount {
-		teekState.OPRFState = shared.OPRFStateComplete
+	// Check if all OPRF computations are complete (atomic check-and-set)
+	if teekState.TryMarkOPRFComplete() {
 		t.logger.WithSession(sessionID).Info("All MPC OPRF computations complete",
-			zap.Int("count", len(teekState.OPRFResults)))
+			zap.Int("count", teekState.GetOPRFResultCount()))
 
 		// Check if we can send signature now
 		t.checkAndSendSignatureIfReady(sessionID)
@@ -390,6 +392,3 @@ func (t *TEEK) sendCiphertextReadyToTEET(sessionID string, totalLength int) erro
 
 	return conn.WriteMessage(websocket.BinaryMessage, data)
 }
-
-// Ensure bytes import is used
-var _ = bytes.Equal

@@ -140,6 +140,21 @@ func (s *TEETSessionState) GetOPRFResultCount() int {
 	return len(s.OPRFResults)
 }
 
+// TryMarkOPRFComplete atomically checks if all OPRF results are received and marks complete
+// Returns true if this call transitioned to complete state (caller should trigger next steps)
+func (s *TEETSessionState) TryMarkOPRFComplete() bool {
+	s.oprfMu.Lock()
+	defer s.oprfMu.Unlock()
+	if s.OPRFState == shared.OPRFStateComplete {
+		return false // Already complete
+	}
+	if len(s.OPRFResults) >= s.OPRFExpectedCount {
+		s.OPRFState = shared.OPRFStateComplete
+		return true
+	}
+	return false
+}
+
 // GetAllOPRFResults safely returns a copy of all OPRF results
 func (s *TEETSessionState) GetAllOPRFResults() map[int]*shared.OPRFResult {
 	s.oprfMu.Lock()
