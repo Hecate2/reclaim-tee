@@ -120,8 +120,16 @@ func NewTEEKWithEnclaveManager(port int, enclaveManager *shared.EnclaveManager) 
 
 // initializeOPRFKeyShare loads OPRF key share from cloud storage or generates and saves a new one
 func initializeOPRFKeyShare(enclaveManager *shared.EnclaveManager, logger *shared.Logger, serviceName string) []byte {
-	const oprfKeyShareKey = "tee_k_oprf_key_share"
 	const oprfKeyShareSize = 16
+
+	// Build domain-specific key name (e.g., "eu-tk-oprf-key-share" for eu.tk.reclaimprotocol.org)
+	oprfKeyShareKey := "oprf-key-share" // default for standalone
+	if enclaveManager != nil {
+		if cfg := enclaveManager.GetConfig(); cfg != nil && cfg.Domain != "" {
+			// Use domain prefix for region-specific keys
+			oprfKeyShareKey = cfg.Domain + "-oprf-key-share"
+		}
+	}
 
 	// In standalone mode (no enclave manager), use static key for testing
 	if enclaveManager == nil {
