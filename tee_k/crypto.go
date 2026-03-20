@@ -498,6 +498,13 @@ func (t *TEEK) generateAndSendRedactedDecryptionStream(sessionID string, spec sh
 	}()
 	t.logger.WithSession(sessionID).Debug("Pre-processing complete", zap.Int("total_operations", totalOperations))
 
+	// Collect original streams for OPRF (need un-redacted keystream for MPC)
+	type originalStreamData struct {
+		stream []byte
+		seqNum uint64
+	}
+	var originalStreams []originalStreamData
+
 	// Create redacted decryption stream for each sequence using pre-computed operations
 	for _, seqNum := range seqNumbers {
 		length := session.ResponseState.ResponseLengthBySeq[seqNum]
@@ -507,6 +514,14 @@ func (t *TEEK) generateAndSendRedactedDecryptionStream(sessionID string, spec sh
 		if err != nil {
 			return fmt.Errorf("failed to get cached decryption stream for seq %d: %v", seqNum, err)
 		}
+
+		// Store original stream for OPRF (before redaction)
+		origCopy := make([]byte, len(originalStream))
+		copy(origCopy, originalStream)
+		if minitls.IsTLS13CipherSuite(tlsState.CipherSuite) {
+			origCopy = origCopy[:length-1] // remove content type byte to match redacted stream length
+		}
+		originalStreams = append(originalStreams, originalStreamData{stream: origCopy, seqNum: seqNum})
 
 		// Apply redaction to this stream using pre-computed operations
 		redactedStream := make([]byte, len(originalStream))
@@ -552,10 +567,19 @@ func (t *TEEK) generateAndSendRedactedDecryptionStream(sessionID string, spec sh
 
 	session.ConsolidatedResponseKeystream = consolidatedKeystream
 
-	// Also copy to TEEKSessionState for MPC OPRF access
+	// Build consolidated ORIGINAL keystream for MPC OPRF (needs un-redacted data)
+	sort.Slice(originalStreams, func(i, j int) bool {
+		return originalStreams[i].seqNum < originalStreams[j].seqNum
+	})
+	var consolidatedOriginalKeystream []byte
+	for _, orig := range originalStreams {
+		consolidatedOriginalKeystream = append(consolidatedOriginalKeystream, orig.stream...)
+	}
+
+	// Copy to TEEKSessionState for MPC OPRF access - use ORIGINAL keystream, not redacted
 	teekState, err := t.sessionManager.GetTEEKSessionState(sessionID)
 	if err == nil {
-		teekState.ConsolidatedKeystream = consolidatedKeystream
+		teekState.ConsolidatedKeystream = consolidatedOriginalKeystream // Use ORIGINAL for OPRF
 		// Process any queued OPRF ranges now that keystream is available
 		if teekState.ClientRangesReceived && len(teekState.OPRFRanges) > 0 {
 			if err := t.processQueuedOPRFRanges(sessionID, teekState); err != nil {

@@ -99,14 +99,11 @@ func initializeOPRFKeyShare(enclaveManager *shared.EnclaveManager, logger *share
 	const oprfKeyShareKey = "tee_t_oprf_key_share"
 	const oprfKeyShareSize = 16
 
-	// In standalone mode (no enclave manager), generate ephemeral key
+	// In standalone mode (no enclave manager), use static key for testing
 	if enclaveManager == nil {
-		keyShare := make([]byte, oprfKeyShareSize)
-		if _, err := rand.Read(keyShare); err != nil {
-			log.Fatalf("[%s] CRITICAL: Failed to generate OPRF key share: %v", serviceName, err)
-		}
+		keyShare := []byte{0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x20}
 		if logger != nil {
-			logger.Info("Generated ephemeral OPRF key share (standalone mode)")
+			logger.Info("Using static OPRF key share (standalone mode)")
 		}
 		return keyShare
 	}
@@ -116,7 +113,11 @@ func initializeOPRFKeyShare(enclaveManager *shared.EnclaveManager, logger *share
 	defer cancel()
 
 	cache := enclaveManager.GetCache()
-	if cache != nil {
+	if cache == nil {
+		if logger != nil {
+			logger.Error("EnclaveManager has no cache - OPRF keys will not persist!")
+		}
+	} else {
 		existingKey, err := cache.Get(ctx, oprfKeyShareKey)
 		if err == nil && len(existingKey) == oprfKeyShareSize {
 			if logger != nil {
@@ -124,8 +125,14 @@ func initializeOPRFKeyShare(enclaveManager *shared.EnclaveManager, logger *share
 			}
 			return existingKey
 		}
-		if err != nil && logger != nil {
-			logger.Debug("OPRF key share not found in cloud storage, will generate new one", zap.Error(err))
+		if err != nil {
+			if logger != nil {
+				logger.Info("OPRF key share not found in cloud storage, will generate new one", zap.Error(err))
+			}
+		} else if len(existingKey) == 0 {
+			if logger != nil {
+				logger.Error("Cache returned empty data without error - GCP adapter may be nil")
+			}
 		}
 	}
 

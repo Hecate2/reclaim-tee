@@ -224,7 +224,7 @@ func main() {
 				{
 					"xPath": "/html/body/footer/div[2]/div/div[1]/ul[3]/li[2]/a",
 					"regex": "href=\"https://(?<addr>www.trafficsafetymarketing.gov)/\"",
-					"hash":  "oprf",
+					"hash":  "oprf-mpc",
 				},
 			},
 			"paramValues": map[string]string{
