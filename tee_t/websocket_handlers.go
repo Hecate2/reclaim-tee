@@ -19,29 +19,22 @@ import (
 func (t *TEET) handleClientWebSocket(w http.ResponseWriter, r *http.Request) {
 	conn, err := teetUpgrader.Upgrade(w, r, nil)
 	if err != nil {
-		t.logger.Error("Failed to upgrade client websocket",
-			zap.Error(err),
-			zap.String("remote_addr", r.RemoteAddr))
+		t.logger.Error("Failed to upgrade client websocket", zap.Error(err))
 		return
 	}
 
-	t.logger.Debug("Client WebSocket connection established",
-		zap.String("remote_addr", r.RemoteAddr),
-		zap.String("local_addr", conn.LocalAddr().String()))
+	t.logger.Debug("Client WebSocket connection established")
 
 	var sessionID string
 
-	t.logger.Debug("Client connection stored, starting message loop")
-
 	for {
-		t.logger.Debug("Waiting for next client message...")
 
 		_, msgBytes, err := conn.ReadMessage()
 		if err != nil {
 			if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				t.logger.Debug("Client connection closed normally", zap.Error(err))
+				t.logger.Debug("Client connection closed")
 			} else if !isNetworkShutdownError(err) {
-				t.logger.Error("Client connection error", zap.Error(err), zap.String("remote_addr", r.RemoteAddr))
+				t.logger.Error("Client connection error", zap.Error(err))
 				if sessionID != "" {
 					t.terminateSessionWithError(sessionID, shared.ReasonConnectionLost, err, "Client connection lost")
 				}
@@ -55,7 +48,7 @@ func (t *TEET) handleClientWebSocket(w http.ResponseWriter, r *http.Request) {
 
 		var env teeproto.Envelope
 		if err := proto.Unmarshal(msgBytes, &env); err != nil {
-			t.logger.Error("Failed to parse message from client", zap.Error(err), zap.String("remote_addr", r.RemoteAddr))
+			t.logger.Error("Failed to parse message from client", zap.Error(err))
 			if sessionID != "" {
 				t.terminateSessionWithError(sessionID, shared.ReasonMessageParsingFailed, err, "Failed to parse message from client")
 			}
@@ -80,9 +73,7 @@ func (t *TEET) handleClientWebSocket(w http.ResponseWriter, r *http.Request) {
 			t.sendErrorToClient(sessionID, "Unknown message type")
 		}
 
-		t.logger.Info("Received message from client",
-			zap.String("message_type", string(msg.Type)),
-			zap.String("session_id", msg.SessionID))
+		t.logger.Debug("Received client message", zap.String("type", string(msg.Type)))
 
 		if msg.SessionID != "" {
 			if sessionID == "" {
@@ -100,9 +91,7 @@ func (t *TEET) handleClientWebSocket(w http.ResponseWriter, r *http.Request) {
 				} else {
 					teetState.TEETClientConn = conn
 				}
-				t.logger.Info("Activated session for client",
-					zap.String("session_id", sessionID),
-					zap.String("remote_addr", conn.RemoteAddr().String()))
+				t.logger.Info("Session activated", zap.String("sid", shared.TruncateSessionID(sessionID)))
 			} else if msg.SessionID != sessionID {
 				err := fmt.Errorf("expected %s, got %s", sessionID, msg.SessionID)
 				t.terminateSessionWithError(sessionID, shared.ReasonSessionIDMismatch, err, "Session ID mismatch")
@@ -119,12 +108,12 @@ func (t *TEET) handleClientWebSocket(w http.ResponseWriter, r *http.Request) {
 			t.logger.Debug("Handling MsgFinished from TEE_K", zap.String("session_id", sessionID))
 			handlerErr = t.handleFinishedFromTEEK(msg)
 		case shared.MsgBatchedEncryptedResponses:
-			t.logger.Info("Handling MsgBatchedEncryptedResponses", zap.String("session_id", sessionID))
+			t.logger.WithSession(sessionID).Debug("Handling batched encrypted responses")
 			handlerErr = t.handleBatchedEncryptedResponses(sessionID, msg)
 		case shared.MsgOPRFRanges:
 			// Handle OPRF ranges from client (after session validation)
 			// ZERO ERROR POLICY: Any error terminates the session immediately
-			t.logger.Info("Handling MsgOPRFRanges", zap.String("session_id", sessionID))
+			t.logger.WithSession(sessionID).Debug("Handling OPRF ranges")
 			oprfRanges, ok := msg.Data.(*teeproto.OPRFRangesSubmission)
 			if !ok {
 				handlerErr = fmt.Errorf("invalid OPRF ranges data type")
@@ -144,7 +133,7 @@ func (t *TEET) handleClientWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if sessionID != "" {
-		t.logger.Info("Cleaning up session", zap.String("session_id", sessionID))
+		t.logger.Info("Session finished", zap.String("sid", shared.TruncateSessionID(sessionID)))
 		t.sessionManager.CloseSession(sessionID)
 		t.sessionTerminator.CleanupSession(sessionID)
 	}
@@ -154,13 +143,11 @@ func (t *TEET) handleClientWebSocket(w http.ResponseWriter, r *http.Request) {
 func (t *TEET) handleTEEKWebSocket(w http.ResponseWriter, r *http.Request) {
 	conn, err := teetUpgrader.Upgrade(w, r, nil)
 	if err != nil {
-		t.logger.Error("Failed to upgrade TEE_K websocket",
-			zap.Error(err),
-			zap.String("remote_addr", r.RemoteAddr))
+		t.logger.Error("Failed to upgrade TEE_K websocket", zap.Error(err))
 		return
 	}
 
-	t.logger.Info("TEE_K connected", zap.String("remote", conn.RemoteAddr().String()))
+	t.logger.Debug("TEE_K connected")
 
 	// Wait for attestation request (first message)
 	conn.SetReadDeadline(time.Now().Add(10 * time.Second))
@@ -194,7 +181,7 @@ func (t *TEET) handleTEEKWebSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	t.logger.Info("TEE_K attestation verified")
+	t.logger.Debug("TEE_K attestation verified")
 
 	// Generate and send our attestation
 	attestation, err := t.generateAttestationForTEEK()
@@ -227,7 +214,7 @@ func (t *TEET) handleTEEKWebSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	t.logger.Info("Mutual attestation completed")
+	t.logger.Debug("Mutual attestation completed")
 
 	// Continue with existing message loop
 	activeSessions := make(map[string]bool)
@@ -237,9 +224,9 @@ func (t *TEET) handleTEEKWebSocket(w http.ResponseWriter, r *http.Request) {
 		_, msgBytes, err := conn.ReadMessage()
 		if err != nil {
 			if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				t.logger.Info("TEE_K disconnected normally")
+				t.logger.Debug("TEE_K disconnected")
 			} else if !isNetworkShutdownError(err) {
-				t.logger.Error("TEE_K connection error", zap.Error(err), zap.String("remote_addr", r.RemoteAddr))
+				t.logger.Error("TEE_K connection error", zap.Error(err))
 			}
 			break
 		}
@@ -256,7 +243,7 @@ func (t *TEET) handleTEEKWebSocket(w http.ResponseWriter, r *http.Request) {
 
 		sessionID := env.GetSessionId()
 		if sessionID == "" {
-			t.logger.Error("Missing session ID in message from TEE_K", zap.String("remote_addr", r.RemoteAddr))
+			t.logger.Error("Missing session ID in message from TEE_K")
 			t.sendErrorToTEEK("", "Missing session ID")
 			continue
 		}
@@ -268,7 +255,7 @@ func (t *TEET) handleTEEKWebSocket(w http.ResponseWriter, r *http.Request) {
 			activeSessionsMutex.Lock()
 			activeSessions[sessionID] = true
 			activeSessionsMutex.Unlock()
-			t.logger.Info("New session started on TEE_K connection", zap.String("session_id", sessionID))
+			t.logger.Debug("New session from TEE_K", zap.String("sid", shared.TruncateSessionID(sessionID)))
 		case *teeproto.Envelope_KeyShareRequest:
 			msg = &shared.Message{SessionID: sessionID, Type: shared.MsgKeyShareRequest, Data: shared.KeyShareRequestData{KeyLength: int(p.KeyShareRequest.GetKeyLength()), IVLength: int(p.KeyShareRequest.GetIvLength())}}
 		case *teeproto.Envelope_BatchedEncryptedRequest:
@@ -313,7 +300,7 @@ func (t *TEET) handleTEEKWebSocket(w http.ResponseWriter, r *http.Request) {
 		case *teeproto.Envelope_Error:
 			// TEE_K encountered an error (e.g., TLS handshake failure)
 			// Terminate session locally without sending error back (avoid infinite loop)
-			t.logger.WithSession(sessionID).Info("Received error from TEE_K, cleaning up session", zap.String("error", p.Error.GetMessage()))
+			t.logger.WithSession(sessionID).Debug("Received error from TEE_K, cleaning up")
 			t.cleanupSession(sessionID)
 			continue
 		case *teeproto.Envelope_OprfMpcRound1:
@@ -336,9 +323,7 @@ func (t *TEET) handleTEEKWebSocket(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		t.logger.Info("Received message from TEE_K",
-			zap.String("message_type", string(msg.Type)),
-			zap.String("session_id", sessionID))
+		t.logger.Debug("Received TEE_K message", zap.String("type", string(msg.Type)))
 
 		var handlerErr error
 		switch msg.Type {
@@ -351,7 +336,7 @@ func (t *TEET) handleTEEKWebSocket(w http.ResponseWriter, r *http.Request) {
 					continue
 				}
 				session.TEEKConn = shared.NewWSConnection(conn)
-				t.logger.Info("Associated TEE_K connection with session", zap.String("session_id", sessionID))
+				t.logger.Debug("Associated TEE_K connection with session")
 			}
 		case shared.MsgKeyShareRequest:
 			handlerErr = t.handleKeyShareRequestSession(msg)
@@ -378,7 +363,7 @@ func (t *TEET) handleTEEKWebSocket(w http.ResponseWriter, r *http.Request) {
 	activeSessionsMutex.RUnlock()
 
 	if sessionCount > 0 {
-		t.logger.Info("Cleaning up sessions due to TEE_K disconnect", zap.Int("session_count", sessionCount))
+		t.logger.Debug("Cleaning up sessions due to TEE_K disconnect", zap.Int("count", sessionCount))
 		activeSessionsMutex.RLock()
 		for sessionID := range activeSessions {
 			t.sessionTerminator.CleanupSession(sessionID)

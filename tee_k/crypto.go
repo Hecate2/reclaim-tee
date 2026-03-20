@@ -83,7 +83,7 @@ func (t *TEEK) encryptAndSendRequest(sessionID string, redactedRequest shared.Re
 		maxFragmentPayload = maxTLSPlaintextSize - 1 // Reserve 1 byte for content-type
 	}
 	fragmentCount := (len(rawPlaintext) + maxFragmentPayload - 1) / maxFragmentPayload
-	t.logger.WithSession(sessionID).Info("TEE_K: Processing request with batched fragments",
+	t.logger.WithSession(sessionID).Debug("TEE_K: Processing request with batched fragments",
 		zap.Int("total_bytes", len(rawPlaintext)),
 		zap.Int("max_fragment_payload", maxFragmentPayload),
 		zap.Int("fragments", fragmentCount),
@@ -143,13 +143,11 @@ func (t *TEEK) encryptAndSendRequest(sessionID string, redactedRequest shared.Re
 			}
 		}
 
-		t.logger.WithSession(sessionID).Info("Encrypted fragment",
+		t.logger.WithSession(sessionID).Debug("Encrypted fragment",
 			zap.Int("fragment", fragmentIndex+1),
 			zap.Int("of", fragmentCount),
 			zap.Int("bytes", len(encryptedData)),
-			zap.Uint64("sequence", currentSeqNum),
-			zap.Uint64("actual_seq_num_base", actualSeqNum),
-			zap.Int("redaction_ranges", len(adjustedRanges)))
+			zap.Uint64("sequence", currentSeqNum))
 
 		// Collect fragment instead of sending immediately
 		fragments = append(fragments, struct {
@@ -408,7 +406,7 @@ func (t *TEEK) generateSingleDecryptionStream(sessionID string, responseLength i
 
 // generateAndSendRedactedDecryptionStream creates redacted decryption streams but defers signature sending until all processing is complete
 func (t *TEEK) generateAndSendRedactedDecryptionStream(sessionID string, spec shared.ResponseRedactionSpec) error {
-	t.logger.WithSession(sessionID).Info("Generating redacted decryption stream", zap.Int("ranges", len(spec.Ranges)))
+	t.logger.WithSession(sessionID).Debug("Generating redacted decryption stream", zap.Int("ranges", len(spec.Ranges)))
 
 	// Get session to access response state
 	session, err := t.sessionManager.GetSession(sessionID)
@@ -442,7 +440,7 @@ func (t *TEEK) generateAndSendRedactedDecryptionStream(sessionID string, spec sh
 	session.RedactedStreams = make([]shared.SignedRedactedDecryptionStream, 0)
 	session.StreamsMutex.Unlock()
 
-	t.logger.WithSession(sessionID).Info("Pre-processing redaction ranges", zap.Int("ranges", len(spec.Ranges)))
+	t.logger.WithSession(sessionID).Debug("Pre-processing redaction ranges", zap.Int("ranges", len(spec.Ranges)))
 
 	// Map each sequence to its redaction operations
 	seqToOperations := make(map[uint64][]RedactionOperation)
@@ -498,7 +496,7 @@ func (t *TEEK) generateAndSendRedactedDecryptionStream(sessionID string, spec sh
 		}
 		return total
 	}()
-	t.logger.WithSession(sessionID).Info("Pre-processing complete", zap.Int("total_operations", totalOperations))
+	t.logger.WithSession(sessionID).Debug("Pre-processing complete", zap.Int("total_operations", totalOperations))
 
 	// Create redacted decryption stream for each sequence using pre-computed operations
 	for _, seqNum := range seqNumbers {
@@ -566,7 +564,7 @@ func (t *TEEK) generateAndSendRedactedDecryptionStream(sessionID string, spec sh
 		}
 	}
 
-	t.logger.WithSession(sessionID).Info("Consolidated response keystreams",
+	t.logger.WithSession(sessionID).Debug("Consolidated response keystreams",
 		zap.Int("individual_streams", len(session.RedactedStreams)),
 		zap.Int("consolidated_keystream_bytes", len(consolidatedKeystream)))
 
@@ -574,7 +572,7 @@ func (t *TEEK) generateAndSendRedactedDecryptionStream(sessionID string, spec sh
 	session.RedactionProcessingComplete = true
 	session.StreamsMutex.Unlock()
 
-	t.logger.WithSession(sessionID).Info("Redaction processing complete, checking if ready to send signature")
+	t.logger.WithSession(sessionID).Debug("Redaction processing complete, checking if ready to send signature")
 
 	// Check if all processing is complete and we can send signature
 	if err := t.checkAndSendSignatureIfReady(sessionID); err != nil {

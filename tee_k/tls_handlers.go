@@ -64,16 +64,16 @@ func (t *TEEK) performTLSHandshakeAndHTTP(sessionID string) error {
 	case "1.2":
 		config.MinVersion = minitls.VersionTLS12
 		config.MaxVersion = minitls.VersionTLS12
-		t.logger.WithSession(sessionID).Info("Forcing TLS 1.2")
+		t.logger.WithSession(sessionID).Debug("Forcing TLS 1.2")
 	case "1.3":
 		config.MinVersion = minitls.VersionTLS13
 		config.MaxVersion = minitls.VersionTLS13
-		t.logger.WithSession(sessionID).Info("Forcing TLS 1.3")
+		t.logger.WithSession(sessionID).Debug("Forcing TLS 1.3")
 	default:
 		// Auto-negotiate (default behavior)
 		config.MinVersion = minitls.VersionTLS12
 		config.MaxVersion = minitls.VersionTLS13
-		t.logger.WithSession(sessionID).Info("TLS version auto-negotiation enabled")
+		t.logger.WithSession(sessionID).Debug("TLS version auto-negotiation enabled")
 	}
 
 	// Configure cipher suite restrictions if specified
@@ -83,9 +83,9 @@ func (t *TEEK) performTLSHandshakeAndHTTP(sessionID string) error {
 	}
 
 	if effectiveCipherSuite != "" {
-		t.logger.WithSession(sessionID).Info("Forcing cipher suite", zap.String("cipher_suite", effectiveCipherSuite))
+		t.logger.WithSession(sessionID).Debug("Forcing cipher suite", zap.String("cipher_suite", effectiveCipherSuite))
 	} else {
-		t.logger.WithSession(sessionID).Info("Cipher suite auto-negotiation enabled")
+		t.logger.WithSession(sessionID).Debug("Cipher suite auto-negotiation enabled")
 	}
 
 	// Initialize TLS client with config
@@ -115,9 +115,8 @@ func (t *TEEK) performTLSHandshakeAndHTTP(sessionID string) error {
 	session, sessionErr := t.sessionManager.GetSession(sessionID)
 	if sessionErr == nil && tlsClient.GetCertificateInfo() != nil {
 		session.CertificateInfo = tlsClient.GetCertificateInfo()
-		t.logger.WithSession(sessionID).Info("Captured certificate info for structured verification",
-			zap.String("common_name", session.CertificateInfo.CommonName),
-			zap.String("issuer", session.CertificateInfo.IssuerCommonName))
+		t.logger.WithSession(sessionID).Debug("Captured certificate info for structured verification",
+			zap.String("common_name", session.CertificateInfo.CommonName))
 	}
 
 	// Store cipher suite for session
@@ -126,7 +125,7 @@ func (t *TEEK) performTLSHandshakeAndHTTP(sessionID string) error {
 
 	// Certificate info is stored as structured data instead of raw handshake packets
 
-	t.logger.WithSession(sessionID).Info("Handshake finished - ready for split AEAD")
+	t.logger.WithSession(sessionID).Debug("Handshake finished - ready for split AEAD")
 
 	// Send handshake complete message
 	envHandshake := &teeproto.Envelope{SessionId: sessionID, TimestampMs: time.Now().UnixMilli(),
@@ -141,8 +140,8 @@ func (t *TEEK) performTLSHandshakeAndHTTP(sessionID string) error {
 		return err
 	}
 
-	t.logger.WithSession(sessionID).Info("TLS handshake complete",
+	t.logger.WithSession(sessionID).Debug("TLS handshake complete",
 		zap.Uint16("cipher_suite", cipherSuite))
-	t.logger.WithSession(sessionID).Info("Ready for Phase 4 split AEAD response handling")
+	t.logger.WithSession(sessionID).Debug("Ready for Phase 4 split AEAD response handling")
 	return nil
 }

@@ -259,6 +259,11 @@ func (em *EnclaveManager) GetConfig() *EnclaveConfig {
 	return em.config
 }
 
+// GetCache returns the enclave cache for storing persistent data
+func (em *EnclaveManager) GetCache() *EnclaveCache {
+	return em.cache
+}
+
 // Shutdown gracefully closes all connections and resources
 func (em *EnclaveManager) Shutdown(ctx context.Context) error {
 	log.Printf("[%s] Shutting down enclave manager", em.config.ServiceName)

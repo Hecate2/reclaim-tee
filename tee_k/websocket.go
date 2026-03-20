@@ -40,7 +40,7 @@ func createTLSWebSocketDialer() *websocket.Dialer {
 
 // establishSharedTEETConnection establishes the single persistent connection to TEE_T
 func (t *TEEK) establishSharedTEETConnection() {
-	t.logger.Info("Establishing shared persistent connection to TEE_T", zap.String("teet_url", t.teetURL))
+	t.logger.Debug("Establishing shared persistent connection to TEE_T")
 
 	for {
 		conn, err := t.attemptTEETConnection("shared", 1)
@@ -54,7 +54,7 @@ func (t *TEEK) establishSharedTEETConnection() {
 		t.sharedTEETConn = conn
 		t.teetConnMutex.Unlock()
 
-		t.logger.Info("Shared persistent connection to TEE_T established successfully")
+		t.logger.Debug("Shared persistent connection to TEE_T established")
 
 		// Start monitoring the connection and auto-reconnect on failure
 		go t.monitorSharedTEETConnection()
@@ -68,14 +68,14 @@ func (t *TEEK) monitorSharedTEETConnection() {
 	conn := t.sharedTEETConn
 	t.teetConnMutex.RUnlock()
 
-	t.logger.Info("Starting shared TEE_T connection message handler")
+	t.logger.Debug("Starting shared TEE_T connection message handler")
 
 	// Handle all incoming messages from TEE_T
 	for {
 		_, msgBytes, err := conn.ReadMessage()
 		if err != nil {
 			if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				t.logger.Info("Shared TEE_T connection closed normally")
+				t.logger.Debug("Shared TEE_T connection closed")
 			} else {
 				t.logger.Error("Shared TEE_T connection lost, reconnecting", zap.Error(err))
 			}
@@ -119,7 +119,7 @@ func (t *TEEK) handleSharedTEETMessage(msgBytes []byte) {
 	switch p := env.Payload.(type) {
 	case *teeproto.Envelope_Finished:
 		// Protocol specification: TEE_T no longer sends finished responses to TEE_K
-		t.logger.WithSession(sessionID).Info("Ignoring finished message from TEE_T (not needed in single session mode)")
+		t.logger.WithSession(sessionID).Debug("Ignoring finished message from TEE_T")
 
 	case *teeproto.Envelope_BatchedResponseLengths:
 		// Build minimal shared message wrapper for existing handler
@@ -214,9 +214,7 @@ func (t *TEEK) getSharedTEETConnection() *websocket.Conn {
 func (t *TEEK) attemptTEETConnection(sessionID string, attempt int) (*websocket.Conn, error) {
 	logger := t.logger.WithSession(sessionID)
 
-	logger.Info("Starting connection attempt",
-		zap.Int("attempt", attempt),
-		zap.String("teet_url", t.teetURL))
+	logger.Debug("Starting TEE_T connection attempt", zap.Int("attempt", attempt))
 
 	// Dial WebSocket
 	var conn *websocket.Conn
@@ -300,7 +298,7 @@ func (t *TEEK) attemptTEETConnection(sessionID string, attempt int) (*websocket.
 	t.teetAttestationVerified = true
 	t.teetAttestationMutex.Unlock()
 
-	logger.Info("TEE_T attestation verified successfully")
+	logger.Debug("TEE_T attestation verified")
 
 	return conn, nil
 }
@@ -335,9 +333,7 @@ func (t *TEEK) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	t.logger.Info("Created session for client",
-		zap.String("session_id", sessionID),
-		zap.String("remote_addr", conn.RemoteAddr().String()))
+	t.logger.Info("Session created", zap.String("sid", shared.TruncateSessionID(sessionID)))
 
 	// Notify TEE_T about the new session (with retry for shared connection)
 	if err := t.notifyTEETNewSessionWithRetry(sessionID); err != nil {
@@ -361,7 +357,7 @@ func (t *TEEK) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		_, msgBytes, err := conn.ReadMessage()
 		if err != nil {
 			if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				t.logger.WithSession(sessionID).Info("Client disconnected normally")
+				t.logger.WithSession(sessionID).Debug("Client disconnected")
 			} else if !isNetworkShutdownError(err) {
 				t.logger.WithSession(sessionID).Error("Failed to read websocket message", zap.Error(err))
 			}
@@ -415,7 +411,7 @@ func (t *TEEK) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		case *teeproto.Envelope_Finished:
 			// Protocol specification: No client finished messages in single session mode
 			// TEE_K only sends finished to TEE_T, doesn't receive from client
-			t.logger.WithSession(sessionID).Info("Ignoring finished message from client (not needed in single session mode)")
+			t.logger.WithSession(sessionID).Debug("Ignoring finished message from client")
 		case *teeproto.Envelope_OprfRangesSubmission:
 			handlerErr = t.handleOPRFRangesFromClient(sessionID, p.OprfRangesSubmission)
 		default:
@@ -431,7 +427,7 @@ func (t *TEEK) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Clean up session when connection closes
-	t.logger.WithSession(sessionID).Info("Cleaning up session")
+	t.logger.WithSession(sessionID).Info("Session finished")
 	t.sessionManager.CloseSession(sessionID)
 }
 
@@ -494,7 +490,7 @@ func (t *TEEK) notifyTEETNewSession(sessionID string) error {
 		return fmt.Errorf("failed to send session registration: %v", err)
 	}
 
-	t.logger.WithSession(sessionID).Info("Successfully created TEE_T connection and sent session registration")
+	t.logger.WithSession(sessionID).Debug("TEE_T session registered")
 	return nil
 }
 

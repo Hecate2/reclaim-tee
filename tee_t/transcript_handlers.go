@@ -36,14 +36,14 @@ func (t *TEET) addToTranscript(sessionID string, data []byte, dataType string) e
 
 // handleFinishedFromTEEK handles finished message from TEE_K and triggers transcript signing
 func (t *TEET) handleFinishedFromTEEK(msg *shared.Message) error {
-	t.logger.Info("Handling finished message from TEE_K",
+	t.logger.Debug("Handling finished message from TEE_K",
 		zap.String("session_id", msg.SessionID))
 	var finishedMsg shared.FinishedMessage
 	if err := msg.UnmarshalData(&finishedMsg); err != nil {
 		t.terminateSessionWithError(msg.SessionID, shared.ReasonMessageParsingFailed, err, "Failed to unmarshal finished message from TEE_K")
 		return err
 	}
-	t.logger.Info("Received finished command from TEE_K",
+	t.logger.Debug("Received finished command from TEE_K",
 		zap.String("session_id", msg.SessionID))
 	sessionID := msg.SessionID
 	session, err := t.sessionManager.GetSession(sessionID)
@@ -80,7 +80,7 @@ func (t *TEET) checkFinishedCondition(sessionID string) error {
 	oprfReady := isOPRFReadyT(teetState.OPRFState)
 
 	if teekFinished && oprfReady {
-		t.logger.Info("TEE_K has sent finished and OPRF ready - starting transcript signing",
+		t.logger.Debug("TEE_K has sent finished and OPRF ready - starting transcript signing",
 			zap.String("session_id", sessionID),
 			zap.String("oprf_state", string(teetState.OPRFState)))
 
@@ -112,10 +112,10 @@ func (t *TEET) checkFinishedCondition(sessionID string) error {
 		oprfOutputs := t.buildOPRFOutputsForSigning(teetState)
 		if len(oprfOutputs) > 0 {
 			tOutput.OprfOutputs = oprfOutputs
-			t.logger.WithSession(sessionID).Info("Included OPRF outputs in TEE_T signed payload", zap.Int("count", len(oprfOutputs)))
+			t.logger.WithSession(sessionID).Debug("Included OPRF outputs in TEE_T signed payload", zap.Int("count", len(oprfOutputs)))
 		}
 
-		t.logger.Info("Including consolidated response ciphertext and R_SP streams in TEE_T signature",
+		t.logger.Debug("Including consolidated response ciphertext and R_SP streams in TEE_T signature",
 			zap.String("session_id", sessionID),
 			zap.Int("consolidated_response_ciphertext_bytes", len(teetState.ConsolidatedResponseCiphertext)),
 			zap.Int("proof_streams_count", len(teetState.RequestProofStreams)))
@@ -130,9 +130,8 @@ func (t *TEET) checkFinishedCondition(sessionID string) error {
 			t.terminateSessionWithError(sessionID, shared.ReasonCryptoKeyGenerationFailed, err, "Failed to sign protobuf body")
 			return err
 		}
-		t.logger.Info("Successfully signed protobuf body",
+		t.logger.Debug("Successfully signed protobuf body",
 			zap.String("session_id", sessionID),
-			zap.Int("consolidated_response_ciphertext_bytes", len(teetState.ConsolidatedResponseCiphertext)),
 			zap.Int("body_bytes", len(body)),
 			zap.Int("signature_bytes", len(signature)))
 		var attestationReport *teeproto.AttestationReport
@@ -144,12 +143,11 @@ func (t *TEET) checkFinishedCondition(sessionID string) error {
 				t.terminateSessionWithError(sessionID, shared.ReasonAttestationVerificationFailed, err, "Failed to generate attestation report")
 				return err
 			}
-			t.logger.Info("Including attestation report in SignedMessage", zap.String("session_id", sessionID))
+			t.logger.Debug("Including attestation report in SignedMessage", zap.String("session_id", sessionID))
 		} else {
 			publicKeyForStandalone = []byte(ethAddress.String())
-			t.logger.Info("Including ETH address in SignedMessage (standalone mode)",
-				zap.String("session_id", sessionID),
-				zap.String("eth_address", ethAddress.Hex()))
+			t.logger.Debug("Including ETH address in SignedMessage (standalone mode)",
+				zap.String("session_id", sessionID))
 		}
 		// Create signed message (timestamp is now inside signed body)
 		sm := &teeproto.SignedMessage{
@@ -164,7 +162,7 @@ func (t *TEET) checkFinishedCondition(sessionID string) error {
 			t.terminateSessionWithError(sessionID, shared.ReasonNetworkFailure, err, "Failed to send SignedMessage (T_OUTPUT) to client")
 			return err
 		}
-		t.logger.Info("Sent SignedMessage (T_OUTPUT) to client",
+		t.logger.Debug("Sent SignedMessage (T_OUTPUT) to client",
 			zap.String("session_id", sessionID))
 	} else {
 		t.logger.Debug("Waiting for finished from TEE_K",

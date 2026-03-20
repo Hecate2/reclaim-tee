@@ -35,7 +35,7 @@ type gcpCore struct {
 }
 
 func (c *gcpCore) Enabled(level zapcore.Level) bool {
-	return true // Accept all log levels
+	return level >= zapcore.InfoLevel // Only INFO and above in production
 }
 
 func (c *gcpCore) With(fields []zapcore.Field) zapcore.Core {
@@ -220,20 +220,34 @@ func NewLoggerFromEnv(serviceName string) (*Logger, error) {
 	return NewLogger(config)
 }
 
-// Session-aware logging methods
+// TruncateSessionID returns first 8 chars of session ID for logging (security)
+func TruncateSessionID(sessionID string) string {
+	if len(sessionID) <= 8 {
+		return sessionID
+	}
+	return sessionID[:8]
+}
+
+// Session-aware logging methods (truncates session ID for security)
 func (l *Logger) WithSession(sessionID string) *zap.Logger {
+	if sessionID == "" {
+		return l.Logger
+	}
+	return l.Logger.With(zap.String("sid", TruncateSessionID(sessionID)))
+}
+
+// WithSessionFull logs full session ID - use only when absolutely necessary
+func (l *Logger) WithSessionFull(sessionID string) *zap.Logger {
 	if sessionID == "" {
 		return l.Logger
 	}
 	return l.Logger.With(zap.String("session_id", sessionID))
 }
 
-// Connection-aware logging methods
+// Connection-aware logging methods - DEPRECATED: don't log remote addresses
 func (l *Logger) WithConnection(remoteAddr string) *zap.Logger {
-	if remoteAddr == "" {
-		return l.Logger
-	}
-	return l.Logger.With(zap.String("remote_addr", remoteAddr))
+	// No longer log remote addresses for privacy
+	return l.Logger
 }
 
 // Protocol-aware logging methods
@@ -264,7 +278,7 @@ func (l *Logger) Security(msg string, fields ...zap.Field) {
 // Session termination logging
 func (l *Logger) SessionTerminated(sessionID string, reason string, fields ...zap.Field) {
 	baseFields := []zap.Field{
-		zap.String("session_id", sessionID),
+		zap.String("sid", TruncateSessionID(sessionID)),
 		zap.String("termination_reason", reason),
 		zap.Bool("session_terminated", true),
 	}

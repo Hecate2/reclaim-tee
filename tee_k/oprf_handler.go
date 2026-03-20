@@ -23,13 +23,12 @@ func (t *TEEK) handleOPRFRangesFromClient(sessionID string, msg *teeproto.OPRFRa
 		return fmt.Errorf("failed to get TEE_K session state: %w", err)
 	}
 
-	t.logger.WithSession(sessionID).Info("Received OPRF ranges from client",
-		zap.Int("range_count", len(msg.GetRanges())))
+	t.logger.WithSession(sessionID).Info("OPRF ranges received", zap.Int("count", len(msg.GetRanges())))
 
 	// If no ranges, mark OPRF as not needed
 	if len(msg.GetRanges()) == 0 {
 		teekState.OPRFState = shared.OPRFStateNone
-		t.logger.WithSession(sessionID).Info("No OPRF ranges - skipping MPC OPRF")
+		t.logger.WithSession(sessionID).Debug("No OPRF ranges")
 		// Check if we can send signature now
 		t.checkAndSendSignatureIfReady(sessionID)
 		return nil
@@ -43,18 +42,16 @@ func (t *TEEK) handleOPRFRangesFromClient(sessionID string, msg *teeproto.OPRFRa
 	teekState.GarblerSessions = make(map[int]*oprfmpc.CMACGarblerSession)
 	teekState.OPRFResults = make(map[int]*shared.OPRFResult)
 
-	// Generate OPRF key share if not already set
-	if len(teekState.OPRFKeyShare) == 0 {
-		teekState.OPRFKeyShare = make([]byte, 16)
-		if _, err := rand.Read(teekState.OPRFKeyShare); err != nil {
-			return fmt.Errorf("failed to generate OPRF key share: %w", err)
-		}
+	// Use persistent OPRF key share from TEEK instance
+	if len(t.oprfKeyShare) == 0 {
+		return fmt.Errorf("OPRF key share not initialized")
 	}
+	teekState.OPRFKeyShare = t.oprfKeyShare
 
 	// If keystream not yet available, processing will happen later
 	// when processQueuedOPRFRanges is called after keystream is set
 	if len(teekState.ConsolidatedKeystream) == 0 {
-		t.logger.WithSession(sessionID).Info("Keystream not yet available, OPRF will be initiated after redaction processing")
+		t.logger.WithSession(sessionID).Debug("OPRF queued, waiting for keystream")
 		return nil
 	}
 
@@ -74,8 +71,7 @@ func (t *TEEK) processQueuedOPRFRanges(sessionID string, teekState *TEEKSessionS
 		return nil // Already initiated
 	}
 
-	t.logger.WithSession(sessionID).Info("Processing queued OPRF ranges",
-		zap.Int("count", len(teekState.OPRFRanges)))
+	t.logger.WithSession(sessionID).Debug("Processing queued OPRF ranges")
 
 	// Validate ranges and initiate MPC for each
 	for i, r := range teekState.OPRFRanges {
@@ -111,10 +107,7 @@ func (t *TEEK) initiateOPRFForRange(sessionID string, teekState *TEEKSessionStat
 		return fmt.Errorf("failed to compute TLS session hash: %w", err)
 	}
 
-	t.logger.WithSession(sessionID).Info("Sending MPC OPRF Round1 to TEE_T",
-		zap.Int("range_index", rangeIndex),
-		zap.Int32("tls_start", r.TlsStart),
-		zap.Int32("tls_length", r.TlsLength))
+	t.logger.WithSession(sessionID).Debug("Sending OPRF Round1", zap.Int("range", rangeIndex))
 
 	// Serialize Round1 payload
 	round1Bytes := oprfmpc.SerializeRound1(round1)
@@ -155,9 +148,7 @@ func (t *TEEK) handleOPRFRound2(sessionID string, msg *teeproto.OPRFMPCRound2) e
 		return fmt.Errorf("no garbler session found for OPRF session %d", msg.OprfSessionId)
 	}
 
-	t.logger.WithSession(sessionID).Info("Received MPC OPRF Round2 from TEE_T",
-		zap.Int("range_index", rangeIndex),
-		zap.Uint64("oprf_session_id", msg.OprfSessionId))
+	t.logger.WithSession(sessionID).Debug("Received OPRF Round2", zap.Int("range", rangeIndex))
 
 	// Extract keystream for range and build garbler input
 	r := teekState.OPRFRanges[rangeIndex]
@@ -212,10 +203,7 @@ func (t *TEEK) handleOPRFResult(sessionID string, msg *teeproto.OPRFMPCResult) e
 
 	r := teekState.OPRFRanges[rangeIndex]
 
-	t.logger.WithSession(sessionID).Info("Received MPC OPRF result from TEE_T",
-		zap.Int("range_index", rangeIndex),
-		zap.Int("cmac_len", len(msg.CmacOutput)),
-		zap.Int("hash_len", len(msg.HashOutput)))
+	t.logger.WithSession(sessionID).Debug("Received OPRF result", zap.Int("range", rangeIndex))
 
 	// Store the result (thread-safe)
 	var cmacOutput [16]byte
@@ -233,8 +221,7 @@ func (t *TEEK) handleOPRFResult(sessionID string, msg *teeproto.OPRFMPCResult) e
 
 	// Check if all OPRF computations are complete (atomic check-and-set)
 	if teekState.TryMarkOPRFComplete() {
-		t.logger.WithSession(sessionID).Info("All MPC OPRF computations complete",
-			zap.Int("count", teekState.GetOPRFResultCount()))
+		t.logger.WithSession(sessionID).Info("OPRF complete", zap.Int("count", teekState.GetOPRFResultCount()))
 
 		// Check if we can send signature now
 		t.checkAndSendSignatureIfReady(sessionID)
@@ -361,8 +348,7 @@ func (t *TEEK) handleCiphertextReady(sessionID string, msg *teeproto.CiphertextR
 		return fmt.Errorf("keystream length %d != ciphertext length %d", keystreamLen, ciphertextLen)
 	}
 
-	t.logger.WithSession(sessionID).Info("Ciphertext ready confirmed",
-		zap.Int("length", ciphertextLen))
+	t.logger.WithSession(sessionID).Debug("Ciphertext ready confirmed")
 
 	return nil
 }

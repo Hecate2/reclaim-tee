@@ -16,13 +16,13 @@ import (
 
 // startAttestationRefresh starts a background goroutine that pre-generates and refreshes attestations
 func (t *TEEK) startAttestationRefresh(ctx context.Context) {
-	t.logger.Info("Starting background attestation refresh (4-minute interval)")
+	t.logger.Debug("Starting background attestation refresh")
 
 	// Pre-generate the first attestation
 	if err := t.refreshAttestation(); err != nil {
 		t.logger.Error("Failed to pre-generate initial attestation", zap.Error(err))
 	} else {
-		t.logger.Info("Successfully pre-generated initial attestation")
+		t.logger.Debug("Pre-generated initial attestation")
 	}
 
 	// Set up 4-minute ticker for refresh
@@ -32,13 +32,13 @@ func (t *TEEK) startAttestationRefresh(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			t.logger.Info("Stopping attestation refresh due to context cancellation")
+			t.logger.Debug("Stopping attestation refresh")
 			return
 		case <-ticker.C:
 			if err := t.refreshAttestation(); err != nil {
 				t.logger.Error("Failed to refresh attestation", zap.Error(err))
 			} else {
-				t.logger.Info("Successfully refreshed attestation")
+				t.logger.Debug("Refreshed attestation")
 			}
 		}
 	}
@@ -81,10 +81,7 @@ func (t *TEEK) refreshAttestation() error {
 	t.attestationExpiry = time.Now().Add(5 * time.Minute) // Cache valid for 5 minutes
 	t.attestationMutex.Unlock()
 
-	t.logger.Info("Cached new attestation",
-		zap.String("type", attestationReport.Type),
-		zap.Int("bytes", len(attestationReport.Report)),
-		zap.Time("expires", t.attestationExpiry))
+	t.logger.Debug("Cached new attestation")
 
 	return nil
 }
@@ -103,9 +100,8 @@ func (t *TEEK) getCachedAttestation(sessionID string) (*teeproto.AttestationRepo
 
 	// Use cached attestation if valid
 	if cached != nil && time.Now().Before(expiry) {
-		t.logger.WithSession(sessionID).Info("Using cached attestation",
-			zap.String("type", cached.Type),
-			zap.Time("expires", expiry))
+		t.logger.WithSession(sessionID).Debug("Using cached attestation",
+			zap.String("type", cached.Type))
 		return cached, nil
 	}
 
@@ -181,7 +177,7 @@ func (t *TEEK) verifyTEETAttestation(msgBytes []byte, tlsCert []byte) error {
 	// Standalone mode
 	if attestation.Type == "standalone" {
 		if t.enclaveManager == nil && string(attestation.Report) == "standalone" {
-			t.logger.Info("Standalone mode attestation accepted")
+			t.logger.Debug("Standalone mode attestation accepted")
 			return nil
 		}
 		return fmt.Errorf("mode mismatch: received standalone but in enclave mode")
@@ -196,10 +192,7 @@ func (t *TEEK) verifyTEETAttestation(msgBytes []byte, tlsCert []byte) error {
 	certHash := sha256.Sum256(tlsCert)
 	expectedUserData := fmt.Sprintf("tee_t_cert_hash:%x", certHash[:])
 
-	t.logger.Info("Verifying TEE_T certificate hash",
-		zap.String("expected", expectedUserData),
-		zap.Int("attestation_bytes", len(attestation.Report)),
-		zap.String("attestation_type", attestation.Type))
+	t.logger.Debug("Verifying TEE_T certificate hash")
 
 	// Extract userData from attestation document based on type
 	var actualUserData string
@@ -216,13 +209,11 @@ func (t *TEEK) verifyTEETAttestation(msgBytes []byte, tlsCert []byte) error {
 	}
 
 	if actualUserData != expectedUserData {
-		t.logger.Error("Cert hash mismatch",
-			zap.String("expected", expectedUserData),
-			zap.String("actual", actualUserData))
-		return fmt.Errorf("cert hash mismatch: expected %s, got %s", expectedUserData, actualUserData)
+		t.logger.Error("Cert hash mismatch")
+		return fmt.Errorf("cert hash mismatch")
 	}
 
-	t.logger.Info("TEE_T certificate hash verified", zap.String("cert_hash", expectedUserData))
+	t.logger.Debug("TEE_T certificate hash verified")
 
 	// Verify PCR0
 	expectedPCR0 := os.Getenv("EXPECTED_TEET_PCR0")
@@ -236,7 +227,7 @@ func (t *TEEK) verifyTEETAttestation(msgBytes []byte, tlsCert []byte) error {
 			return fmt.Errorf("PCR0 mismatch: expected %s, got %s", expectedPCR0, pcr0)
 		}
 
-		t.logger.Info("TEE_T PCR0 verified", zap.String("pcr0", pcr0))
+		t.logger.Debug("TEE_T PCR0 verified")
 	}
 
 	return nil

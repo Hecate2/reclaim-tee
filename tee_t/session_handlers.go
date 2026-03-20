@@ -23,7 +23,7 @@ func (t *TEET) handleRedactionStreams(sessionID string, msg *shared.Message) err
 		return err
 	}
 
-	t.logger.Info("Handling redaction streams for session", zap.String("session_id", sessionID))
+	t.logger.Debug("Handling redaction streams for session", zap.String("session_id", sessionID))
 
 	var streamsData shared.RedactionStreamsData
 	if err := msg.UnmarshalData(&streamsData); err != nil {
@@ -31,7 +31,7 @@ func (t *TEET) handleRedactionStreams(sessionID string, msg *shared.Message) err
 		return err
 	}
 
-	t.logger.Info("Received redaction streams for session",
+	t.logger.Debug("Received redaction streams for session",
 		zap.String("session_id", sessionID),
 		zap.Int("streams_count", len(streamsData.Streams)),
 		zap.Int("keys_count", len(streamsData.CommitmentKeys)))
@@ -49,7 +49,7 @@ func (t *TEET) handleRedactionStreams(sessionID string, msg *shared.Message) err
 	session.RedactionState.RedactionStreams = streamsData.Streams
 	session.RedactionState.CommitmentKeys = streamsData.CommitmentKeys
 
-	t.logger.Info("Redaction streams stored for session", zap.String("session_id", sessionID))
+	t.logger.Debug("Redaction streams stored for session", zap.String("session_id", sessionID))
 
 	// Capture R_SP (sensitive_proof) streams for cryptographic signing by TEE_T
 	teetState, teetErr := t.getTEETSessionState(sessionID)
@@ -65,7 +65,7 @@ func (t *TEET) handleRedactionStreams(sessionID string, msg *shared.Message) err
 		for i, r := range streamsData.Ranges {
 			if r.Type == "sensitive_proof" && i < len(streamsData.Streams) {
 				teetState.RequestProofStreams = append(teetState.RequestProofStreams, streamsData.Streams[i])
-				t.logger.Info("Captured R_SP stream for TEE_T signing",
+				t.logger.Debug("Captured R_SP stream for TEE_T signing",
 					zap.String("session_id", sessionID),
 					zap.Int("stream_index", i),
 					zap.Int("stream_length", len(streamsData.Streams[i])))
@@ -73,7 +73,7 @@ func (t *TEET) handleRedactionStreams(sessionID string, msg *shared.Message) err
 		}
 	}
 
-	t.logger.Info("R_SP stream capture completed",
+	t.logger.Debug("R_SP stream capture completed",
 		zap.String("session_id", sessionID),
 		zap.Int("proof_streams_count", len(teetState.RequestProofStreams)))
 
@@ -84,7 +84,7 @@ func (t *TEET) handleRedactionStreams(sessionID string, msg *shared.Message) err
 
 	teetState2, err := t.getTEETSessionState(sessionID)
 	if err == nil && (teetState2.PendingEncryptedRequest != nil || len(teetState2.PendingEncryptedFragments) > 0) {
-		t.logger.Info("Processing pending encrypted request(s) with newly received streams", zap.String("session_id", sessionID))
+		t.logger.Debug("Processing pending encrypted request(s) with newly received streams", zap.String("session_id", sessionID))
 
 		// Process fragments if available, otherwise process single request
 		if len(teetState2.PendingEncryptedFragments) > 0 {
@@ -108,7 +108,7 @@ func (t *TEET) handleRedactionStreams(sessionID string, msg *shared.Message) err
 
 // handleBatchedEncryptedResponses handles batched encrypted responses from client
 func (t *TEET) handleBatchedEncryptedResponses(sessionID string, msg *shared.Message) error {
-	t.logger.Info("Handling encrypted responses for session", zap.String("session_id", sessionID))
+	t.logger.Debug("Handling encrypted responses for session", zap.String("session_id", sessionID))
 
 	var batchedResponses shared.BatchedEncryptedResponseData
 	if err := msg.UnmarshalData(&batchedResponses); err != nil {
@@ -116,7 +116,7 @@ func (t *TEET) handleBatchedEncryptedResponses(sessionID string, msg *shared.Mes
 		return err
 	}
 
-	t.logger.Info("Received batch of encrypted responses",
+	t.logger.Debug("Received batch of encrypted responses",
 		zap.String("session_id", sessionID),
 		zap.Int("total_count", batchedResponses.TotalCount))
 
@@ -169,7 +169,7 @@ func (t *TEET) handleBatchedEncryptedResponses(sessionID string, msg *shared.Mes
 	}
 	session.ResponseState.ResponsesMutex.Unlock()
 
-	t.logger.Info("BATCHING: Processed encrypted responses",
+	t.logger.Debug("BATCHING: Processed encrypted responses",
 		zap.String("session_id", sessionID),
 		zap.Int("total_count", len(batchedResponses.Responses)))
 
@@ -200,7 +200,7 @@ func (t *TEET) handleBatchedEncryptedResponses(sessionID string, msg *shared.Mes
 		return err
 	}
 
-	t.logger.Info("BATCHING: Successfully sent batch of response lengths to TEE_K",
+	t.logger.Debug("BATCHING: Successfully sent batch of response lengths to TEE_K",
 		zap.String("session_id", sessionID),
 		zap.Int("total_count", len(responseLengths)))
 
@@ -226,8 +226,8 @@ func (t *TEET) handleSessionCreation(msg *shared.Message) error {
 	}
 	teetState := &TEETSessionState{TEETClientConn: nil}
 	t.sessionManager.SetTEETSessionState(sessionID, teetState)
-	t.logger.Info("Created TEE_T session state for registered session", zap.String("session_id", sessionID))
-	t.logger.Info("Registered session from TEE_K", zap.String("session_id", sessionID))
+	t.logger.Debug("Created TEE_T session state for registered session", zap.String("session_id", sessionID))
+	t.logger.Debug("Registered session from TEE_K", zap.String("session_id", sessionID))
 	return nil
 }
 
@@ -239,7 +239,7 @@ func (t *TEET) handleKeyShareRequestSession(msg *shared.Message) error {
 		t.terminateSessionWithError("", shared.ReasonMissingSessionID, err, "Key share request missing session ID")
 		return err
 	}
-	t.logger.Info("Handling key share request for session", zap.String("session_id", sessionID))
+	t.logger.Debug("Handling key share request for session", zap.String("session_id", sessionID))
 	session, err := t.sessionManager.GetSession(sessionID)
 	if err != nil {
 		t.terminateSessionWithError(sessionID, shared.ReasonSessionNotFound, err, "Failed to get session")
@@ -261,7 +261,7 @@ func (t *TEET) handleKeyShareRequestSession(msg *shared.Message) error {
 		return err
 	}
 	teetState.KeyShare = keyShare
-	t.logger.Info("Generated key share for session",
+	t.logger.Debug("Generated key share for session",
 		zap.String("session_id", sessionID),
 		zap.Int("key_length", len(keyShare)))
 	env := &teeproto.Envelope{SessionId: sessionID, TimestampMs: time.Now().UnixMilli(),
@@ -289,7 +289,7 @@ func (t *TEET) handleBatchedEncryptedRequest(msg *shared.Message) error {
 		return err
 	}
 
-	t.logger.Info("Handling batched encrypted request for session", zap.String("session_id", sessionID))
+	t.logger.Debug("Handling batched encrypted request for session", zap.String("session_id", sessionID))
 
 	var batchedReq shared.BatchedEncryptedRequestData
 	if err := msg.UnmarshalData(&batchedReq); err != nil {
@@ -297,7 +297,7 @@ func (t *TEET) handleBatchedEncryptedRequest(msg *shared.Message) error {
 		return err
 	}
 
-	t.logger.Info("Received batched encrypted request",
+	t.logger.Debug("Received batched encrypted request",
 		zap.String("session_id", sessionID),
 		zap.Int("fragment_count", len(batchedReq.Fragments)),
 		zap.Uint64("base_seq_num", batchedReq.BaseSeqNum))
@@ -322,7 +322,7 @@ func (t *TEET) handleBatchedEncryptedRequest(msg *shared.Message) error {
 		session.RedactionState.Ranges = batchedReq.Fragments[0].RedactionRanges
 		session.RedactionState.ExpectedCommitments = batchedReq.Commitments
 
-		t.logger.Info("Stored expected commitments from batched request",
+		t.logger.Debug("Stored expected commitments from batched request",
 			zap.String("session_id", sessionID),
 			zap.Int("commitment_count", len(batchedReq.Commitments)))
 	}
@@ -358,7 +358,7 @@ func (t *TEET) handleBatchedEncryptedRequest(msg *shared.Message) error {
 			zap.Int("fragment_index", i))
 	}
 
-	t.logger.Info("Stored all fragments from batched request",
+	t.logger.Debug("Stored all fragments from batched request",
 		zap.String("session_id", sessionID),
 		zap.Int("total_fragments", len(batchedReq.Fragments)))
 
@@ -367,7 +367,7 @@ func (t *TEET) handleBatchedEncryptedRequest(msg *shared.Message) error {
 		return t.processEncryptedFragmentsWithStreams(sessionID)
 	}
 
-	t.logger.Info("Waiting for redaction streams to process batched fragments",
+	t.logger.Debug("Waiting for redaction streams to process batched fragments",
 		zap.String("session_id", sessionID))
 	return nil
 }
@@ -380,14 +380,14 @@ func (t *TEET) handleBatchedTagSecrets(msg *shared.Message) error {
 		t.terminateSessionWithError("", shared.ReasonMissingSessionID, err, "Batched tag secrets missing session ID")
 		return err
 	}
-	t.logger.Info("Handling batched tag secrets for session",
+	t.logger.Debug("Handling batched tag secrets for session",
 		zap.String("session_id", sessionID))
 	var batchedTagSecrets shared.BatchedTagSecretsData
 	if err := msg.UnmarshalData(&batchedTagSecrets); err != nil {
 		t.terminateSessionWithError(sessionID, shared.ReasonMessageParsingFailed, err, "Failed to unmarshal batched tag secrets")
 		return err
 	}
-	t.logger.Info("Received batch of tag secrets",
+	t.logger.Debug("Received batch of tag secrets",
 		zap.String("session_id", sessionID),
 		zap.Int("batch_count", batchedTagSecrets.TotalCount))
 	session, err := t.sessionManager.GetSession(sessionID)
@@ -444,13 +444,13 @@ func (t *TEET) handleBatchedTagSecrets(msg *shared.Message) error {
 			verifications = append(verifications, verificationResult)
 			break // Exit loop to send results - this is OK
 		}
-		t.logger.Info("Tag verification completed",
+		t.logger.Debug("Tag verification completed",
 			zap.String("session_id", sessionID),
 			zap.Uint64("seq_num", tagSecretsData.SeqNum),
 			zap.Bool("success", verificationResult.Success))
 	}
 	session.ResponseState.ResponsesMutex.Unlock()
-	t.logger.Info("Completed batch tag verification",
+	t.logger.Debug("Completed batch tag verification",
 		zap.String("session_id", sessionID),
 		zap.Int("total_count", totalCount),
 		zap.Bool("all_successful", allSuccessful))
@@ -478,7 +478,7 @@ func (t *TEET) handleBatchedTagSecrets(msg *shared.Message) error {
 		t.terminateSessionWithError(sessionID, shared.ReasonNetworkFailure, err, "Failed to send batch verification results to TEE_K")
 		return err
 	}
-	t.logger.Info("Successfully sent batch verification results",
+	t.logger.Debug("Successfully sent batch verification results",
 		zap.String("session_id", sessionID))
 	if !allSuccessful {
 		err := fmt.Errorf("tag verification failed for batch")
@@ -490,7 +490,7 @@ func (t *TEET) handleBatchedTagSecrets(msg *shared.Message) error {
 
 // processEncryptedRequestWithStreams processes encrypted request with available redaction streams
 func (t *TEET) processEncryptedRequestWithStreams(sessionID string, encReq *shared.EncryptedRequestData) error {
-	t.logger.Info("Processing encrypted request with available redaction streams for session",
+	t.logger.Debug("Processing encrypted request with available redaction streams for session",
 		zap.String("session_id", sessionID))
 	session, err := t.sessionManager.GetSession(sessionID)
 	if err != nil {
@@ -503,7 +503,7 @@ func (t *TEET) processEncryptedRequestWithStreams(sessionID string, encReq *shar
 		return err
 	}
 	teetState.CipherSuite = encReq.CipherSuite
-	t.logger.Info("Stored CipherSuite in session state",
+	t.logger.Debug("Stored CipherSuite in session state",
 		zap.String("session_id", sessionID),
 		zap.Uint16("cipher_suite", encReq.CipherSuite))
 	if session.RedactionState == nil {
@@ -516,7 +516,7 @@ func (t *TEET) processEncryptedRequestWithStreams(sessionID string, encReq *shar
 		t.terminateSessionWithError(sessionID, shared.ReasonCryptoTagComputationFailed, err, "Failed to reconstruct full request")
 		return err
 	}
-	t.logger.Info("Successfully reconstructed original request data",
+	t.logger.Debug("Successfully reconstructed original request data",
 		zap.String("session_id", sessionID))
 	var additionalData []byte
 	// Check if TLS 1.3 cipher suite
@@ -534,9 +534,8 @@ func (t *TEET) processEncryptedRequestWithStreams(sessionID string, encReq *shar
 		t.terminateSessionWithError(sessionID, shared.ReasonCryptoTagComputationFailed, err, "Failed to compute authentication tag")
 		return err
 	}
-	t.logger.Info("Computed split AEAD tag",
+	t.logger.Debug("Computed split AEAD tag",
 		zap.String("session_id", sessionID),
-		zap.Binary("tag", authTag),
 		zap.Int("data_length", len(reconstructedData)))
 	isTLS12AESGCMCipher := minitls.IsTLS12AESGCMCipherSuite(encReq.CipherSuite)
 	var payload []byte
@@ -550,13 +549,12 @@ func (t *TEET) processEncryptedRequestWithStreams(sessionID string, encReq *shar
 	}
 	tlsRecord := minitls.CreateApplicationDataRecord(payload)
 	// for verification against TEE_K's redacted streams
-	t.logger.Info("Constructed TLS request record (not added to transcript for verification)",
+	t.logger.Debug("Constructed TLS request record (not added to transcript for verification)",
 		zap.String("session_id", sessionID),
 		zap.Int("record_length", len(tlsRecord)))
-	t.logger.Info("Sending reconstructed encrypted data to client session",
+	t.logger.Debug("Sending reconstructed encrypted data to client session",
 		zap.String("session_id", sessionID),
-		zap.Int("data_length", len(reconstructedData)),
-		zap.Binary("first_32_bytes", reconstructedData[:min(32, len(reconstructedData))]))
+		zap.Int("data_length", len(reconstructedData)))
 	envResp := &teeproto.Envelope{SessionId: sessionID, TimestampMs: time.Now().UnixMilli(),
 		Payload: &teeproto.Envelope_BatchedEncryptedData{BatchedEncryptedData: &teeproto.BatchedEncryptedDataResponse{
 			Fragments:  []*teeproto.EncryptedDataResponse{{EncryptedData: reconstructedData, AuthTag: authTag, Success: true}},
@@ -586,7 +584,7 @@ func (t *TEET) processEncryptedFragmentsWithStreams(sessionID string) error {
 	}
 
 	if len(teetState.PendingEncryptedFragments) == 0 {
-		t.logger.Info("No fragments to process", zap.String("session_id", sessionID))
+		t.logger.Debug("No fragments to process", zap.String("session_id", sessionID))
 		return nil
 	}
 
@@ -597,7 +595,7 @@ func (t *TEET) processEncryptedFragmentsWithStreams(sessionID string) error {
 		}
 	}
 
-	t.logger.Info("Processing multiple encrypted fragments with available redaction streams",
+	t.logger.Debug("Processing multiple encrypted fragments with available redaction streams",
 		zap.String("session_id", sessionID),
 		zap.Int("fragment_count", len(teetState.PendingEncryptedFragments)))
 
@@ -664,7 +662,7 @@ func (t *TEET) processEncryptedFragmentsWithStreams(sessionID string) error {
 			return err
 		}
 
-		t.logger.Info("Processed fragment",
+		t.logger.Debug("Processed fragment",
 			zap.String("session_id", sessionID),
 			zap.Uint64("seq_num", seqNum),
 			zap.Int("data_bytes", len(reconstructedData)))
@@ -675,7 +673,7 @@ func (t *TEET) processEncryptedFragmentsWithStreams(sessionID string) error {
 	}
 
 	teetState.CipherSuite = cipherSuite
-	t.logger.Info("Successfully processed all fragments",
+	t.logger.Debug("Successfully processed all fragments",
 		zap.String("session_id", sessionID),
 		zap.Int("total_data_bytes", len(allReconstructedData)),
 		zap.Int("total_tag_bytes", len(allAuthTags)))
@@ -736,7 +734,7 @@ func (t *TEET) processEncryptedFragmentsWithStreams(sessionID string) error {
 		return err
 	}
 
-	t.logger.Info("Sent batched fragments to client",
+	t.logger.Debug("Sent batched fragments to client",
 		zap.String("session_id", sessionID),
 		zap.Int("fragment_count", len(fragments)),
 		zap.Uint64("base_seq_num", seqNums[0]))

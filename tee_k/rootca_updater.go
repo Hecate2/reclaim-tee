@@ -90,7 +90,7 @@ func StartRootCAUpdater(logger *shared.Logger) {
 }
 
 func updateRootCAs(logger *shared.Logger) {
-	logger.Info("Starting root CA update from Alpine packages")
+	logger.Debug("Starting root CA update from Alpine packages")
 
 	pemData, err := fetchAndVerifyAlpineCACerts(logger)
 	if err != nil {
@@ -111,7 +111,7 @@ func updateRootCAs(logger *shared.Logger) {
 		}
 		pemCopy = rest
 	}
-	logger.Info("Root CA certificates loaded", zap.Int("cert_count", certCount))
+	logger.Debug("Root CA certificates loaded", zap.Int("cert_count", certCount))
 
 	pool := x509.NewCertPool()
 	if !pool.AppendCertsFromPEM(pemData) {
@@ -129,7 +129,7 @@ func updateRootCAs(logger *shared.Logger) {
 	}
 	websocket.DefaultDialer.TLSClientConfig = tlsConfig
 
-	logger.Info("Root CA pool updated successfully", zap.Int("size_bytes", len(pemData)))
+	logger.Debug("Root CA pool updated successfully", zap.Int("size_bytes", len(pemData)))
 }
 
 func fetchAndVerifyAlpineCACerts(logger *shared.Logger) ([]byte, error) {
@@ -141,7 +141,7 @@ func fetchAndVerifyAlpineCACerts(logger *shared.Logger) ([]byte, error) {
 		return nil, fmt.Errorf("get package info: %w", err)
 	}
 
-	logger.Info("Found ca-certificates-bundle package", zap.String("filename", pkg.filename))
+	logger.Debug("Found ca-certificates-bundle package", zap.String("filename", pkg.filename))
 
 	// 2. Fetch the package
 	pkgURL := alpineMirror + pkg.filename
@@ -160,7 +160,7 @@ func fetchAndVerifyAlpineCACerts(logger *shared.Logger) ([]byte, error) {
 	if !bytes.Equal(actualHash[:], pkg.checksum) {
 		return nil, fmt.Errorf("checksum mismatch")
 	}
-	logger.Info("Package checksum verified")
+	logger.Debug("Package checksum verified")
 
 	// 4. Extract ca-certificates.crt from package
 	certsPEM, err := extractCertsFromAPK(pkgData)
@@ -326,7 +326,7 @@ func verifySignature(data, signature []byte, keyName string, logger *shared.Logg
 		return fmt.Errorf("signature invalid: %w", err)
 	}
 
-	logger.Info("APKINDEX signature verified", zap.String("key", keyName))
+	logger.Debug("APKINDEX signature verified", zap.String("key", keyName))
 	return nil
 }
 

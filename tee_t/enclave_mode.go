@@ -121,17 +121,14 @@ func setupEnclaveRoutes(teet *TEET, enclaveManager *shared.EnclaveManager, logge
 
 	// Attestation endpoint with ECDSA public key in user data
 	mux.HandleFunc("/attest", func(w http.ResponseWriter, r *http.Request) {
-		logger.Info("Attestation request from", zap.String("remote_addr", r.RemoteAddr))
+		logger.Debug("Attestation request received")
 
 		// Get the ECDSA public key from the TEET signing key pair
 		if teet.signingKeyPair == nil {
-			logger.Info("No signing key pair available for attestation")
+			logger.Error("No signing key pair available for attestation")
 			http.Error(w, "No signing key pair available", http.StatusInternalServerError)
 			return
 		}
-
-		ethAddress := teet.signingKeyPair.GetEthAddress()
-		logger.Info("Including ETH address in attestation", zap.String("eth_address", ethAddress.Hex()))
 
 		// Use cached attestation instead of generating new one every time
 		attestationReport, err := teet.getCachedAttestation("http_attest")
@@ -143,10 +140,7 @@ func setupEnclaveRoutes(teet *TEET, enclaveManager *shared.EnclaveManager, logge
 
 		// Encode attestation document as base64
 		attestationBase64 := base64.StdEncoding.EncodeToString(attestationReport.Report)
-		logger.Info("Returning cached attestation document",
-			zap.Int("doc_length", len(attestationReport.Report)),
-			zap.Int("base64_length", len(attestationBase64)),
-			zap.String("type", attestationReport.Type))
+		logger.Debug("Returning cached attestation")
 
 		w.Header().Set("Content-Type", "text/plain")
 		w.Header().Set("X-Enclave-Service", "tee_t")
@@ -157,7 +151,7 @@ func setupEnclaveRoutes(teet *TEET, enclaveManager *shared.EnclaveManager, logge
 
 	// Default handler for the root
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		logger.Info("Received request", zap.String("method", r.Method), zap.String("path", r.URL.Path), zap.String("remote_addr", r.RemoteAddr))
+		logger.Debug("Received HTTP request", zap.String("path", r.URL.Path))
 
 		w.Header().Set("Content-Type", "text/plain")
 		w.Header().Set("X-Enclave-Service", "tee_t")

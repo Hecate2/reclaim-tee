@@ -13,17 +13,13 @@ import (
 
 // handleRequestConnection handles connection request from client
 func (t *TEEK) handleRequestConnection(sessionID string, msg *shared.Message) error {
-	t.logger.WithSession(sessionID).Info("Handling connection request")
+	t.logger.WithSession(sessionID).Debug("Handling connection request")
 
 	var reqData shared.RequestConnectionData
 	if err := msg.UnmarshalData(&reqData); err != nil {
 		t.terminateSessionWithError(sessionID, shared.ReasonMessageParsingFailed, err, "Failed to parse connection request")
 		return err
 	}
-
-	t.logger.WithSession(sessionID).Info("Connection request received",
-		zap.String("hostname", reqData.Hostname),
-		zap.Int("port", reqData.Port))
 
 	// Store connection data in session
 	session, err := t.sessionManager.GetSession(sessionID)
@@ -42,7 +38,7 @@ func (t *TEEK) handleRequestConnection(sessionID string, msg *shared.Message) er
 		return err
 	}
 
-	t.logger.WithSession(sessionID).Info("Connection ready message sent, waiting for TCP ready")
+	t.logger.WithSession(sessionID).Debug("Connection ready, waiting for TCP")
 	return nil
 }
 
@@ -60,7 +56,7 @@ func (t *TEEK) handleTCPReady(sessionID string, msg *shared.Message) error {
 		return tcpErr
 	}
 
-	t.logger.WithSession(sessionID).Info("TCP connection ready, starting TLS handshake")
+	t.logger.WithSession(sessionID).Debug("TCP ready, starting TLS handshake")
 
 	// Start TLS handshake for this session
 	go func() {
@@ -108,10 +104,9 @@ func (t *TEEK) handleRedactedRequest(sessionID string, msg *shared.Message) erro
 		return err
 	}
 
-	t.logger.WithSession(sessionID).Info("Validating redacted request",
-		zap.Int("request_bytes", len(redactedRequest.RedactedRequest)),
-		zap.Int("redaction_ranges", len(redactedRequest.RedactionRanges)),
-		zap.Int("commitments", len(redactedRequest.Commitments)))
+	t.logger.WithSession(sessionID).Debug("Validating redacted request",
+		zap.Int("bytes", len(redactedRequest.RedactedRequest)),
+		zap.Int("ranges", len(redactedRequest.RedactionRanges)))
 
 	// SECURITY: Validate commitment count matches redaction range count
 	// Each redaction range requires a corresponding commitment to bind the client to specific values
@@ -169,16 +164,7 @@ func (t *TEEK) handleRedactedRequest(sessionID string, msg *shared.Message) erro
 	if err := t.addToTranscript(sessionID, redactionRangesBytes, "redaction_ranges"); err != nil {
 		return err
 	}
-	t.logger.WithSession(sessionID).Info("Stored redaction ranges in transcript",
-		zap.Int("ranges_count", len(redactedRequest.RedactionRanges)),
-		zap.Int("bytes", len(redactionRangesBytes)))
-
-	// TEE_T signs the proof stream, providing sufficient cryptographic proof
-
-	t.logger.WithSession(sessionID).Info("Added redaction ranges to transcript for signing")
-
-	t.logger.WithSession(sessionID).Info("Split AEAD: encrypting redacted request",
-		zap.Int("bytes", len(redactedRequest.RedactedRequest)))
+	t.logger.WithSession(sessionID).Debug("Stored redaction ranges in transcript")
 
 	// Encrypt the request and send to TEE_T
 	if err := t.encryptAndSendRequest(sessionID, redactedRequest); err != nil {
@@ -186,7 +172,7 @@ func (t *TEEK) handleRedactedRequest(sessionID string, msg *shared.Message) erro
 		return err
 	}
 
-	t.logger.WithSession(sessionID).Info("Encrypted request sent to TEE_T successfully")
+	t.logger.WithSession(sessionID).Debug("Encrypted request sent to TEE_T")
 	return nil
 }
 
@@ -280,7 +266,7 @@ func (t *TEEK) validateHTTPRequestFormat(redactedRequest []byte, ranges []shared
 			return fmt.Errorf("host header '%s' does not match connection hostname '%s'", hostHeader, expectedHost)
 		}
 
-		t.logger.Info("Host header validation passed", zap.String("host", hostHeader))
+		t.logger.Debug("Host header validation passed")
 	}
 
 	// CRITICAL VALIDATION: Check Connection: close is present
@@ -297,8 +283,7 @@ func (t *TEEK) validateHTTPRequestFormat(redactedRequest []byte, ranges []shared
 		return fmt.Errorf("connection header must be 'close', got '%s'", connectionHeader)
 	}
 
-	t.logger.Info("Connection: close validation passed")
-	t.logger.Info("Redacted request format validation passed")
+	t.logger.Debug("Request format validation passed")
 	return nil
 }
 
@@ -339,13 +324,13 @@ func (t *TEEK) validateRedactionPositions(ranges []shared.RequestRedactionRange,
 		}
 	}
 
-	t.logger.Info("Redaction position validation passed", zap.Int("ranges", len(ranges)))
+	t.logger.Debug("Redaction position validation passed")
 	return nil
 }
 
 // handleRedactionSpec handles redaction specification from client
 func (t *TEEK) handleRedactionSpec(sessionID string, msg *shared.Message) error {
-	t.logger.WithSession(sessionID).Info("Handling redaction specification")
+	t.logger.WithSession(sessionID).Debug("Handling redaction specification")
 
 	var redactionSpec shared.ResponseRedactionSpec
 	if err := msg.UnmarshalData(&redactionSpec); err != nil {
@@ -353,7 +338,7 @@ func (t *TEEK) handleRedactionSpec(sessionID string, msg *shared.Message) error 
 		return err
 	}
 
-	t.logger.WithSession(sessionID).Info("Received redaction spec", zap.Int("ranges", len(redactionSpec.Ranges)))
+	t.logger.WithSession(sessionID).Debug("Received redaction spec", zap.Int("ranges", len(redactionSpec.Ranges)))
 
 	// Validate redaction ranges
 	if err := t.validateResponseRedactionSpec(redactionSpec); err != nil {
@@ -372,7 +357,7 @@ func (t *TEEK) handleRedactionSpec(sessionID string, msg *shared.Message) error 
 		session.ResponseState = &shared.ResponseSessionState{}
 	}
 	session.ResponseState.ResponseRedactionRanges = redactionSpec.Ranges
-	t.logger.WithSession(sessionID).Info("Stored response redaction ranges for transcript signature", zap.Int("ranges", len(redactionSpec.Ranges)))
+	t.logger.WithSession(sessionID).Debug("Stored response redaction ranges")
 
 	// Generate and send redacted decryption streams
 	if err := t.generateAndSendRedactedDecryptionStreamResponse(sessionID, redactionSpec); err != nil {
@@ -380,7 +365,7 @@ func (t *TEEK) handleRedactionSpec(sessionID string, msg *shared.Message) error 
 		return err
 	}
 
-	t.logger.WithSession(sessionID).Info("Successfully processed redaction specification")
+	t.logger.WithSession(sessionID).Debug("Processed redaction specification")
 
 	// Send "finished" to TEE_T as per protocol specification
 	env := &teeproto.Envelope{
@@ -395,7 +380,7 @@ func (t *TEEK) handleRedactionSpec(sessionID string, msg *shared.Message) error 
 		return err
 	}
 
-	t.logger.WithSession(sessionID).Info("Sent finished message to TEE_T")
+	t.logger.WithSession(sessionID).Debug("Sent finished to TEE_T")
 	return nil
 }
 

@@ -129,7 +129,7 @@ func setupEnclaveRoutes(teek *TEEK, enclaveManager *shared.EnclaveManager, logge
 
 	// Attestation endpoint with ECDSA public key in user data
 	mux.HandleFunc("/attest", func(w http.ResponseWriter, r *http.Request) {
-		logger.Info("Attestation request received", zap.String("remote_addr", r.RemoteAddr))
+		logger.Debug("Attestation request received")
 
 		// Get the ECDSA public key from the TEEK signing key pair
 		if teek.signingKeyPair == nil {
@@ -142,7 +142,7 @@ func setupEnclaveRoutes(teek *TEEK, enclaveManager *shared.EnclaveManager, logge
 
 		// Create user data containing the ETH address
 		userData := fmt.Sprintf("tee_k_public_key:%s", ethAddress.Hex())
-		logger.Info("Including ETH address in attestation", zap.String("eth_address", ethAddress.Hex()))
+		logger.Debug("Including ETH address in attestation")
 
 		attestationDoc, err := enclaveManager.GenerateAttestation(r.Context(), []byte(userData))
 		if err != nil {
@@ -153,9 +153,7 @@ func setupEnclaveRoutes(teek *TEEK, enclaveManager *shared.EnclaveManager, logge
 
 		// Encode attestation document as base64
 		attestationBase64 := base64.StdEncoding.EncodeToString(attestationDoc)
-		logger.Info("Generated attestation document",
-			zap.Int("bytes", len(attestationDoc)),
-			zap.Int("base64_chars", len(attestationBase64)))
+		logger.Debug("Generated attestation document")
 
 		// Attestation type is always GCP
 		attestationType := "gcp"
@@ -169,10 +167,7 @@ func setupEnclaveRoutes(teek *TEEK, enclaveManager *shared.EnclaveManager, logge
 
 	// Default handler for the root
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		logger.Info("Received request",
-			zap.String("method", r.Method),
-			zap.String("path", r.URL.Path),
-			zap.String("remote_addr", r.RemoteAddr))
+		logger.Debug("Received HTTP request", zap.String("path", r.URL.Path))
 
 		w.Header().Set("Content-Type", "text/plain")
 		w.Header().Set("X-Enclave-Service", "tee_k")

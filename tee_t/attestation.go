@@ -14,24 +14,24 @@ import (
 )
 
 func (t *TEET) startAttestationRefresh(ctx context.Context) {
-	t.logger.Info("Starting background attestation refresh (4-minute interval)")
+	t.logger.Debug("Starting background attestation refresh (4-minute interval)")
 	if err := t.refreshAttestation(); err != nil {
 		t.logger.Error("Failed to pre-generate initial attestation", zap.Error(err))
 	} else {
-		t.logger.Info("Successfully pre-generated initial attestation")
+		t.logger.Debug("Successfully pre-generated initial attestation")
 	}
 	ticker := time.NewTicker(4 * time.Minute)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
-			t.logger.Info("Stopping attestation refresh due to context cancellation")
+			t.logger.Debug("Stopping attestation refresh due to context cancellation")
 			return
 		case <-ticker.C:
 			if err := t.refreshAttestation(); err != nil {
 				t.logger.Error("Failed to refresh attestation", zap.Error(err))
 			} else {
-				t.logger.Info("Successfully refreshed attestation")
+				t.logger.Debug("Successfully refreshed attestation")
 			}
 		}
 	}
@@ -55,10 +55,9 @@ func (t *TEET) refreshAttestation() error {
 	t.cachedAttestation = attestationReport
 	t.attestationExpiry = time.Now().Add(5 * time.Minute)
 	t.attestationMutex.Unlock()
-	t.logger.Info("Cached new attestation",
+	t.logger.Debug("Cached new attestation",
 		zap.String("type", attestationReport.Type),
-		zap.Int("bytes", len(attestationReport.Report)),
-		zap.Time("expires", t.attestationExpiry))
+		zap.Int("bytes", len(attestationReport.Report)))
 	return nil
 }
 
@@ -71,10 +70,9 @@ func (t *TEET) getCachedAttestation(sessionID string) (*teeproto.AttestationRepo
 	expiry := t.attestationExpiry
 	t.attestationMutex.RUnlock()
 	if cached != nil && time.Now().Before(expiry) {
-		t.logger.Info("Using cached attestation",
+		t.logger.Debug("Using cached attestation",
 			zap.String("session_id", sessionID),
-			zap.String("type", cached.Type),
-			zap.Time("expires", expiry))
+			zap.String("type", cached.Type))
 		return cached, nil
 	}
 	t.logger.WarnIf("Cached attestation expired or missing, generating new one",
@@ -116,8 +114,7 @@ func (t *TEET) generateAttestationForTEEK() (*teeproto.AttestationReport, error)
 	certHash := sha256.Sum256(tlsCert)
 	userData := fmt.Sprintf("tee_t_cert_hash:%x", certHash[:])
 
-	t.logger.Info("Generating attestation for TEE_K",
-		zap.String("user_data", userData),
+	t.logger.Debug("Generating attestation for TEE_K",
 		zap.Int("cert_bytes", len(tlsCert)))
 
 	attestationDoc, err := t.enclaveManager.GenerateAttestation(context.Background(), []byte(userData))
@@ -128,9 +125,8 @@ func (t *TEET) generateAttestationForTEEK() (*teeproto.AttestationReport, error)
 	// Attestation type is always GCP
 	attestationType := "gcp"
 
-	t.logger.Info("Generated attestation for TEE_K",
-		zap.String("type", attestationType),
-		zap.String("user_data", userData))
+	t.logger.Debug("Generated attestation for TEE_K",
+		zap.String("type", attestationType))
 
 	return &teeproto.AttestationReport{
 		Type:   attestationType,
@@ -145,7 +141,7 @@ func (t *TEET) verifyTEEKAttestation(req *teeproto.TEEKAttestationRequest) error
 	// Standalone mode
 	if attestation.Type == "standalone" {
 		if t.enclaveManager == nil && string(attestation.Report) == "standalone" {
-			t.logger.Info("Standalone mode attestation accepted")
+			t.logger.Debug("Standalone mode attestation accepted")
 			return nil
 		}
 		return fmt.Errorf("mode mismatch: received standalone attestation")
@@ -171,7 +167,7 @@ func (t *TEET) verifyTEEKAttestation(req *teeproto.TEEKAttestationRequest) error
 			t.expectedTEEKPCR0, pcr0)
 	}
 
-	t.logger.Info("TEE_K PCR0 verified", zap.String("pcr0", pcr0))
+	t.logger.Debug("TEE_K PCR0 verified")
 
 	// Verify attestation contains TEE_K public key identifier
 	// For GCP, the public key is in the eat_nonce claim of the JWT
@@ -179,9 +175,9 @@ func (t *TEET) verifyTEEKAttestation(req *teeproto.TEEKAttestationRequest) error
 	if err != nil {
 		t.logger.Warn("Failed to extract user data from TEE_K attestation", zap.Error(err))
 	} else if bytes.Contains([]byte(userData), []byte("tee_k_public_key:")) {
-		t.logger.Info("TEE_K attestation contains valid public key identifier", zap.String("userData", userData))
+		t.logger.Debug("TEE_K attestation contains valid public key identifier")
 	} else {
-		t.logger.Warn("TEE_K attestation missing public key identifier", zap.String("userData", userData))
+		t.logger.Warn("TEE_K attestation missing public key identifier")
 	}
 
 	return nil

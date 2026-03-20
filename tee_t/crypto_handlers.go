@@ -71,15 +71,9 @@ func (t *TEET) verifyTagForResponse(sessionID string, encryptedResp *shared.Encr
 	} else {
 		success = subtle.ConstantTimeCompare(computedTag, encryptedResp.Tag) == 1
 		if success {
-			t.logger.Info("Tag verification succeeded",
-				zap.String("session_id", sessionID),
-				zap.Uint64("seq_num", encryptedResp.SeqNum))
+			t.logger.WithSession(sessionID).Debug("Tag verification succeeded")
 		} else {
-			t.logger.Error("Tag verification failed - computed tag does not match",
-				zap.String("session_id", sessionID),
-				zap.Uint64("seq_num", encryptedResp.SeqNum),
-				zap.Binary("computed_tag", computedTag),
-				zap.Binary("expected_tag", encryptedResp.Tag))
+			t.logger.WithSession(sessionID).Error("Tag verification failed")
 		}
 	}
 
@@ -91,11 +85,7 @@ func (t *TEET) verifyTagForResponse(sessionID string, encryptedResp *shared.Encr
 			teetState.AppendResponseCiphertext(encryptedResp.EncryptedData)
 		}
 
-		t.logger.Debug("Appended response ciphertext to consolidated stream",
-			zap.String("session_id", sessionID),
-			zap.Uint64("seq_num", tagSecretsData.SeqNum),
-			zap.Int("response_ciphertext_bytes", len(encryptedResp.EncryptedData)),
-			zap.Int("total_consolidated_response_bytes", len(teetState.ConsolidatedResponseCiphertext)))
+		t.logger.WithSession(sessionID).Debug("Appended response ciphertext")
 	}
 
 	verificationData := shared.ResponseTagVerificationData{Success: success, SeqNum: tagSecretsData.SeqNum}
@@ -121,8 +111,7 @@ func (t *TEET) verifyCommitmentsIfReady(sessionID string) error {
 
 	// If no streams yet, defer verification until they arrive from client
 	if !hasStreams {
-		t.logger.Info("Redaction streams not yet available for commitment verification, deferring",
-			zap.String("session_id", sessionID))
+		t.logger.WithSession(sessionID).Debug("Deferring - streams not available")
 		return nil
 	}
 
@@ -130,8 +119,7 @@ func (t *TEET) verifyCommitmentsIfReady(sessionID string) error {
 	// Note: TEE_K validates that commitments are present before forwarding, so if streams
 	// exist but commitments never arrive, something is wrong with message ordering
 	if !hasCommitments {
-		t.logger.Info("Expected commitments not yet available for verification, deferring",
-			zap.String("session_id", sessionID))
+		t.logger.WithSession(sessionID).Debug("Deferring commitment verification")
 		return nil
 	}
 
@@ -140,14 +128,11 @@ func (t *TEET) verifyCommitmentsIfReady(sessionID string) error {
 		return fmt.Errorf("SECURITY ERROR: commitment count (%d) does not match stream count (%d)",
 			len(session.RedactionState.ExpectedCommitments), len(session.RedactionState.RedactionStreams))
 	}
-	t.logger.Info("Stream collections and expected commitments both available - verifying commitments",
-		zap.String("session_id", sessionID),
-		zap.Int("streams_count", len(session.RedactionState.RedactionStreams)),
-		zap.Int("expected_commitments_count", len(session.RedactionState.ExpectedCommitments)))
+	t.logger.WithSession(sessionID).Debug("Verifying commitments")
 	if err := t.verifyCommitments(session.RedactionState.RedactionStreams, session.RedactionState.CommitmentKeys, session.RedactionState.ExpectedCommitments); err != nil {
 		return fmt.Errorf("commitment verification failed: %v", err)
 	}
-	t.logger.Info("Commitment verification completed successfully", zap.String("session_id", sessionID))
+	t.logger.WithSession(sessionID).Debug("Commitment verification completed")
 	return nil
 }
 
@@ -174,12 +159,9 @@ func (t *TEET) verifyCommitments(streams, keys, expectedCommitments [][]byte) er
 		if !hmac.Equal(computedCommitment, expectedCommitments[i]) {
 			return fmt.Errorf("commitment %d verification failed: HMAC(stream_%d, key_%d) does not match expected commitment from TEE_K", i, i, i)
 		}
-		t.logger.Info("Stream commitment verified successfully",
-			zap.Int("stream_index", i),
-			zap.Int("commitment_length", len(computedCommitment)))
+		t.logger.Debug("Stream commitment verified", zap.Int("index", i))
 	}
-	t.logger.Info("All redaction commitments verified successfully",
-		zap.Int("total_commitments", len(streams)))
+	t.logger.Debug("All redaction commitments verified")
 	return nil
 }
 

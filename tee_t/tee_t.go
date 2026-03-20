@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"crypto/rand"
 	"fmt"
 	"log"
 	"net/http"
@@ -47,6 +49,9 @@ type TEET struct {
 
 	// Mutual attestation
 	expectedTEEKPCR0 string
+
+	// Persistent OPRF key share (loaded from cloud storage)
+	oprfKeyShare []byte
 }
 
 // NewTEETWithLogger creates a TEET with a specific logger
@@ -72,6 +77,9 @@ func NewTEETWithEnclaveManagerAndLogger(port int, enclaveManager *shared.Enclave
 		logger.Info("Generated ECDSA signing key pair", zap.String("curve", "P-256"))
 	}
 
+	// Initialize OPRF key share (persistent across restarts)
+	oprfKeyShare := initializeOPRFKeyShare(enclaveManager, logger, "tee_t")
+
 	teet := &TEET{
 		port:              port,
 		sessionManager:    NewTEETSessionManager(),
@@ -80,9 +88,68 @@ func NewTEETWithEnclaveManagerAndLogger(port int, enclaveManager *shared.Enclave
 		signingKeyPair:    signingKeyPair,
 		enclaveManager:    enclaveManager,
 		expectedTEEKPCR0:  os.Getenv("EXPECTED_TEEK_PCR0"),
+		oprfKeyShare:      oprfKeyShare,
 	}
 
 	return teet
+}
+
+// initializeOPRFKeyShare loads OPRF key share from cloud storage or generates and saves a new one
+func initializeOPRFKeyShare(enclaveManager *shared.EnclaveManager, logger *shared.Logger, serviceName string) []byte {
+	const oprfKeyShareKey = "tee_t_oprf_key_share"
+	const oprfKeyShareSize = 16
+
+	// In standalone mode (no enclave manager), generate ephemeral key
+	if enclaveManager == nil {
+		keyShare := make([]byte, oprfKeyShareSize)
+		if _, err := rand.Read(keyShare); err != nil {
+			log.Fatalf("[%s] CRITICAL: Failed to generate OPRF key share: %v", serviceName, err)
+		}
+		if logger != nil {
+			logger.Info("Generated ephemeral OPRF key share (standalone mode)")
+		}
+		return keyShare
+	}
+
+	// Try to load from cloud storage
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	cache := enclaveManager.GetCache()
+	if cache != nil {
+		existingKey, err := cache.Get(ctx, oprfKeyShareKey)
+		if err == nil && len(existingKey) == oprfKeyShareSize {
+			if logger != nil {
+				logger.Info("Loaded OPRF key share from cloud storage")
+			}
+			return existingKey
+		}
+		if err != nil && logger != nil {
+			logger.Debug("OPRF key share not found in cloud storage, will generate new one", zap.Error(err))
+		}
+	}
+
+	// Generate new key share
+	keyShare := make([]byte, oprfKeyShareSize)
+	if _, err := rand.Read(keyShare); err != nil {
+		log.Fatalf("[%s] CRITICAL: Failed to generate OPRF key share: %v", serviceName, err)
+	}
+
+	// Save to cloud storage
+	if cache != nil {
+		if err := cache.Put(ctx, oprfKeyShareKey, keyShare); err != nil {
+			if logger != nil {
+				logger.Error("Failed to save OPRF key share to cloud storage", zap.Error(err))
+			}
+			// Continue anyway - we have a valid key share in memory
+		} else if logger != nil {
+			logger.Info("Generated and saved OPRF key share to cloud storage")
+		}
+	} else if logger != nil {
+		logger.Info("Generated OPRF key share (no cache available)")
+	}
+
+	return keyShare
 }
 
 // Helper functions to access session state

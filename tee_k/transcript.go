@@ -31,7 +31,7 @@ func (t *TEEK) addToTranscript(sessionID string, data []byte, dataType string) e
 	session.TranscriptData = append(session.TranscriptData, dataCopy)
 	session.TranscriptDataTypes = append(session.TranscriptDataTypes, dataType)
 
-	t.logger.WithSession(sessionID).Info("Added data to transcript",
+	t.logger.WithSession(sessionID).Debug("Added data to transcript",
 		zap.Int("bytes", len(data)),
 		zap.String("type", dataType),
 		zap.Int("total_data", len(session.TranscriptData)))
@@ -41,7 +41,7 @@ func (t *TEEK) addToTranscript(sessionID string, data []byte, dataType string) e
 
 // generateComprehensiveSignatureAndSendTranscript creates comprehensive signature and sends all verification data to client
 func (t *TEEK) generateComprehensiveSignatureAndSendTranscript(sessionID string) error {
-	t.logger.WithSession(sessionID).Info("Generating comprehensive signature")
+	t.logger.WithSession(sessionID).Debug("Generating comprehensive signature")
 
 	// Get session
 	session, err := t.sessionManager.GetSession(sessionID)
@@ -86,7 +86,7 @@ func (t *TEEK) generateComprehensiveSignatureAndSendTranscript(sessionID string)
 				t.logger.WithSession(sessionID).Error("Failed to unmarshal redaction ranges from transcript", zap.Error(err))
 			} else {
 				requestMetadata.RedactionRanges = ranges
-				t.logger.WithSession(sessionID).Info("Loaded redaction ranges from transcript", zap.Int("ranges", len(ranges)))
+				t.logger.WithSession(sessionID).Debug("Loaded redaction ranges from transcript", zap.Int("ranges", len(ranges)))
 			}
 			// TLS packet data not included in transcript - using structured data instead
 		}
@@ -114,7 +114,7 @@ func (t *TEEK) generateComprehensiveSignatureAndSendTranscript(sessionID string)
 		for _, rr := range session.ResponseState.ResponseRedactionRanges {
 			kPayload.ResponseRedactionRanges = append(kPayload.ResponseRedactionRanges, &teeproto.ResponseRedactionRange{Start: int32(rr.Start), Length: int32(rr.Length)})
 		}
-		t.logger.WithSession(sessionID).Info("Included response redaction ranges in signed payload", zap.Int("ranges", len(session.ResponseState.ResponseRedactionRanges)))
+		t.logger.WithSession(sessionID).Debug("Included response redaction ranges in signed payload", zap.Int("ranges", len(session.ResponseState.ResponseRedactionRanges)))
 	}
 
 	// Include OPRF outputs in signed payload
@@ -123,7 +123,7 @@ func (t *TEEK) generateComprehensiveSignatureAndSendTranscript(sessionID string)
 		oprfOutputs := t.buildOPRFOutputsForSigning(teekState)
 		if len(oprfOutputs) > 0 {
 			kPayload.OprfOutputs = oprfOutputs
-			t.logger.WithSession(sessionID).Info("Included OPRF outputs in signed payload", zap.Int("count", len(oprfOutputs)))
+			t.logger.WithSession(sessionID).Debug("Included OPRF outputs in signed payload", zap.Int("count", len(oprfOutputs)))
 		}
 	}
 
@@ -139,9 +139,7 @@ func (t *TEEK) generateComprehensiveSignatureAndSendTranscript(sessionID string)
 		return fmt.Errorf("failed to generate comprehensive signature: %v", err)
 	}
 
-	t.logger.WithSession(sessionID).Info("Generated comprehensive signature over protobuf body",
-		zap.Int("consolidated_response_keystream_bytes", len(session.ConsolidatedResponseKeystream)),
-		zap.Bool("metadata_present", requestMetadata != nil),
+	t.logger.WithSession(sessionID).Debug("Generated comprehensive signature over protobuf body",
 		zap.Int("body_bytes", len(body)),
 		zap.Int("signature_bytes", len(comprehensiveSignature)))
 
@@ -156,12 +154,11 @@ func (t *TEEK) generateComprehensiveSignatureAndSendTranscript(sessionID string)
 		if err != nil {
 			return fmt.Errorf("failed to generate attestation report: %v", err)
 		}
-		t.logger.WithSession(sessionID).Info("Including attestation report in SignedMessage")
+		t.logger.WithSession(sessionID).Debug("Including attestation report in SignedMessage")
 	} else {
 		// Standalone mode: include ETH address as public key
 		publicKeyForStandalone = []byte(ethAddress.String())
-		t.logger.WithSession(sessionID).Info("Including ETH address in SignedMessage (standalone mode)",
-			zap.String("eth_address", ethAddress.Hex()))
+		t.logger.WithSession(sessionID).Debug("Including ETH address in SignedMessage (standalone mode)")
 	}
 
 	// Collect TLS packet metadata for client-side decryption
@@ -237,10 +234,9 @@ func (t *TEEK) generateComprehensiveSignatureAndSendTranscript(sessionID string)
 
 			session.ResponseState.ResponsesMutex.Unlock()
 
-			t.logger.WithSession(sessionID).Info("Prepared TLS packet metadata",
+			t.logger.WithSession(sessionID).Debug("Prepared TLS packet metadata",
 				zap.Int("packet_count", len(responsePackets)),
-				zap.Uint32("cipher_suite", cipherSuite),
-				zap.Int("server_key_len", len(serverAppKey)))
+				zap.Uint32("cipher_suite", cipherSuite))
 		}
 	} else {
 		t.logger.WithSession(sessionID).Warn("Could not retrieve TLS state for packet metadata", zap.Error(err))
@@ -266,8 +262,7 @@ func (t *TEEK) generateComprehensiveSignatureAndSendTranscript(sessionID string)
 		return fmt.Errorf("failed to send signed message to client: %v", err)
 	}
 
-	t.logger.WithSession(sessionID).Info("Sent SignedMessage (KOutput) to client",
-		zap.Int("consolidated_response_keystream_bytes", len(session.ConsolidatedResponseKeystream)))
+	t.logger.WithSession(sessionID).Debug("Sent SignedMessage (KOutput) to client")
 
 	return nil
 }

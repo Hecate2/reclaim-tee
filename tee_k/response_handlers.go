@@ -18,7 +18,7 @@ func (t *TEEK) handleBatchedResponseLengths(sessionID string, msg *shared.Messag
 		return err
 	}
 
-	t.logger.WithSession(sessionID).Info("Received batched response lengths",
+	t.logger.WithSession(sessionID).Debug("Received batched response lengths",
 		zap.Int("total_count", batchedLengths.TotalCount))
 
 	// Get session to store response lengths
@@ -83,7 +83,7 @@ func (t *TEEK) handleBatchedResponseLengths(sessionID string, msg *shared.Messag
 	}
 	session.ResponseState.ResponsesMutex.Unlock()
 
-	t.logger.WithSession(sessionID).Info("Generated batched tag secrets",
+	t.logger.WithSession(sessionID).Debug("Generated batched tag secrets",
 		zap.Int("count", len(tagSecrets)))
 
 	// Send all tag secrets as a batch to TEE_T
@@ -113,7 +113,7 @@ func (t *TEEK) handleBatchedResponseLengths(sessionID string, msg *shared.Messag
 		return err
 	}
 
-	t.logger.WithSession(sessionID).Info("Successfully sent batched tag secrets to TEE_T",
+	t.logger.WithSession(sessionID).Debug("Successfully sent batched tag secrets to TEE_T",
 		zap.Int("count", len(tagSecrets)))
 	return nil
 }
@@ -126,7 +126,7 @@ func (t *TEEK) handleBatchedTagVerifications(sessionID string, msg *shared.Messa
 		return err
 	}
 
-	t.logger.WithSession(sessionID).Info("Received batched tag verification",
+	t.logger.WithSession(sessionID).Debug("Received batched tag verification",
 		zap.Int("total_count", batchedVerification.TotalCount),
 		zap.Bool("all_successful", batchedVerification.AllSuccessful))
 
@@ -165,7 +165,7 @@ func (t *TEEK) handleBatchedTagVerifications(sessionID string, msg *shared.Messa
 		return err
 	}
 
-	t.logger.WithSession(sessionID).Info("Generated batched decryption streams",
+	t.logger.WithSession(sessionID).Debug("Generated batched decryption streams",
 		zap.Int("count", len(decryptionStreams)))
 
 	// Send all decryption streams as a batch to client
@@ -182,7 +182,7 @@ func (t *TEEK) handleBatchedTagVerifications(sessionID string, msg *shared.Messa
 		return err
 	}
 
-	t.logger.WithSession(sessionID).Info("Successfully sent batched decryption streams to client",
+	t.logger.WithSession(sessionID).Debug("Successfully sent batched decryption streams to client",
 		zap.Int("count", len(decryptionStreams)))
 	return nil
 }
@@ -223,20 +223,19 @@ func (t *TEEK) checkAndSendSignatureIfReady(sessionID string) error {
 	allProcessingComplete := transcriptReady && redactionComplete && hasRedactedStreams && !signatureAlreadySent && oprfReady
 
 	if allProcessingComplete {
-		t.logger.WithSession(sessionID).Info("All processing complete, generating and sending signature")
+		t.logger.WithSession(sessionID).Debug("All processing complete, generating and sending signature")
 		// Mark signature as sent to prevent duplicates
 		session.SignatureSent = true
 		// Release lock before calling generateComprehensiveSignatureAndSendTranscript
 		session.StreamsMutex.Unlock()
 		return t.generateComprehensiveSignatureAndSendTranscript(sessionID)
 	} else {
-		t.logger.WithSession(sessionID).Info("Not ready to send signature yet",
+		t.logger.WithSession(sessionID).Debug("Not ready to send signature yet",
 			zap.Bool("transcript_ready", transcriptReady),
 			zap.Bool("redaction_complete", redactionComplete),
 			zap.Bool("has_redacted_streams", hasRedactedStreams),
 			zap.Bool("signature_already_sent", signatureAlreadySent),
-			zap.Bool("oprf_ready", oprfReady),
-			zap.String("oprf_state", string(teekState.OPRFState)))
+			zap.Bool("oprf_ready", oprfReady))
 		// Don't set SignatureSent = true if we're not actually sending a signature
 		session.StreamsMutex.Unlock()
 	}
