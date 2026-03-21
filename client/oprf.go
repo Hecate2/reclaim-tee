@@ -38,6 +38,9 @@ type OPRFRangeData struct {
 	// ZK proof data
 	ZKProofParams *prover.InputParams // Parameters for ZK proof generation
 	ZKProof       []byte              // The actual ZK proof (binary)
+
+	// MPC OPRF flag - if true, hash is kept at full length (not truncated)
+	IsMPC bool
 }
 
 // ProcessOPRFForHashedRanges processes OPRF for all hashed ranges

@@ -267,6 +267,10 @@ func main() {
 				Value: "{{addr}}",
 				Type:  "contains",
 			},
+			{
+				Type:  "regex",
+				Value: "Manufacturer(?<portal>\\w+)",
+			},
 		},
 		ResponseRedactions: []providers.ResponseRedaction{
 			{
@@ -276,7 +280,7 @@ func main() {
 			},
 			{
 				XPath: "/html/body/div[2]/main/div[5]/div[1]/h3/text()",
-				Regex: "Manufacturer (?<portal>Portal)",
+				Regex: "Manufacturer(?<portal> Portal)",
 				Hash:  providers.HASH_TYPE_OPRF_MPC,
 			},
 		},

@@ -5,12 +5,14 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"github.com/reclaimprotocol/reclaim-tee/minitls"
-	teeproto "github.com/reclaimprotocol/reclaim-tee/proto"
-	"github.com/reclaimprotocol/reclaim-tee/providers"
 	"slices"
 	"sort"
 
+	"github.com/reclaimprotocol/reclaim-tee/minitls"
+	teeproto "github.com/reclaimprotocol/reclaim-tee/proto"
+	"github.com/reclaimprotocol/reclaim-tee/providers"
+
+	"github.com/mr-tron/base58"
 	prover "github.com/reclaimprotocol/zk-symmetric-crypto/gnark/libraries/prover/impl"
 	"go.uber.org/zap"
 	"google.golang.org/protobuf/proto"
@@ -280,6 +282,7 @@ func (c *Client) populateOPRFMPCRanges(oprfOutputs []*teeproto.OPRFOutput) error
 			Length:      mapping.HTTPLength,
 			Data:        originalData,
 			FinalOutput: output.HashOutput, // MPC OPRF uses SHA256(CMAC) as final output
+			IsMPC:       true,              // MPC OPRF keeps full hash length
 		}
 
 		c.logger.Debug("Populated MPC OPRF range for ParamValue replacement",
@@ -1041,21 +1044,26 @@ func (c *Client) replaceParamValuesWithOPRF(providerParams *providers.HTTPProvid
 		// Look for matching ParamValue
 		for key, value := range providerParams.ParamValues {
 			if value == originalData {
-				// Convert OPRF output to base64
-				oprfBase64 := base64.StdEncoding.EncodeToString(oprfData.FinalOutput)
-
-				// Adjust length to match original string
-				adjustedOPRF := adjustBase64Length(oprfBase64, len(originalData))
+				var finalOPRF string
+				if oprfData.IsMPC {
+					// MPC OPRF: use base58 encoding, keep full hash length
+					finalOPRF = base58.Encode(oprfData.FinalOutput)
+				} else {
+					// TOPRF: use base64 encoding, adjust length to match original string
+					oprfBase64 := base64.StdEncoding.EncodeToString(oprfData.FinalOutput)
+					finalOPRF = adjustBase64Length(oprfBase64, len(originalData))
+				}
 
 				// Replace in-place
-				providerParams.ParamValues[key] = adjustedOPRF
+				providerParams.ParamValues[key] = finalOPRF
 
 				c.logger.Info("Replaced ParamValue with OPRF output",
 					zap.String("key", key),
 					zap.String("original", originalData),
-					zap.String("oprf_base64", adjustedOPRF),
+					zap.String("oprf_encoded", finalOPRF),
 					zap.Int("original_length", len(originalData)),
-					zap.Int("oprf_length", len(adjustedOPRF)))
+					zap.Int("oprf_length", len(finalOPRF)),
+					zap.Bool("is_mpc", oprfData.IsMPC))
 			}
 		}
 	}
