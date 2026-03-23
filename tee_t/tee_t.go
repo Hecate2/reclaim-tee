@@ -17,10 +17,15 @@ import (
 	"go.uber.org/zap"
 )
 
+// MaxWebSocketMessageSize is the maximum allowed WebSocket message size (10 MB)
+const MaxWebSocketMessageSize = 10 * 1024 * 1024
+
 var teetUpgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool {
 		return true // Allow connections from any origin
 	},
+	ReadBufferSize:  64 * 1024, // 64 KB read buffer
+	WriteBufferSize: 64 * 1024, // 64 KB write buffer
 }
 
 // TEET represents the TEE_T (Execution Environment for Transcript generation)

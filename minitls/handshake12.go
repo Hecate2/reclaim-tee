@@ -48,22 +48,37 @@ func ParseServerKeyExchange(data []byte) (*ServerKeyExchangeMsg, error) {
 	offset += 2
 
 	// Parse public key
-	pubKeyLen := payload[offset]
+	pubKeyLen := int(payload[offset])
 	offset++
 
+	// Bounds check: ensure payload has enough bytes for public key
+	if offset+pubKeyLen > len(payload) {
+		return nil, fmt.Errorf("ServerKeyExchange: public key length %d exceeds remaining payload %d", pubKeyLen, len(payload)-offset)
+	}
+
 	msg.publicKey = make([]byte, pubKeyLen)
-	copy(msg.publicKey, payload[offset:offset+int(pubKeyLen)])
-	offset += int(pubKeyLen)
+	copy(msg.publicKey, payload[offset:offset+pubKeyLen])
+	offset += pubKeyLen
+
+	// Bounds check: ensure payload has enough bytes for signature algorithm (2 bytes) and length (2 bytes)
+	if offset+4 > len(payload) {
+		return nil, fmt.Errorf("ServerKeyExchange: insufficient bytes for signature header, need 4, have %d", len(payload)-offset)
+	}
 
 	// Parse signature algorithm and signature
 	msg.signAlg = binary.BigEndian.Uint16(payload[offset : offset+2])
 	offset += 2
 
-	sigLen := binary.BigEndian.Uint16(payload[offset : offset+2])
+	sigLen := int(binary.BigEndian.Uint16(payload[offset : offset+2]))
 	offset += 2
 
+	// Bounds check: ensure payload has enough bytes for signature
+	if offset+sigLen > len(payload) {
+		return nil, fmt.Errorf("ServerKeyExchange: signature length %d exceeds remaining payload %d", sigLen, len(payload)-offset)
+	}
+
 	msg.signature = make([]byte, sigLen)
-	copy(msg.signature, payload[offset:offset+int(sigLen)])
+	copy(msg.signature, payload[offset:offset+sigLen])
 
 	return msg, nil
 }

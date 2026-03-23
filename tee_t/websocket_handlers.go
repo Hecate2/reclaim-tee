@@ -23,6 +23,9 @@ func (t *TEET) handleClientWebSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Set read limit to prevent DoS via large messages
+	conn.SetReadLimit(MaxWebSocketMessageSize)
+
 	t.logger.Debug("Client WebSocket connection established")
 
 	var sessionID string
@@ -146,6 +149,9 @@ func (t *TEET) handleTEEKWebSocket(w http.ResponseWriter, r *http.Request) {
 		t.logger.Error("Failed to upgrade TEE_K websocket", zap.Error(err))
 		return
 	}
+
+	// Set read limit to prevent DoS via large messages
+	conn.SetReadLimit(MaxWebSocketMessageSize)
 
 	t.logger.Debug("TEE_K connected")
 

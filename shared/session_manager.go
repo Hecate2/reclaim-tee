@@ -28,6 +28,9 @@ type SessionManagerInterface interface {
 	Stop()
 }
 
+// MaxSessions is the maximum number of concurrent sessions allowed
+const MaxSessions = 100
+
 // SessionManager provides unified session management
 type SessionManager struct {
 	sessions       map[string]*Session
@@ -53,6 +56,14 @@ func NewSessionManager() *SessionManager {
 
 // CreateSession creates a new session with secure UUID
 func (sm *SessionManager) CreateSession(clientConn Connection) (string, error) {
+	sm.mutex.Lock()
+	currentCount := len(sm.sessions)
+	sm.mutex.Unlock()
+
+	if currentCount >= MaxSessions {
+		return "", fmt.Errorf("maximum session limit reached (%d)", MaxSessions)
+	}
+
 	sessionID, err := uuid.NewRandom()
 	if err != nil {
 		return "", fmt.Errorf("failed to generate session ID: %w", err)
@@ -90,6 +101,10 @@ func (sm *SessionManager) CreateSession(clientConn Connection) (string, error) {
 func (sm *SessionManager) RegisterSession(sessionID string) error {
 	sm.mutex.Lock()
 	defer sm.mutex.Unlock()
+
+	if len(sm.sessions) >= MaxSessions {
+		return fmt.Errorf("maximum session limit reached (%d)", MaxSessions)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 

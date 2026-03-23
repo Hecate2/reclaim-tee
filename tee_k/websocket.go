@@ -15,10 +15,15 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+// MaxWebSocketMessageSize is the maximum allowed WebSocket message size (10 MB)
+const MaxWebSocketMessageSize = 10 * 1024 * 1024
+
 var teekUpgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool {
 		return true // Allow connections from any origin
 	},
+	ReadBufferSize:  64 * 1024, // 64 KB read buffer
+	WriteBufferSize: 64 * 1024, // 64 KB write buffer
 }
 
 // WebSocketConn adapts websocket to net.Conn interface for miniTLS
@@ -323,6 +328,9 @@ func (t *TEEK) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		t.logger.Error("Failed to upgrade websocket", zap.Error(err))
 		return
 	}
+
+	// Set maximum message size to prevent memory exhaustion
+	conn.SetReadLimit(MaxWebSocketMessageSize)
 
 	// Create session for this client connection
 	wsConn := shared.NewWSConnection(conn)
