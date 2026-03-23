@@ -103,6 +103,7 @@ func (t *TEET) checkFinishedCondition(sessionID string) error {
 
 		timestampMs := time.Now().UnixMilli()
 		tOutput := &teeproto.TOutputPayload{
+			SessionId:                      sessionID,                                // Bind to session for cross-TEE verification
 			ConsolidatedResponseCiphertext: teetState.ConsolidatedResponseCiphertext, // Consolidated response ciphertext
 			RequestProofStreams:            teetState.RequestProofStreams,            // TEE_T signs R_SP streams
 			TimestampMs:                    uint64(timestampMs),                      // Include signed timestamp

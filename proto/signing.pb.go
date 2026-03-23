@@ -74,6 +74,8 @@ func (BodyType) EnumDescriptor() ([]byte, []int) {
 // Deterministically serialized payloads to be signed by TEEs
 type KOutputPayload struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
+	// Session binding - cryptographically links TEE_K and TEE_T outputs
+	SessionId string `protobuf:"bytes,7,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"` // Shared session ID for cross-TEE binding
 	// For single request-response mode
 	RedactedRequest        []byte                   `protobuf:"bytes,1,opt,name=redacted_request,json=redactedRequest,proto3" json:"redacted_request,omitempty"` // R_red
 	RequestRedactionRanges []*RequestRedactionRange `protobuf:"bytes,2,rep,name=request_redaction_ranges,json=requestRedactionRanges,proto3" json:"request_redaction_ranges,omitempty"`
@@ -117,6 +119,13 @@ func (x *KOutputPayload) ProtoReflect() protoreflect.Message {
 // Deprecated: Use KOutputPayload.ProtoReflect.Descriptor instead.
 func (*KOutputPayload) Descriptor() ([]byte, []int) {
 	return file_signing_proto_rawDescGZIP(), []int{0}
+}
+
+func (x *KOutputPayload) GetSessionId() string {
+	if x != nil {
+		return x.SessionId
+	}
+	return ""
 }
 
 func (x *KOutputPayload) GetRedactedRequest() []byte {
@@ -170,6 +179,8 @@ func (x *KOutputPayload) GetOprfOutputs() []*OPRFOutput {
 
 type TOutputPayload struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
+	// Session binding - cryptographically links TEE_K and TEE_T outputs
+	SessionId string `protobuf:"bytes,4,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"` // Shared session ID for cross-TEE binding
 	// REPLACED: repeated bytes packets = 1; (TLS packets for BOTH request and response - REMOVE ALL)
 	ConsolidatedResponseCiphertext []byte `protobuf:"bytes,1,opt,name=consolidated_response_ciphertext,json=consolidatedResponseCiphertext,proto3" json:"consolidated_response_ciphertext,omitempty"` // NEW: Single response ciphertext stream
 	// PRESERVE: Individual R_SP streams for R_S vs R_SP distinction
@@ -209,6 +220,13 @@ func (x *TOutputPayload) ProtoReflect() protoreflect.Message {
 // Deprecated: Use TOutputPayload.ProtoReflect.Descriptor instead.
 func (*TOutputPayload) Descriptor() ([]byte, []int) {
 	return file_signing_proto_rawDescGZIP(), []int{1}
+}
+
+func (x *TOutputPayload) GetSessionId() string {
+	if x != nil {
+		return x.SessionId
+	}
+	return ""
 }
 
 func (x *TOutputPayload) GetConsolidatedResponseCiphertext() []byte {
@@ -527,8 +545,10 @@ var File_signing_proto protoreflect.FileDescriptor
 
 const file_signing_proto_rawDesc = "" +
 	"\n" +
-	"\rsigning.proto\x12\bteeproto\x1a\fcommon.proto\"\xde\x03\n" +
-	"\x0eKOutputPayload\x12)\n" +
+	"\rsigning.proto\x12\bteeproto\x1a\fcommon.proto\"\xfd\x03\n" +
+	"\x0eKOutputPayload\x12\x1d\n" +
+	"\n" +
+	"session_id\x18\a \x01(\tR\tsessionId\x12)\n" +
 	"\x10redacted_request\x18\x01 \x01(\fR\x0fredactedRequest\x12Y\n" +
 	"\x18request_redaction_ranges\x18\x02 \x03(\v2\x1f.teeproto.RequestRedactionRangeR\x16requestRedactionRanges\x12F\n" +
 	"\x1fconsolidated_response_keystream\x18\x03 \x01(\fR\x1dconsolidatedResponseKeystream\x12D\n" +
@@ -536,8 +556,10 @@ const file_signing_proto_rawDesc = "" +
 	"\x19response_redaction_ranges\x18\x05 \x03(\v2 .teeproto.ResponseRedactionRangeR\x17responseRedactionRanges\x12!\n" +
 	"\ftimestamp_ms\x18\x06 \x01(\x04R\vtimestampMs\x127\n" +
 	"\foprf_outputs\x18\n" +
-	" \x03(\v2\x14.teeproto.OPRFOutputR\voprfOutputs\"\xea\x01\n" +
-	"\x0eTOutputPayload\x12H\n" +
+	" \x03(\v2\x14.teeproto.OPRFOutputR\voprfOutputs\"\x89\x02\n" +
+	"\x0eTOutputPayload\x12\x1d\n" +
+	"\n" +
+	"session_id\x18\x04 \x01(\tR\tsessionId\x12H\n" +
 	" consolidated_response_ciphertext\x18\x01 \x01(\fR\x1econsolidatedResponseCiphertext\x122\n" +
 	"\x15request_proof_streams\x18\x02 \x03(\fR\x13requestProofStreams\x12!\n" +
 	"\ftimestamp_ms\x18\x03 \x01(\x04R\vtimestampMs\x127\n" +

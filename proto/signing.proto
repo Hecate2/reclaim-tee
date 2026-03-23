@@ -8,6 +8,9 @@ import "common.proto";
 
 // Deterministically serialized payloads to be signed by TEEs
 message KOutputPayload {
+  // Session binding - cryptographically links TEE_K and TEE_T outputs
+  string session_id = 7; // Shared session ID for cross-TEE binding
+
   // For single request-response mode
   bytes redacted_request = 1; // R_red
   repeated RequestRedactionRange request_redaction_ranges = 2;
@@ -25,6 +28,9 @@ message KOutputPayload {
 }
 
 message TOutputPayload {
+  // Session binding - cryptographically links TEE_K and TEE_T outputs
+  string session_id = 4; // Shared session ID for cross-TEE binding
+
   // REPLACED: repeated bytes packets = 1; (TLS packets for BOTH request and response - REMOVE ALL)
   bytes consolidated_response_ciphertext = 1;  // NEW: Single response ciphertext stream
 

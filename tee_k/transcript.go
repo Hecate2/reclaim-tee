@@ -97,6 +97,7 @@ func (t *TEEK) generateComprehensiveSignatureAndSendTranscript(sessionID string)
 
 	timestampMs := time.Now().UnixMilli()
 	kPayload := &teeproto.KOutputPayload{
+		SessionId:   sessionID,           // Bind to session for cross-TEE verification
 		TimestampMs: uint64(timestampMs), // Include signed timestamp
 	}
 	if requestMetadata != nil {
