@@ -164,48 +164,12 @@ func (p *OTPool) Clear() {
 	p.extendPending = false
 }
 
-// GenerateEntriesFromSetups adds entries to the pool from pre-generated setups
-func (p *OTPool) GenerateEntriesFromSetups(setups []ot.COSenderSetup, startIdx int) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	for i, setup := range setups {
-		entry := &OTPoolEntry{
-			SenderSetup: setup,
-			Index:       startIdx + i,
-			Used:        false,
-		}
-		p.entries = append(p.entries, entry)
-	}
-
-	p.totalCount += len(setups)
-	return nil
-}
-
-// AddEntry adds a single entry to the pool (used during setup generation)
+// AddEntry adds a single entry to the pool (used during two-phase OT setup)
 func (p *OTPool) AddEntry(entry *OTPoolEntry) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.entries = append(p.entries, entry)
 	p.totalCount++
-}
-
-// StoreReceiverPoints stores the receiver's choice points B[i] for ECDH derivation
-// This must be called after receiving OTPrecomputeResponse from TEE_T
-func (p *OTPool) StoreReceiverPoints(startIdx int, points []ot.ECPoint) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	if startIdx+len(points) > len(p.entries) {
-		return fmt.Errorf("point range [%d:%d] exceeds pool size %d",
-			startIdx, startIdx+len(points), len(p.entries))
-	}
-
-	for i, pt := range points {
-		p.entries[startIdx+i].ReceiverPoint = pt
-	}
-
-	return nil
 }
 
 // OTReceiverEntry holds a single precomputed OT for the evaluator (TEE_T)

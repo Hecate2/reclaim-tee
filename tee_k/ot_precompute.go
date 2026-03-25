@@ -18,12 +18,16 @@ import (
 
 // OTPrecomputeState holds the OT precomputation state for the shared TEE_T connection
 type OTPrecomputeState struct {
-	mu             sync.Mutex
-	pool           *oprfmpc.OTPool
-	ready          bool
-	curve          elliptic.Curve
-	lastBatchStart int        // Start index of the last batch (for storing receiver points)
-	responseChan   chan error // Signals when OT response is received
+	mu           sync.Mutex
+	pool         *oprfmpc.OTPool
+	ready        bool
+	curve        elliptic.Curve
+	responseChan chan error // Signals when OT response is received
+
+	// Pending setups awaiting confirmation (two-phase commit)
+	// Setups are stored here after generation, only added to pool when receiver points arrive
+	pendingSetups   []ot.COSenderSetup
+	pendingStartIdx int
 }
 
 // NewOTPrecomputeState creates a new OT precomputation state
@@ -85,6 +89,7 @@ func (t *TEEK) performOTPrecomputation(count int, isInitial bool) error {
 	// Get connection to TEE_T
 	conn := t.getSharedTEETConnection()
 	if conn == nil {
+		t.clearPendingSetups() // Clear pending setups on failure
 		if !isInitial {
 			state.pool.SetExtendPending(false)
 		}
@@ -112,6 +117,7 @@ func (t *TEEK) performOTPrecomputation(count int, isInitial bool) error {
 
 	data, err := proto.Marshal(env)
 	if err != nil {
+		t.clearPendingSetups() // Clear pending setups on failure
 		if !isInitial {
 			state.pool.SetExtendPending(false)
 		}
@@ -123,6 +129,7 @@ func (t *TEEK) performOTPrecomputation(count int, isInitial bool) error {
 	t.teetWriteMutex.Unlock()
 
 	if err != nil {
+		t.clearPendingSetups() // Clear pending setups on failure
 		if !isInitial {
 			state.pool.SetExtendPending(false)
 		}
@@ -140,6 +147,7 @@ func (t *TEEK) performOTPrecomputation(count int, isInitial bool) error {
 	select {
 	case err := <-state.responseChan:
 		if err != nil {
+			// Note: pendingSetups already cleared in handleOTPrecomputeResponse on error
 			if !isInitial {
 				state.pool.SetExtendPending(false)
 			}
@@ -150,6 +158,7 @@ func (t *TEEK) performOTPrecomputation(count int, isInitial bool) error {
 		return nil
 
 	case <-time.After(timeout):
+		t.clearPendingSetups() // Clear pending setups on timeout
 		if !isInitial {
 			state.pool.SetExtendPending(false)
 		}
@@ -157,15 +166,15 @@ func (t *TEEK) performOTPrecomputation(count int, isInitial bool) error {
 	}
 }
 
-// generateAndSerializeOTSetups generates OT sender setups and serializes them
-// This also stores the setups in the pool for later use
+// generateAndSerializeOTSetups generates OT sender setups and stores them as pending.
+// Setups are NOT added to the pool until receiver points are received (two-phase commit).
+// This prevents "ghost entries" if the extend operation fails.
 func (t *TEEK) generateAndSerializeOTSetups(count int) ([]byte, error) {
 	state := t.otPrecomputeState
 	state.mu.Lock()
 	defer state.mu.Unlock()
 
 	setups := make([]ot.COSenderSetup, count)
-	startIdx := state.pool.TotalCount()
 
 	for i := range count {
 		setup, err := ot.GenerateCOSenderSetup(rand.Reader, state.curve)
@@ -175,18 +184,16 @@ func (t *TEEK) generateAndSerializeOTSetups(count int) ([]byte, error) {
 		setups[i] = setup
 	}
 
-	// Track the start index for this batch (needed when we receive receiver points)
-	state.lastBatchStart = startIdx
-
-	// Add entries to pool
-	if err := state.pool.GenerateEntriesFromSetups(setups, startIdx); err != nil {
-		return nil, fmt.Errorf("failed to add entries to pool: %w", err)
-	}
+	// Store as pending - will be added to pool only when response received
+	state.pendingSetups = setups
+	state.pendingStartIdx = state.pool.TotalCount()
 
 	return oprfmpc.SerializeBulkCOSenderSetup(setups), nil
 }
 
-// handleOTPrecomputeResponse handles the response from TEE_T after precomputation
+// handleOTPrecomputeResponse handles the response from TEE_T after precomputation.
+// This is the second phase of the two-phase commit: entries are added to pool
+// atomically with their receiver points, preventing ghost entries on failure.
 func (t *TEEK) handleOTPrecomputeResponse(msg *teeproto.OTPrecomputeResponse) error {
 	t.logger.Info("Received OT precompute response",
 		zap.Uint32("count", msg.Count))
@@ -200,38 +207,55 @@ func (t *TEEK) handleOTPrecomputeResponse(msg *teeproto.OTPrecomputeResponse) er
 	state.mu.Lock()
 	defer state.mu.Unlock()
 
-	// Verify count matches what we sent in this batch
-	expectedCount := uint32(state.pool.TotalCount() - state.lastBatchStart)
-	if msg.Count != expectedCount {
-		err := fmt.Errorf("OT count mismatch: expected %d, got %d", expectedCount, msg.Count)
-		// Signal error to waiting goroutine
-		select {
-		case state.responseChan <- err:
-		default:
-		}
+	// Verify we have pending setups
+	if len(state.pendingSetups) == 0 {
+		err := fmt.Errorf("no pending setups - unexpected response")
+		t.signalResponseChan(err)
 		return err
 	}
 
-	// Deserialize receiver data - we MUST store the receiver points for ECDH
+	// Verify count matches pending setups
+	if int(msg.Count) != len(state.pendingSetups) {
+		err := fmt.Errorf("OT count mismatch: expected %d, got %d",
+			len(state.pendingSetups), msg.Count)
+		state.pendingSetups = nil // Clear pending on error
+		t.signalResponseChan(err)
+		return err
+	}
+
+	// Deserialize receiver data
 	receiverData, err := oprfmpc.DeserializeBulkOTReceiverData(msg.OtReceiverData)
 	if err != nil {
 		err = fmt.Errorf("failed to deserialize OT receiver data: %w", err)
-		select {
-		case state.responseChan <- err:
-		default:
-		}
+		state.pendingSetups = nil
+		t.signalResponseChan(err)
 		return err
 	}
 
-	// Store receiver points in the pool entries for ECDH-based label derivation
-	if err := state.pool.StoreReceiverPoints(state.lastBatchStart, receiverData.Points); err != nil {
-		err = fmt.Errorf("failed to store receiver points: %w", err)
-		select {
-		case state.responseChan <- err:
-		default:
-		}
+	// Verify point count matches
+	if len(receiverData.Points) != len(state.pendingSetups) {
+		err := fmt.Errorf("receiver point count mismatch: expected %d, got %d",
+			len(state.pendingSetups), len(receiverData.Points))
+		state.pendingSetups = nil
+		t.signalResponseChan(err)
 		return err
 	}
+
+	// NOW add entries to pool - atomically with receiver points
+	// This is the key fix: entries only added when we have valid receiver points
+	startIdx := state.pendingStartIdx
+	for i, setup := range state.pendingSetups {
+		entry := &oprfmpc.OTPoolEntry{
+			SenderSetup:   setup,
+			ReceiverPoint: receiverData.Points[i],
+			Index:         startIdx + i,
+			Used:          false,
+		}
+		state.pool.AddEntry(entry)
+	}
+
+	// Clear pending - successfully committed to pool
+	state.pendingSetups = nil
 
 	// Clear extend pending flag if this was an extension
 	wasExtend := state.pool.IsExtendPending()
@@ -239,7 +263,7 @@ func (t *TEEK) handleOTPrecomputeResponse(msg *teeproto.OTPrecomputeResponse) er
 		state.pool.SetExtendPending(false)
 	}
 
-	// Mark pool as ready (for initial setup) or keep it ready (for extend)
+	// Mark pool as ready (for initial setup)
 	if !state.ready {
 		state.ready = true
 		// Send completion acknowledgment to TEE_T (only for initial setup)
@@ -250,16 +274,22 @@ func (t *TEEK) handleOTPrecomputeResponse(msg *teeproto.OTPrecomputeResponse) er
 	}
 
 	// Signal success to waiting goroutine
-	select {
-	case state.responseChan <- nil:
-	default:
-	}
+	t.signalResponseChan(nil)
 
 	t.logger.Info("OT precompute response processed",
 		zap.Int("pool_available", state.pool.Available()),
 		zap.Bool("was_extend", wasExtend))
 
 	return nil
+}
+
+// signalResponseChan signals the response channel with result (nil for success, error for failure)
+// Must be called with state.mu held or from a context where channel access is safe
+func (t *TEEK) signalResponseChan(err error) {
+	select {
+	case t.otPrecomputeState.responseChan <- err:
+	default:
+	}
 }
 
 // sendOTPrecomputeComplete sends the completion message to TEE_T
@@ -348,8 +378,19 @@ func (t *TEEK) clearOTPool() {
 	if t.otPrecomputeState != nil {
 		t.otPrecomputeState.mu.Lock()
 		t.otPrecomputeState.pool.Clear()
+		t.otPrecomputeState.pendingSetups = nil // Also clear any pending setups
 		t.otPrecomputeState.ready = false
 		t.otPrecomputeState.mu.Unlock()
 		t.logger.Info("Cleared OT pool due to disconnect")
+	}
+}
+
+// clearPendingSetups discards pending setups on extend failure.
+// This prevents ghost entries from being left in an inconsistent state.
+func (t *TEEK) clearPendingSetups() {
+	if t.otPrecomputeState != nil {
+		t.otPrecomputeState.mu.Lock()
+		t.otPrecomputeState.pendingSetups = nil
+		t.otPrecomputeState.mu.Unlock()
 	}
 }
