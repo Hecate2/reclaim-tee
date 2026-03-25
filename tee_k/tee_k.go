@@ -66,6 +66,9 @@ type TEEK struct {
 
 	// Persistent OPRF key share (loaded from cloud storage)
 	oprfKeyShare []byte
+
+	// OT precomputation state for 2-round OPRF protocol
+	otPrecomputeState *OTPrecomputeState
 }
 
 // NewTEEKWithConfig creates a new TEEK instance with the provided configuration

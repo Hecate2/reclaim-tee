@@ -48,6 +48,17 @@ func main() {
 func startStandaloneMode(config *TEEKConfig, logger *shared.Logger) {
 	teek := NewTEEKWithConfig(config)
 
+	// IMPORTANT: Establish TEE_T connection and complete OT precomputation BEFORE accepting clients
+	// This ensures no client work is wasted if OT setup fails
+	logger.Info("Establishing shared connection to TEE_T and completing OT precomputation...")
+	teek.establishSharedTEETConnection()
+
+	// Only start HTTP server AFTER OT pool is ready
+	if !teek.isOTPoolReady() {
+		logger.Critical("OT pool not ready after establishSharedTEETConnection - this should not happen")
+		return
+	}
+
 	server := &http.Server{
 		Addr:         fmt.Sprintf(":%d", config.Port),
 		Handler:      setupRoutes(teek),
@@ -55,9 +66,9 @@ func startStandaloneMode(config *TEEKConfig, logger *shared.Logger) {
 		WriteTimeout: 30 * time.Second,
 	}
 
-	// Start server in goroutine
+	// Start server in goroutine - OT is ready, safe to accept clients
 	go func() {
-		logger.Info("Starting standalone server", zap.Int("port", config.Port))
+		logger.Info("OT precomputation complete, starting HTTP server", zap.Int("port", config.Port))
 		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logger.Critical("Server failed", zap.Error(err))
 			// Signal shutdown instead of crashing
@@ -72,12 +83,8 @@ func startStandaloneMode(config *TEEKConfig, logger *shared.Logger) {
 		}
 	}()
 
-	// Establish shared persistent connection to TEE_T after server is ready
-	logger.Info("Server started, establishing shared connection to TEE_T")
-	teek.establishSharedTEETConnection()
-
 	// TEE_T URL and TLS configuration already set via NewTEEKWithConfig
-	logger.Info("Standalone mode configuration",
+	logger.Info("TEE_K ready to accept clients",
 		zap.String("teet_url", config.TEETURL),
 		zap.String("tls_version", config.ForceTLSVersion))
 

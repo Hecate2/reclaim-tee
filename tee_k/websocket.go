@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/reclaimprotocol/reclaim-tee/oprfmpc"
 	teeproto "github.com/reclaimprotocol/reclaim-tee/proto"
 	"github.com/reclaimprotocol/reclaim-tee/shared"
 
@@ -15,8 +16,9 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-// MaxWebSocketMessageSize is the maximum allowed WebSocket message size (10 MB)
-const MaxWebSocketMessageSize = 10 * 1024 * 1024
+// MaxWebSocketMessageSize is the maximum allowed WebSocket message size (30 MB)
+// Sized for OT precomputation: 100,000 COSenderSetups at ~200 bytes each = ~20 MB
+const MaxWebSocketMessageSize = 30 * 1024 * 1024
 
 var teekUpgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool {
@@ -61,8 +63,22 @@ func (t *TEEK) establishSharedTEETConnection() {
 
 		t.logger.Debug("Shared persistent connection to TEE_T established")
 
-		// Start monitoring the connection and auto-reconnect on failure
+		// Start monitoring the connection in background (handles incoming messages)
 		go t.monitorSharedTEETConnection()
+
+		// Perform OT precomputation - this BLOCKS until complete
+		if err := t.performOTPrecomputation(oprfmpc.OTPoolInitialSize, true); err != nil {
+			t.logger.Error("Failed to perform OT precomputation", zap.Error(err))
+			// Close connection and retry
+			conn.Close()
+			t.teetConnMutex.Lock()
+			t.sharedTEETConn = nil
+			t.teetConnMutex.Unlock()
+			time.Sleep(1 * time.Second)
+			continue
+		}
+
+		t.logger.Info("OT precomputation complete, TEE_K ready to accept clients")
 		break
 	}
 }
@@ -90,12 +106,15 @@ func (t *TEEK) monitorSharedTEETConnection() {
 			t.teetAttestationVerified = false
 			t.teetAttestationMutex.Unlock()
 
+			// Clear OT pool on disconnect (prevents replay attacks)
+			t.clearOTPool()
+
 			// Clear the broken connection
 			t.teetConnMutex.Lock()
 			t.sharedTEETConn = nil
 			t.teetConnMutex.Unlock()
 
-			// Reconnect (will re-do attestation)
+			// Reconnect (will re-do attestation and OT precomputation)
 			t.establishSharedTEETConnection()
 			break
 		}
@@ -170,9 +189,10 @@ func (t *TEEK) handleSharedTEETMessage(msgBytes []byte) {
 		t.logger.WithSession(sessionID).Info("Received error from TEE_T", zap.String("error", p.Error.GetMessage()))
 		return
 
-	case *teeproto.Envelope_OprfMpcRound2:
-		if handlerErr = t.handleOPRFRound2(sessionID, p.OprfMpcRound2); handlerErr != nil {
-			t.terminateSessionWithError(sessionID, shared.ReasonOPRFProtocolFailed, handlerErr, "MPC OPRF Round2 failed")
+	// OT Precomputation messages (2-round OPRF protocol)
+	case *teeproto.Envelope_OtPrecomputeResponse:
+		if handlerErr = t.handleOTPrecomputeResponse(p.OtPrecomputeResponse); handlerErr != nil {
+			t.logger.Error("OT precompute response failed", zap.Error(handlerErr))
 		}
 		return
 
@@ -323,6 +343,18 @@ func (t *TEEK) connectToTEET(sessionID string) (*websocket.Conn, error) {
 
 // handleWebSocket handles incoming WebSocket connections from clients
 func (t *TEEK) handleWebSocket(w http.ResponseWriter, r *http.Request) {
+	// Reject connections if system not ready (prevents wasted client work)
+	if !t.isOTPoolReady() {
+		t.logger.Warn("Rejecting client connection - OT pool not ready")
+		http.Error(w, "Service temporarily unavailable - OT pool not ready", http.StatusServiceUnavailable)
+		return
+	}
+	if t.getSharedTEETConnection() == nil {
+		t.logger.Warn("Rejecting client connection - TEE_T connection not established")
+		http.Error(w, "Service temporarily unavailable - TEE connection not established", http.StatusServiceUnavailable)
+		return
+	}
+
 	conn, err := teekUpgrader.Upgrade(w, r, nil)
 	if err != nil {
 		t.logger.Error("Failed to upgrade websocket", zap.Error(err))

@@ -66,27 +66,34 @@ func startEnclaveMode(config *TEEKConfig, logger *shared.Logger) {
 	teek.SetForceTLSVersion(config.ForceTLSVersion)
 	teek.SetForceCipherSuite(config.ForceCipherSuite)
 
+	// Set TEE_T URL for per-session connections
+	teek.SetTEETURL(config.TEETURL)
+	logger.Info("Enclave mode configuration", zap.String("teet_url", config.TEETURL))
+
+	// IMPORTANT: Establish TEE_T connection and complete OT precomputation BEFORE accepting clients
+	// This ensures no client work is wasted if OT setup fails
+	logger.Info("Establishing shared connection to TEE_T and completing OT precomputation...")
+	teek.establishSharedTEETConnection()
+
+	// Only start HTTPS server AFTER OT pool is ready
+	if !teek.isOTPoolReady() {
+		logger.Critical("OT pool not ready after establishSharedTEETConnection - this should not happen")
+		return
+	}
+
 	// Create HTTPS server with integrated WebSocket handler
 	httpsHandler := setupEnclaveRoutes(teek, enclaveManager, logger)
 	httpsServer := enclaveManager.CreateHTTPSServer(httpsHandler)
 
-	// Start HTTPS server in background
+	// Start HTTPS server in background - OT is ready, safe to accept clients
 	go func() {
-		logger.Info("Starting production HTTPS server", zap.Int("port", int(enclaveConfig.HTTPSPort)))
+		logger.Info("OT precomputation complete, starting production HTTPS server", zap.Int("port", int(enclaveConfig.HTTPSPort)))
 		if err := httpsServer.ListenAndServeTLS(ctx); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logger.Critical("HTTPS server failed", zap.Error(err))
 			// Signal main goroutine to shut down gracefully
 			cancel()
 		}
 	}()
-
-	// Set TEE_T URL for per-session connections
-	teek.SetTEETURL(config.TEETURL)
-	logger.Info("Enclave mode configuration", zap.String("teet_url", config.TEETURL))
-
-	// Establish shared persistent connection to TEE_T after server is ready
-	logger.Info("HTTPS server started, establishing shared connection to TEE_T")
-	teek.establishSharedTEETConnection()
 
 	// Wait for shutdown signal
 	sigChan := make(chan os.Signal, 1)

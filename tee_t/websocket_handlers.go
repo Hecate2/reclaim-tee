@@ -17,6 +17,18 @@ import (
 
 // handleClientWebSocket handles WebSocket connections from clients
 func (t *TEET) handleClientWebSocket(w http.ResponseWriter, r *http.Request) {
+	// Reject connections if system not ready (prevents wasted client work)
+	if !t.isTEEKConnected() {
+		t.logger.Warn("Rejecting client connection - TEE_K not connected")
+		http.Error(w, "Service temporarily unavailable - TEE connection not established", http.StatusServiceUnavailable)
+		return
+	}
+	if !t.isOTReceiverPoolReady() {
+		t.logger.Warn("Rejecting client connection - OT receiver pool not ready")
+		http.Error(w, "Service temporarily unavailable - OT pool not ready", http.StatusServiceUnavailable)
+		return
+	}
+
 	conn, err := teetUpgrader.Upgrade(w, r, nil)
 	if err != nil {
 		t.logger.Error("Failed to upgrade client websocket", zap.Error(err))
@@ -222,6 +234,15 @@ func (t *TEET) handleTEEKWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	t.logger.Debug("Mutual attestation completed")
 
+	// Mark TEE_K as connected (enables client connections)
+	t.setTEEKConnected(true)
+
+	// Ensure we mark disconnected when this function exits
+	defer func() {
+		t.setTEEKConnected(false)
+		t.clearOTReceiverPool() // Clear OT pool on disconnect (prevents replay)
+	}()
+
 	// Continue with existing message loop
 	activeSessions := make(map[string]bool)
 	var activeSessionsMutex sync.RWMutex
@@ -309,16 +330,23 @@ func (t *TEET) handleTEEKWebSocket(w http.ResponseWriter, r *http.Request) {
 			t.logger.WithSession(sessionID).Debug("Received error from TEE_K, cleaning up")
 			t.cleanupSession(sessionID)
 			continue
-		case *teeproto.Envelope_OprfMpcRound1:
-			// Handle MPC OPRF Round1 from TEE_K
-			if err := t.handleOPRFRound1(sessionID, p.OprfMpcRound1); err != nil {
-				t.terminateSessionWithError(sessionID, shared.ReasonOPRFEvaluationFailed, err, "Failed to handle OPRF Round1")
+		case *teeproto.Envelope_OtPrecomputeRequest:
+			// Handle OT precomputation request from TEE_K (unified init/extend)
+			if err := t.handleOTPrecomputeRequest(shared.NewWSConnection(conn), p.OtPrecomputeRequest); err != nil {
+				t.logger.Error("Failed to handle OT precompute request", zap.Error(err))
+				// Don't terminate session - this is a system-wide operation
 			}
 			continue
-		case *teeproto.Envelope_OprfMpcRound3:
-			// Handle MPC OPRF Round3 from TEE_K
-			if err := t.handleOPRFRound3(sessionID, p.OprfMpcRound3); err != nil {
-				t.terminateSessionWithError(sessionID, shared.ReasonOPRFEvaluationFailed, err, "Failed to handle OPRF Round3")
+		case *teeproto.Envelope_OtPrecomputeComplete:
+			// Handle OT precomputation complete acknowledgment from TEE_K
+			if err := t.handleOTPrecomputeComplete(p.OtPrecomputeComplete); err != nil {
+				t.logger.Error("Failed to handle OT precompute complete", zap.Error(err))
+			}
+			continue
+		case *teeproto.Envelope_OprfOnlineFull:
+			// Handle 2-round MPC OPRF online message from TEE_K
+			if err := t.handleOPRFOnlineFull(sessionID, p.OprfOnlineFull); err != nil {
+				t.terminateSessionWithError(sessionID, shared.ReasonOPRFEvaluationFailed, err, "Failed to handle OPRF online")
 			}
 			continue
 		default:
@@ -363,6 +391,10 @@ func (t *TEET) handleTEEKWebSocket(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 	}
+
+	// Clear OT receiver pool on TEE_K disconnect
+	// This prevents replay attacks and ensures fresh precomputation on reconnect
+	t.clearOTReceiverPool()
 
 	activeSessionsMutex.RLock()
 	sessionCount := len(activeSessions)

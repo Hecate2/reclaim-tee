@@ -30,18 +30,18 @@ type TEEKSessionState struct {
 	CombinedKey       []byte
 	ServerSequenceNum uint64
 
-	// MPC OPRF state
-	ConsolidatedKeystream []byte                              // Keystream for response decryption
-	OPRFKeyShare          []byte                              // 16-byte key share for MPC OPRF
-	GarblerSessions       map[int]*oprfmpc.CMACGarblerSession // Per-range garbler sessions
-	OPRFRanges            []*teeproto.OPRFRangeSpec           // Client-provided OPRF ranges
-	OPRFResults           map[int]*shared.OPRFResult          // Completed OPRF results by range index
-	OPRFState             shared.OPRFSessionState             // Current OPRF processing state
-	OPRFExpectedCount     int                                 // Number of OPRF results expected
-	ClientRangesReceived  bool                                // Whether client has sent ranges
+	// MPC OPRF state (2-round protocol with OT precomputation)
+	ConsolidatedKeystream []byte                                    // Keystream for response decryption
+	OPRFKeyShare          []byte                                    // 16-byte key share for MPC OPRF
+	GarblerOnlineSessions map[int]*oprfmpc.CMACGarblerOnlineSession // Per-range garbler sessions
+	OPRFRanges            []*teeproto.OPRFRangeSpec                 // Client-provided OPRF ranges
+	OPRFResults           map[int]*shared.OPRFResult                // Completed OPRF results by range index
+	OPRFState             shared.OPRFSessionState                   // Current OPRF processing state
+	OPRFExpectedCount     int                                       // Number of OPRF results expected
+	ClientRangesReceived  bool                                      // Whether client has sent ranges
 
 	// Per-session mutex for thread-safe access to OPRF state
-	// Must be held when accessing GarblerSessions, OPRFResults, or OPRFRanges
+	// Must be held when accessing GarblerOnlineSessions, OPRFResults, or OPRFRanges
 	oprfMu sync.Mutex
 }
 
@@ -95,21 +95,21 @@ func (s *TEEKSessionState) UnlockOPRF() {
 	s.oprfMu.Unlock()
 }
 
-// SetGarblerSession safely sets a garbler session for the given range index
-func (s *TEEKSessionState) SetGarblerSession(rangeIdx int, session *oprfmpc.CMACGarblerSession) {
+// SetGarblerOnlineSession safely sets a garbler session for the given range index
+func (s *TEEKSessionState) SetGarblerOnlineSession(rangeIdx int, session *oprfmpc.CMACGarblerOnlineSession) {
 	s.oprfMu.Lock()
 	defer s.oprfMu.Unlock()
-	if s.GarblerSessions == nil {
-		s.GarblerSessions = make(map[int]*oprfmpc.CMACGarblerSession)
+	if s.GarblerOnlineSessions == nil {
+		s.GarblerOnlineSessions = make(map[int]*oprfmpc.CMACGarblerOnlineSession)
 	}
-	s.GarblerSessions[rangeIdx] = session
+	s.GarblerOnlineSessions[rangeIdx] = session
 }
 
-// GetGarblerSession safely retrieves a garbler session for the given range index
-func (s *TEEKSessionState) GetGarblerSession(rangeIdx int) (*oprfmpc.CMACGarblerSession, bool) {
+// GetGarblerOnlineSession safely retrieves a garbler session for the given range index
+func (s *TEEKSessionState) GetGarblerOnlineSession(rangeIdx int) (*oprfmpc.CMACGarblerOnlineSession, bool) {
 	s.oprfMu.Lock()
 	defer s.oprfMu.Unlock()
-	session, ok := s.GarblerSessions[rangeIdx]
+	session, ok := s.GarblerOnlineSessions[rangeIdx]
 	return session, ok
 }
 

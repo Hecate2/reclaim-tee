@@ -1,7 +1,6 @@
 package main
 
 import (
-	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
 	"fmt"
@@ -39,7 +38,7 @@ func (t *TEEK) handleOPRFRangesFromClient(sessionID string, msg *teeproto.OPRFRa
 	teekState.ClientRangesReceived = true
 	teekState.OPRFState = shared.OPRFStateInProgress
 	teekState.OPRFExpectedCount = len(msg.GetRanges())
-	teekState.GarblerSessions = make(map[int]*oprfmpc.CMACGarblerSession)
+	teekState.GarblerOnlineSessions = make(map[int]*oprfmpc.CMACGarblerOnlineSession)
 	teekState.OPRFResults = make(map[int]*shared.OPRFResult)
 
 	// Use persistent OPRF key share from TEEK instance
@@ -67,8 +66,13 @@ func (t *TEEK) processQueuedOPRFRanges(sessionID string, teekState *TEEKSessionS
 	if teekState.OPRFState != shared.OPRFStateInProgress {
 		return nil // Already processed or not needed
 	}
-	if len(teekState.GarblerSessions) > 0 {
+	if len(teekState.GarblerOnlineSessions) > 0 {
 		return nil // Already initiated
+	}
+
+	// Check if OT pool is ready
+	if !t.isOTPoolReady() {
+		return fmt.Errorf("OT pool not ready - precomputation may have failed")
 	}
 
 	t.logger.WithSession(sessionID).Debug("Processing queued OPRF ranges")
@@ -91,69 +95,16 @@ func (t *TEEK) processQueuedOPRFRanges(sessionID string, teekState *TEEKSessionS
 	return nil
 }
 
-// initiateOPRFForRange starts MPC OPRF for a single range
+// initiateOPRFForRange starts MPC OPRF for a single range using the 2-round protocol
 func (t *TEEK) initiateOPRFForRange(sessionID string, teekState *TEEKSessionState, rangeIndex int, r *teeproto.OPRFRangeSpec) error {
-	// Generate Round1 (no input needed at this stage)
-	round1, garblerState, err := oprfmpc.CMACGarblerRound1(rand.Reader, elliptic.P256())
+	// Reserve OT entries from the precomputed pool
+	startIdx, otEntries, err := t.reserveOTEntries(oprfmpc.OTsPerOPRF)
 	if err != nil {
-		return fmt.Errorf("CMACGarblerRound1 failed: %w", err)
+		return fmt.Errorf("failed to reserve OT entries: %w", err)
 	}
-
-	teekState.SetGarblerSession(rangeIndex, garblerState)
-
-	// Compute TLS session hash for replay protection
-	tlsSessionHash, err := t.computeTLSSessionHash(sessionID)
-	if err != nil {
-		return fmt.Errorf("failed to compute TLS session hash: %w", err)
-	}
-
-	t.logger.WithSession(sessionID).Debug("Sending OPRF Round1", zap.Int("range", rangeIndex))
-
-	// Serialize Round1 payload
-	round1Bytes := oprfmpc.SerializeRound1(round1)
-
-	// Send Round1 to TEE_T
-	return t.sendOPRFMPCRound1ToTEET(sessionID, &teeproto.OPRFMPCRound1{
-		SessionId:      sessionID,
-		OprfSessionId:  garblerState.SessionID,
-		OtSetup:        round1Bytes,
-		RangeIndex:     int32(rangeIndex),
-		TlsStart:       r.TlsStart,
-		TlsLength:      r.TlsLength,
-		TlsSessionHash: tlsSessionHash,
-	})
-}
-
-// handleOPRFRound2 handles Round2 response from TEE_T
-func (t *TEEK) handleOPRFRound2(sessionID string, msg *teeproto.OPRFMPCRound2) error {
-	teekState, err := t.sessionManager.GetTEEKSessionState(sessionID)
-	if err != nil {
-		return fmt.Errorf("failed to get TEE_K session state: %w", err)
-	}
-
-	// Find garbler session by OPRF session ID (with locking)
-	teekState.LockOPRF()
-	var rangeIndex int = -1
-	var garblerSession *oprfmpc.CMACGarblerSession
-	for idx, gs := range teekState.GarblerSessions {
-		if gs.SessionID == msg.OprfSessionId {
-			rangeIndex = idx
-			garblerSession = gs
-			break
-		}
-	}
-	teekState.UnlockOPRF()
-
-	if rangeIndex < 0 {
-		return fmt.Errorf("no garbler session found for OPRF session %d", msg.OprfSessionId)
-	}
-
-	t.logger.WithSession(sessionID).Debug("Received OPRF Round2", zap.Int("range", rangeIndex))
 
 	// Extract keystream for range and build garbler input
-	r := teekState.OPRFRanges[rangeIndex]
 	keystream := teekState.ConsolidatedKeystream[r.TlsStart : r.TlsStart+r.TlsLength]
-	// PadZeros64 pads to 64 bytes - error only occurs if length > 64, which is validated earlier
 	paddedKeystream, err := oprfmpc.PadZeros64(keystream, int(r.TlsLength))
 	if err != nil {
 		return fmt.Errorf("failed to pad keystream: %w", err)
@@ -163,33 +114,48 @@ func (t *TEEK) handleOPRFRound2(sessionID string, msg *teeproto.OPRFMPCRound2) e
 	copy(garblerInput[:64], paddedKeystream[:])
 	copy(garblerInput[64:], teekState.OPRFKeyShare)
 
-	// Deserialize Round2 payload
-	round2, err := oprfmpc.DeserializeRound2(msg.OtChoices)
+	// Generate online payload using precomputed OT
+	// Use the curve from OT precomputation state
+	curve := t.otPrecomputeState.curve
+	payload, garblerSession, err := oprfmpc.CMACGarblerOnline(rand.Reader, curve, garblerInput, otEntries, startIdx)
 	if err != nil {
-		return fmt.Errorf("failed to deserialize Round2: %w", err)
+		return fmt.Errorf("CMACGarblerOnline failed: %w", err)
 	}
 
-	// Generate Round3
-	round3, err := oprfmpc.CMACGarblerRound3(rand.Reader, elliptic.P256(), garblerSession, garblerInput, round2)
+	// Store garbler session for output verification later
+	teekState.SetGarblerOnlineSession(rangeIndex, garblerSession)
+
+	// Compute TLS session hash for replay protection
+	tlsSessionHash, err := t.computeTLSSessionHash(sessionID)
 	if err != nil {
-		return fmt.Errorf("CMACGarblerRound3 failed: %w", err)
+		return fmt.Errorf("failed to compute TLS session hash: %w", err)
 	}
 
-	// Serialize Round3 payload
-	round3Bytes := oprfmpc.SerializeRound3(round3)
+	// Serialize the payload
+	serializedPayload := oprfmpc.SerializeOnlinePayload(payload)
 
-	// Send Round3 to TEE_T
-	return t.sendOPRFMPCRound3ToTEET(sessionID, &teeproto.OPRFMPCRound3{
+	t.logger.WithSession(sessionID).Debug("Sending OPRF online full",
+		zap.Int("range", rangeIndex),
+		zap.Int("ot_start_index", startIdx))
+
+	// Send OPRFOnlineFull to TEE_T
+	return t.sendOPRFOnlineFullToTEET(sessionID, &teeproto.OPRFOnlineFull{
 		SessionId:      sessionID,
-		OprfSessionId:  msg.OprfSessionId,
-		GarbledCircuit: round3Bytes, // Full serialized payload
-		GarblerInputs:  nil,         // Included in serialized payload
-		OtCiphertexts:  nil,         // Included in serialized payload
-		OutputHints:    nil,         // Included in serialized payload
+		OprfSessionId:  garblerSession.SessionID,
+		RangeIndex:     int32(rangeIndex),
+		TlsStart:       r.TlsStart,
+		TlsLength:      r.TlsLength,
+		TlsSessionHash: tlsSessionHash,
+		GarbledTables:  serializedPayload, // Contains all circuit data
+		GarblerInputs:  nil,               // Included in serialized payload
+		OutputHints:    nil,               // Included in serialized payload
+		OtStartIndex:   uint32(startIdx),
+		DualMasks:      oprfmpc.SerializeDualMasks(payload.DualMasks),
 	})
 }
 
 // handleOPRFResult handles the final OPRF result from TEE_T
+// This is the only response in the 2-round protocol
 func (t *TEEK) handleOPRFResult(sessionID string, msg *teeproto.OPRFMPCResult) error {
 	teekState, err := t.sessionManager.GetTEEKSessionState(sessionID)
 	if err != nil {
@@ -201,9 +167,27 @@ func (t *TEEK) handleOPRFResult(sessionID string, msg *teeproto.OPRFMPCResult) e
 		return fmt.Errorf("invalid range index %d", rangeIndex)
 	}
 
+	// MANDATORY: Verify output labels
+	garblerSession, ok := teekState.GetGarblerOnlineSession(rangeIndex)
+	if !ok {
+		return fmt.Errorf("no garbler session found for range %d", rangeIndex)
+	}
+
+	// Deserialize output labels
+	outputLabels, err := oprfmpc.DeserializeOutputLabels(msg.GetOutputLabels())
+	if err != nil {
+		return fmt.Errorf("failed to deserialize output labels: %w", err)
+	}
+
+	// Verify output labels - ZERO TOLERANCE: fail session if verification fails
+	if err := oprfmpc.CMACGarblerVerifyOutput(garblerSession, outputLabels); err != nil {
+		return fmt.Errorf("CRITICAL: output label verification failed - possible attack: %w", err)
+	}
+
 	r := teekState.OPRFRanges[rangeIndex]
 
-	t.logger.WithSession(sessionID).Debug("Received OPRF result", zap.Int("range", rangeIndex))
+	t.logger.WithSession(sessionID).Debug("Received OPRF result (verified)",
+		zap.Int("range", rangeIndex))
 
 	// Store the result (thread-safe)
 	var cmacOutput [16]byte
@@ -246,8 +230,8 @@ func (t *TEEK) computeTLSSessionHash(sessionID string) ([]byte, error) {
 	return h.Sum(nil), nil
 }
 
-// sendOPRFMPCRound1ToTEET sends Round1 message to TEE_T
-func (t *TEEK) sendOPRFMPCRound1ToTEET(sessionID string, round1 *teeproto.OPRFMPCRound1) error {
+// sendOPRFOnlineFullToTEET sends OPRFOnlineFull message to TEE_T
+func (t *TEEK) sendOPRFOnlineFullToTEET(sessionID string, msg *teeproto.OPRFOnlineFull) error {
 	conn := t.getSharedTEETConnection()
 	if conn == nil {
 		return fmt.Errorf("no shared TEE_T connection available")
@@ -256,40 +240,21 @@ func (t *TEEK) sendOPRFMPCRound1ToTEET(sessionID string, round1 *teeproto.OPRFMP
 	env := &teeproto.Envelope{
 		SessionId:   sessionID,
 		TimestampMs: time.Now().UnixMilli(),
-		Payload: &teeproto.Envelope_OprfMpcRound1{
-			OprfMpcRound1: round1,
+		Payload: &teeproto.Envelope_OprfOnlineFull{
+			OprfOnlineFull: msg,
 		},
 	}
 
 	data, err := proto.Marshal(env)
 	if err != nil {
-		return fmt.Errorf("failed to marshal Round1: %w", err)
+		return fmt.Errorf("failed to marshal OPRFOnlineFull: %w", err)
 	}
 
-	return conn.WriteMessage(websocket.BinaryMessage, data)
-}
+	t.teetWriteMutex.Lock()
+	err = conn.WriteMessage(websocket.BinaryMessage, data)
+	t.teetWriteMutex.Unlock()
 
-// sendOPRFMPCRound3ToTEET sends Round3 message to TEE_T
-func (t *TEEK) sendOPRFMPCRound3ToTEET(sessionID string, round3 *teeproto.OPRFMPCRound3) error {
-	conn := t.getSharedTEETConnection()
-	if conn == nil {
-		return fmt.Errorf("no shared TEE_T connection available")
-	}
-
-	env := &teeproto.Envelope{
-		SessionId:   sessionID,
-		TimestampMs: time.Now().UnixMilli(),
-		Payload: &teeproto.Envelope_OprfMpcRound3{
-			OprfMpcRound3: round3,
-		},
-	}
-
-	data, err := proto.Marshal(env)
-	if err != nil {
-		return fmt.Errorf("failed to marshal Round3: %w", err)
-	}
-
-	return conn.WriteMessage(websocket.BinaryMessage, data)
+	return err
 }
 
 // buildOPRFOutputsForSigning builds OPRF outputs for inclusion in signed payload
@@ -376,5 +341,9 @@ func (t *TEEK) sendCiphertextReadyToTEET(sessionID string, totalLength int) erro
 		return fmt.Errorf("failed to marshal CiphertextReady: %w", err)
 	}
 
-	return conn.WriteMessage(websocket.BinaryMessage, data)
+	t.teetWriteMutex.Lock()
+	err = conn.WriteMessage(websocket.BinaryMessage, data)
+	t.teetWriteMutex.Unlock()
+
+	return err
 }

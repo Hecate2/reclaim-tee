@@ -17,8 +17,9 @@ import (
 	"go.uber.org/zap"
 )
 
-// MaxWebSocketMessageSize is the maximum allowed WebSocket message size (10 MB)
-const MaxWebSocketMessageSize = 10 * 1024 * 1024
+// MaxWebSocketMessageSize is the maximum allowed WebSocket message size (30 MB)
+// Sized for OT precomputation: 100,000 COSenderSetups at ~200 bytes each = ~20 MB
+const MaxWebSocketMessageSize = 30 * 1024 * 1024
 
 var teetUpgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool {
@@ -57,6 +58,14 @@ type TEET struct {
 
 	// Persistent OPRF key share (loaded from cloud storage)
 	oprfKeyShare []byte
+
+	// OT receiver state for 2-round OPRF protocol
+	otReceiverState   *OTReceiverState
+	otReceiverStateMu sync.Mutex
+
+	// TEE_K connection tracking
+	teekConnected   bool
+	teekConnectedMu sync.RWMutex
 }
 
 // NewTEETWithLogger creates a TEET with a specific logger
@@ -186,6 +195,25 @@ func (t *TEET) getSessionRedactionState(sessionID string) (*shared.RedactionSess
 
 func (t *TEET) getTEETSessionState(sessionID string) (*TEETSessionState, error) {
 	return t.sessionManager.GetTEETSessionState(sessionID)
+}
+
+// setTEEKConnected updates the TEE_K connection status
+func (t *TEET) setTEEKConnected(connected bool) {
+	t.teekConnectedMu.Lock()
+	defer t.teekConnectedMu.Unlock()
+	t.teekConnected = connected
+	if connected {
+		t.logger.Info("TEE_K connection established")
+	} else {
+		t.logger.Info("TEE_K connection lost")
+	}
+}
+
+// isTEEKConnected returns whether TEE_K is connected
+func (t *TEET) isTEEKConnected() bool {
+	t.teekConnectedMu.RLock()
+	defer t.teekConnectedMu.RUnlock()
+	return t.teekConnected
 }
 
 // cleanupSession performs complete cleanup of session resources

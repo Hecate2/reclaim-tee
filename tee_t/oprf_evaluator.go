@@ -2,8 +2,6 @@ package main
 
 import (
 	"bytes"
-	"crypto/elliptic"
-	"crypto/rand"
 	"crypto/sha256"
 	"fmt"
 	"time"
@@ -52,7 +50,6 @@ func (t *TEET) handleOPRFRangesFromClient(sessionID string, msg *teeproto.OPRFRa
 	teetState.ClientRangesReceived = true
 	teetState.OPRFState = shared.OPRFStateInProgress
 	teetState.OPRFExpectedCount = len(msg.GetRanges())
-	teetState.EvaluatorSessions = make(map[int]*oprfmpc.CMACEvaluatorSession)
 	teetState.OPRFResults = make(map[int]*shared.OPRFResult)
 
 	// Use persistent OPRF key share from TEET instance
@@ -61,56 +58,36 @@ func (t *TEET) handleOPRFRangesFromClient(sessionID string, msg *teeproto.OPRFRa
 	}
 	teetState.OPRFKeyShare = t.oprfKeyShare
 
-	// TLS session hash will be cached from the first Round1 message from TEE_K
-	// TEE_K has access to ClientHello/ServerHello which TEE_T doesn't have
-
-	// Process any queued Round1 messages that arrived before client ranges (thread-safe)
-	pendingRound1s := teetState.GetAndClearPendingRound1s()
-	if len(pendingRound1s) > 0 {
-		t.logger.WithSession(sessionID).Debug("Processing queued Round1 messages",
-			zap.Int("count", len(pendingRound1s)))
-		for _, round1 := range pendingRound1s {
-			if err := t.processOPRFRound1(sessionID, teetState, round1); err != nil {
-				return err
-			}
-		}
-	}
+	// In 2-round protocol, we just wait for OPRFOnlineFull messages from TEE_K
+	// No queueing needed - online messages contain everything needed for evaluation
 
 	return nil
 }
 
-// handleOPRFRound1 handles Round1 from TEE_K
-func (t *TEET) handleOPRFRound1(sessionID string, msg *teeproto.OPRFMPCRound1) error {
+// handleOPRFOnlineFull handles the 2-round online OPRF message from TEE_K
+// This is the only message in the online phase - contains all circuit data
+func (t *TEET) handleOPRFOnlineFull(sessionID string, msg *teeproto.OPRFOnlineFull) error {
 	teetState, err := t.sessionManager.GetTEETSessionState(sessionID)
 	if err != nil {
 		return fmt.Errorf("failed to get TEE_T session state: %w", err)
 	}
 
-	// Queue if client ranges not yet received (thread-safe)
-	if !teetState.ClientRangesReceived {
-		t.logger.WithSession(sessionID).Debug("Queueing Round1 - waiting for client ranges",
-			zap.Int("range_index", int(msg.RangeIndex)))
-		teetState.AddPendingRound1(msg)
-		return nil
-	}
-
-	return t.processOPRFRound1(sessionID, teetState, msg)
-}
-
-// processOPRFRound1 processes a Round1 message after client ranges are received
-func (t *TEET) processOPRFRound1(sessionID string, teetState *TEETSessionState, msg *teeproto.OPRFMPCRound1) error {
-	// SECURITY: Cache TLS session hash from first Round1, verify consistency for subsequent
-	// TEE_K computes this from ClientHello/ServerHello which TEE_T doesn't have access to
+	// SECURITY: Cache TLS session hash from first message, verify consistency for subsequent
 	if len(teetState.TLSSessionHash) == 0 {
-		// First Round1 - cache the hash from TEE_K
 		teetState.TLSSessionHash = msg.TlsSessionHash
 		t.logger.WithSession(sessionID).Debug("Cached TLS session hash from TEE_K",
 			zap.Int("hash_len", len(msg.TlsSessionHash)))
 	} else {
-		// Subsequent Round1 - verify same hash (prevents mixing sessions)
 		if !bytes.Equal(msg.TlsSessionHash, teetState.TLSSessionHash) {
 			return fmt.Errorf("TLS session hash mismatch - possible replay attack")
 		}
+	}
+
+	// Wait for client ranges if not yet received
+	if !teetState.ClientRangesReceived {
+		// In 2-round protocol, TEE_K should wait for keystream before sending online messages
+		// If we get here before client ranges, something is wrong with the protocol order
+		return fmt.Errorf("received OPRFOnlineFull before client ranges - protocol order violation")
 	}
 
 	// SECURITY: Verify position matches what client sent
@@ -126,15 +103,21 @@ func (t *TEET) processOPRFRound1(sessionID string, teetState *TEETSessionState, 
 			clientRange.TlsStart, clientRange.TlsStart+clientRange.TlsLength)
 	}
 
-	t.logger.WithSession(sessionID).Debug("Processing MPC OPRF Round1",
+	// Check OT receiver pool is ready
+	if !t.isOTReceiverPoolReady() {
+		return fmt.Errorf("OT receiver pool not ready - precomputation may have failed")
+	}
+
+	t.logger.WithSession(sessionID).Debug("Processing MPC OPRF online",
 		zap.Int("range_index", rangeIndex),
 		zap.Int32("tls_start", msg.TlsStart),
-		zap.Int32("tls_length", msg.TlsLength))
+		zap.Int32("tls_length", msg.TlsLength),
+		zap.Uint32("ot_start_index", msg.OtStartIndex))
 
 	// Extract ciphertext for range
 	ciphertext := teetState.ConsolidatedResponseCiphertext[msg.TlsStart : msg.TlsStart+msg.TlsLength]
 
-	// Pad to 64 bytes - error only occurs if length > 64, which is validated in handleOPRFRangesFromClient
+	// Pad to 64 bytes
 	paddedCiphertext, err := oprfmpc.PadZeros64(ciphertext, int(msg.TlsLength))
 	if err != nil {
 		return fmt.Errorf("failed to pad ciphertext: %w", err)
@@ -145,73 +128,37 @@ func (t *TEET) processOPRFRound1(sessionID string, teetState *TEETSessionState, 
 	copy(evaluatorInput[:64], paddedCiphertext[:])
 	copy(evaluatorInput[64:], teetState.OPRFKeyShare)
 
-	// Deserialize Round1 payload
-	round1, err := oprfmpc.DeserializeRound1(msg.OtSetup)
+	// Consume OT receiver entries from precomputed pool
+	otEntries, err := t.consumeOTReceiverEntries(int(msg.OtStartIndex), oprfmpc.OTsPerOPRF)
 	if err != nil {
-		return fmt.Errorf("failed to deserialize Round1: %w", err)
+		return fmt.Errorf("failed to consume OT entries: %w", err)
 	}
 
-	// Generate Round2
-	round2, evalState, err := oprfmpc.CMACEvaluatorRound2(rand.Reader, elliptic.P256(), round1, evaluatorInput)
+	// Deserialize online payload
+	payload, err := oprfmpc.DeserializeOnlinePayload(msg.GarbledTables)
 	if err != nil {
-		return fmt.Errorf("CMACEvaluatorRound2 failed: %w", err)
+		return fmt.Errorf("failed to deserialize online payload: %w", err)
 	}
 
-	teetState.SetEvaluatorSession(rangeIndex, evalState)
-
-	// Serialize Round2 payload
-	round2Bytes := oprfmpc.SerializeRound2(round2)
-
-	// Send Round2 to TEE_K
-	return t.sendOPRFMPCRound2ToTEEK(sessionID, &teeproto.OPRFMPCRound2{
-		SessionId:     sessionID,
-		OprfSessionId: msg.OprfSessionId,
-		OtChoices:     round2Bytes,
-	})
-}
-
-// handleOPRFRound3 handles Round3 from TEE_K
-func (t *TEET) handleOPRFRound3(sessionID string, msg *teeproto.OPRFMPCRound3) error {
-	teetState, err := t.sessionManager.GetTEETSessionState(sessionID)
+	// Deserialize dual masks
+	dualMasks, err := oprfmpc.DeserializeDualMasks(msg.DualMasks)
 	if err != nil {
-		return fmt.Errorf("failed to get TEE_T session state: %w", err)
+		return fmt.Errorf("failed to deserialize dual masks: %w", err)
 	}
 
-	// Find evaluator session by OPRF session ID (with locking)
-	teetState.LockOPRF()
-	var rangeIndex int = -1
-	var evalSession *oprfmpc.CMACEvaluatorSession
-	for idx, es := range teetState.EvaluatorSessions {
-		if es.SessionID == msg.OprfSessionId {
-			rangeIndex = idx
-			evalSession = es
-			break
-		}
-	}
-	teetState.UnlockOPRF()
+	// Add dual masks to payload for evaluation
+	payload.DualMasks = dualMasks
 
-	if rangeIndex < 0 {
-		return fmt.Errorf("no evaluator session found for OPRF session %d", msg.OprfSessionId)
-	}
-
-	t.logger.WithSession(sessionID).Debug("Processing MPC OPRF Round3",
-		zap.Int("range_index", rangeIndex),
-		zap.Uint64("oprf_session_id", msg.OprfSessionId))
-
-	// Deserialize Round3 payload
-	round3, err := oprfmpc.DeserializeRound3(msg.GarbledCircuit)
+	// Evaluate the garbled circuit using 2-round online function
+	// Use the curve from OT receiver state
+	curve := t.otReceiverState.curve
+	result, err := oprfmpc.CMACEvaluatorOnline(curve, payload, evaluatorInput, otEntries)
 	if err != nil {
-		return fmt.Errorf("failed to deserialize Round3: %w", err)
-	}
-
-	// Evaluate the garbled circuit (Round4)
-	cmacResult, err := oprfmpc.CMACEvaluatorRound4(elliptic.P256(), evalSession, round3)
-	if err != nil {
-		return fmt.Errorf("CMACEvaluatorRound4 failed: %w", err)
+		return fmt.Errorf("CMACEvaluatorOnline failed: %w", err)
 	}
 
 	// Compute hash of CMAC output
-	hashOutput := sha256.Sum256(cmacResult[:])
+	hashOutput := sha256.Sum256(result.CMACOutput[:])
 
 	// Store result locally (thread-safe)
 	r := teetState.ClientOPRFRanges[rangeIndex]
@@ -219,20 +166,24 @@ func (t *TEET) handleOPRFRound3(sessionID string, msg *teeproto.OPRFMPCRound3) e
 		RangeIndex: rangeIndex,
 		TLSStart:   int(r.TlsStart),
 		TLSLength:  int(r.TlsLength),
-		CMACOutput: cmacResult,
+		CMACOutput: result.CMACOutput,
 		HashOutput: hashOutput,
 	})
 
 	t.logger.WithSession(sessionID).Debug("MPC OPRF evaluation complete",
 		zap.Int("range_index", rangeIndex))
 
-	// Send result back to TEE_K
+	// Serialize output labels for garbler verification (MANDATORY)
+	outputLabelsBytes := oprfmpc.SerializeOutputLabels(result.OutputLabels)
+
+	// Send result back to TEE_K with output labels (MANDATORY for verification)
 	if err := t.sendOPRFMPCResultToTEEK(sessionID, &teeproto.OPRFMPCResult{
 		SessionId:     sessionID,
 		OprfSessionId: msg.OprfSessionId,
 		RangeIndex:    int32(rangeIndex),
-		CmacOutput:    cmacResult[:],
+		CmacOutput:    result.CMACOutput[:],
 		HashOutput:    hashOutput[:],
+		OutputLabels:  outputLabelsBytes, // MANDATORY: for garbler verification
 	}); err != nil {
 		return err
 	}
@@ -247,38 +198,6 @@ func (t *TEET) handleOPRFRound3(sessionID string, msg *teeproto.OPRFMPCRound3) e
 	}
 
 	return nil
-}
-
-// sendOPRFMPCRound2ToTEEK sends Round2 message to TEE_K
-func (t *TEET) sendOPRFMPCRound2ToTEEK(sessionID string, round2 *teeproto.OPRFMPCRound2) error {
-	session, err := t.sessionManager.GetSession(sessionID)
-	if err != nil {
-		return fmt.Errorf("failed to get session: %w", err)
-	}
-
-	if session.TEEKConn == nil {
-		return fmt.Errorf("no TEE_K connection for session")
-	}
-
-	env := &teeproto.Envelope{
-		SessionId:   sessionID,
-		TimestampMs: time.Now().UnixMilli(),
-		Payload: &teeproto.Envelope_OprfMpcRound2{
-			OprfMpcRound2: round2,
-		},
-	}
-
-	data, err := proto.Marshal(env)
-	if err != nil {
-		return fmt.Errorf("failed to marshal Round2: %w", err)
-	}
-
-	wsConn, ok := session.TEEKConn.(*shared.WSConnection)
-	if !ok {
-		return fmt.Errorf("TEE_K connection is not a WebSocket connection")
-	}
-
-	return wsConn.WriteMessage(websocket.BinaryMessage, data)
 }
 
 // sendOPRFMPCResultToTEEK sends the final OPRF result to TEE_K
