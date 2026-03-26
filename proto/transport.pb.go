@@ -542,11 +542,11 @@ type Envelope_KeyShareRequest struct {
 }
 
 type Envelope_KeyShareResponse struct {
-	KeyShareResponse *KeyShareResponse `protobuf:"bytes,31,opt,name=key_share_response,json=keyShareResponse,proto3,oneof"`
+	KeyShareResponse *KeyShareResponse `protobuf:"bytes,32,opt,name=key_share_response,json=keyShareResponse,proto3,oneof"`
 }
 
 type Envelope_BatchedEncryptedRequest struct {
-	BatchedEncryptedRequest *BatchedEncryptedRequest `protobuf:"bytes,32,opt,name=batched_encrypted_request,json=batchedEncryptedRequest,proto3,oneof"`
+	BatchedEncryptedRequest *BatchedEncryptedRequest `protobuf:"bytes,33,opt,name=batched_encrypted_request,json=batchedEncryptedRequest,proto3,oneof"`
 }
 
 type Envelope_RedactedRequest struct {
@@ -559,11 +559,11 @@ type Envelope_RedactionStreams struct {
 }
 
 type Envelope_BatchedEncryptedData struct {
-	BatchedEncryptedData *BatchedEncryptedDataResponse `protobuf:"bytes,42,opt,name=batched_encrypted_data,json=batchedEncryptedData,proto3,oneof"` // TEE_T -> TEE_K
+	BatchedEncryptedData *BatchedEncryptedDataResponse `protobuf:"bytes,43,opt,name=batched_encrypted_data,json=batchedEncryptedData,proto3,oneof"` // TEE_T -> Client (DO NOT RENUMBER)
 }
 
 type Envelope_RedactionVerification struct {
-	RedactionVerification *RedactionVerification `protobuf:"bytes,43,opt,name=redaction_verification,json=redactionVerification,proto3,oneof"` // TEE_T -> TEE_K
+	RedactionVerification *RedactionVerification `protobuf:"bytes,44,opt,name=redaction_verification,json=redactionVerification,proto3,oneof"` // TEE_T -> TEE_K
 }
 
 type Envelope_ResponseRedactionSpec struct {
@@ -3052,12 +3052,12 @@ const file_transport_proto_rawDesc = "" +
 	"\x12handshake_complete\x18\x16 \x01(\v2\x1b.teeproto.HandshakeCompleteH\x00R\x11handshakeComplete\x12\\\n" +
 	"\x18handshake_key_disclosure\x18\x17 \x01(\v2 .teeproto.HandshakeKeyDisclosureH\x00R\x16handshakeKeyDisclosure\x12G\n" +
 	"\x11key_share_request\x18\x1e \x01(\v2\x19.teeproto.KeyShareRequestH\x00R\x0fkeyShareRequest\x12J\n" +
-	"\x12key_share_response\x18\x1f \x01(\v2\x1a.teeproto.KeyShareResponseH\x00R\x10keyShareResponse\x12_\n" +
-	"\x19batched_encrypted_request\x18  \x01(\v2!.teeproto.BatchedEncryptedRequestH\x00R\x17batchedEncryptedRequest\x12F\n" +
+	"\x12key_share_response\x18  \x01(\v2\x1a.teeproto.KeyShareResponseH\x00R\x10keyShareResponse\x12_\n" +
+	"\x19batched_encrypted_request\x18! \x01(\v2!.teeproto.BatchedEncryptedRequestH\x00R\x17batchedEncryptedRequest\x12F\n" +
 	"\x10redacted_request\x18( \x01(\v2\x19.teeproto.RedactedRequestH\x00R\x0fredactedRequest\x12I\n" +
 	"\x11redaction_streams\x18) \x01(\v2\x1a.teeproto.RedactionStreamsH\x00R\x10redactionStreams\x12^\n" +
-	"\x16batched_encrypted_data\x18* \x01(\v2&.teeproto.BatchedEncryptedDataResponseH\x00R\x14batchedEncryptedData\x12X\n" +
-	"\x16redaction_verification\x18+ \x01(\v2\x1f.teeproto.RedactionVerificationH\x00R\x15redactionVerification\x12Y\n" +
+	"\x16batched_encrypted_data\x18+ \x01(\v2&.teeproto.BatchedEncryptedDataResponseH\x00R\x14batchedEncryptedData\x12X\n" +
+	"\x16redaction_verification\x18, \x01(\v2\x1f.teeproto.RedactionVerificationH\x00R\x15redactionVerification\x12Y\n" +
 	"\x17response_redaction_spec\x18- \x01(\v2\x1f.teeproto.ResponseRedactionSpecH\x00R\x15responseRedactionSpec\x12e\n" +
 	"\x1bbatched_encrypted_responses\x182 \x01(\v2#.teeproto.BatchedEncryptedResponsesH\x00R\x19batchedEncryptedResponses\x12\\\n" +
 	"\x18batched_response_lengths\x183 \x01(\v2 .teeproto.BatchedResponseLengthsH\x00R\x16batchedResponseLengths\x12M\n" +

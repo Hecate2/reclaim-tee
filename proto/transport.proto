@@ -40,14 +40,14 @@ message Envelope {
 
     // Split AEAD (TEE_K <-> TEE_T)
     KeyShareRequest key_share_request = 30;
-    KeyShareResponse key_share_response = 31;
-    BatchedEncryptedRequest batched_encrypted_request = 32;
+    KeyShareResponse key_share_response = 32;
+    BatchedEncryptedRequest batched_encrypted_request = 33;
 
     // Redaction/TEET
     RedactedRequest redacted_request = 40;                    // Client -> TEE_T
     RedactionStreams redaction_streams = 41;                  // TEE_K -> TEE_T
-    BatchedEncryptedDataResponse batched_encrypted_data = 42; // TEE_T -> TEE_K
-    RedactionVerification redaction_verification = 43;        // TEE_T -> TEE_K
+    BatchedEncryptedDataResponse batched_encrypted_data = 43; // TEE_T -> Client (DO NOT RENUMBER)
+    RedactionVerification redaction_verification = 44;        // TEE_T -> TEE_K
     ResponseRedactionSpec response_redaction_spec = 45;       // Client -> TEE_K
 
     // Batches
