@@ -16,8 +16,9 @@ require (
 	github.com/gorilla/websocket v1.5.3
 	github.com/joho/godotenv v1.5.1
 	github.com/markkurossi/mpc v0.0.0-20260316165405-9c68ca96e1eb
+	github.com/mr-tron/base58 v1.2.0
 	github.com/reclaimprotocol/jsonpathplus-go/v2 v2.0.1
-	github.com/reclaimprotocol/xpath-go v1.4.0
+	github.com/reclaimprotocol/xpath-go v1.4.1
 	github.com/reclaimprotocol/zk-symmetric-crypto/gnark v0.0.0-20251205140100-6fd752973b8f
 	github.com/xeipuuv/gojsonschema v1.2.0
 	go.mozilla.org/pkcs7 v0.9.0
@@ -53,7 +54,6 @@ require (
 	github.com/mattn/go-colorable v0.1.14 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/miekg/dns v1.1.72 // indirect
-	github.com/mr-tron/base58 v1.2.0 // indirect
 	github.com/ronanh/intcomp v1.1.1 // indirect
 	github.com/rs/zerolog v1.34.0 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
