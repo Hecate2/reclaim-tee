@@ -250,11 +250,12 @@ func (t *TEEK) sendOPRFOnlineFullToTEET(sessionID string, msg *teeproto.OPRFOnli
 		return fmt.Errorf("failed to marshal OPRFOnlineFull: %w", err)
 	}
 
-	t.teetWriteMutex.Lock()
-	err = conn.WriteMessage(websocket.BinaryMessage, data)
-	t.teetWriteMutex.Unlock()
+	t.logger.WithSession(sessionID).Info("Sending to TEE_T",
+		zap.String("type", "OprfOnlineFull"),
+		zap.Int("bytes", len(data)))
 
-	return err
+	// Use wrapper's WriteMessage which has internal mutex for thread safety
+	return conn.WriteMessage(websocket.BinaryMessage, data)
 }
 
 // buildOPRFOutputsForSigning builds OPRF outputs for inclusion in signed payload
@@ -341,9 +342,10 @@ func (t *TEEK) sendCiphertextReadyToTEET(sessionID string, totalLength int) erro
 		return fmt.Errorf("failed to marshal CiphertextReady: %w", err)
 	}
 
-	t.teetWriteMutex.Lock()
-	err = conn.WriteMessage(websocket.BinaryMessage, data)
-	t.teetWriteMutex.Unlock()
+	t.logger.WithSession(sessionID).Info("Sending to TEE_T",
+		zap.String("type", "CiphertextReady"),
+		zap.Int("bytes", len(data)))
 
-	return err
+	// Use wrapper's WriteMessage which has internal mutex for thread safety
+	return conn.WriteMessage(websocket.BinaryMessage, data)
 }

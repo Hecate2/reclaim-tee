@@ -30,7 +30,7 @@ var teekUpgrader = websocket.Upgrader{
 
 // WebSocketConn adapts websocket to net.Conn interface for miniTLS
 type WebSocketConn struct {
-	wsConn      *websocket.Conn
+	wsConn      *shared.WSConnection // Use wrapper for thread-safe writes
 	readBuffer  []byte
 	readOffset  int
 	pendingData chan []byte
@@ -57,8 +57,11 @@ func (t *TEEK) establishSharedTEETConnection() {
 			continue
 		}
 
+		// Create single shared wrapper (its internal mutex handles write synchronization)
+		wsConn := shared.NewWSConnection(conn)
+
 		t.teetConnMutex.Lock()
-		t.sharedTEETConn = conn
+		t.sharedTEETConn = wsConn
 		t.teetConnMutex.Unlock()
 
 		t.logger.Debug("Shared persistent connection to TEE_T established")
@@ -70,7 +73,7 @@ func (t *TEEK) establishSharedTEETConnection() {
 		if err := t.performOTPrecomputation(oprfmpc.OTPoolInitialSize, true); err != nil {
 			t.logger.Error("Failed to perform OT precomputation", zap.Error(err))
 			// Close connection and retry
-			conn.Close()
+			wsConn.Close()
 			t.teetConnMutex.Lock()
 			t.sharedTEETConn = nil
 			t.teetConnMutex.Unlock()
@@ -221,8 +224,8 @@ func (t *TEEK) handleSharedTEETMessage(msgBytes []byte) {
 	}
 }
 
-// getSharedTEETConnection returns the shared connection, establishing it if needed
-func (t *TEEK) getSharedTEETConnection() *websocket.Conn {
+// getSharedTEETConnection returns the shared connection wrapper, establishing it if needed
+func (t *TEEK) getSharedTEETConnection() *shared.WSConnection {
 	t.teetConnMutex.RLock()
 	conn := t.sharedTEETConn
 	t.teetConnMutex.RUnlock()
@@ -285,6 +288,10 @@ func (t *TEEK) attemptTEETConnection(sessionID string, attempt int) (*websocket.
 		return nil, fmt.Errorf("failed to marshal attestation: %v", err)
 	}
 
+	logger.Info("Sending to TEE_T",
+		zap.String("type", "TeekAttestation"),
+		zap.Int("bytes", len(data)))
+
 	if err := conn.WriteMessage(websocket.BinaryMessage, data); err != nil {
 		conn.Close()
 		return nil, fmt.Errorf("failed to send attestation: %v", err)
@@ -329,7 +336,7 @@ func (t *TEEK) attemptTEETConnection(sessionID string, attempt int) (*websocket.
 }
 
 // connectToTEET now uses the shared connection instead of creating new ones
-func (t *TEEK) connectToTEET(sessionID string) (*websocket.Conn, error) {
+func (t *TEEK) connectToTEET(sessionID string) (*shared.WSConnection, error) {
 	t.logger.WithSession(sessionID).Debug("Using shared persistent connection to TEE_T")
 
 	conn := t.getSharedTEETConnection()
@@ -357,7 +364,7 @@ func (t *TEEK) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	conn, err := teekUpgrader.Upgrade(w, r, nil)
 	if err != nil {
-		t.logger.Error("Failed to upgrade websocket", zap.Error(err))
+		t.logger.Debug("Failed to upgrade websocket", zap.Error(err))
 		return
 	}
 
@@ -500,37 +507,42 @@ func (t *TEEK) notifyTEETNewSessionWithRetry(sessionID string) error {
 	return fmt.Errorf("failed to notify TEE_T after %d attempts", maxRetries)
 }
 
-// notifyTEETNewSession creates per-session connection and sends session registration to TEE_T
+// notifyTEETNewSession sends session registration to TEE_T via shared connection
 func (t *TEEK) notifyTEETNewSession(sessionID string) error {
-	// Get shared connection to TEE_T
+	// Get shared connection wrapper to TEE_T
 	teetConn, err := t.connectToTEET(sessionID)
 	if err != nil {
 		return fmt.Errorf("failed to get shared TEE_T connection for session %s: %v", sessionID, err)
 	}
 
-	// Store the shared connection in the session
+	// Store the shared connection wrapper in the session
 	session, err := t.sessionManager.GetSession(sessionID)
 	if err != nil {
-		// Don't close shared connection on session error
 		return fmt.Errorf("session %s not found: %v", sessionID, err)
 	}
 
-	wsConn := shared.NewWSConnection(teetConn)
-	session.TEETConn = wsConn
-
-	// No per-session message handler needed - shared connection is monitored centrally
+	// Use the same shared wrapper - all sessions share one wrapper with one mutex
+	session.TEETConn = teetConn
 
 	// Send session registration to TEE_T via protobuf
 	env := &teeproto.Envelope{SessionId: sessionID, TimestampMs: time.Now().UnixMilli(),
 		Payload: &teeproto.Envelope_SessionCreated{SessionCreated: &teeproto.SessionCreated{}},
 	}
-	if data, err := proto.Marshal(env); err != nil {
+	data, err := proto.Marshal(env)
+	if err != nil {
 		return fmt.Errorf("failed to marshal session registration: %v", err)
-	} else if err := wsConn.WriteMessage(websocket.BinaryMessage, data); err != nil {
+	}
+
+	t.logger.WithSession(sessionID).Info("Sending to TEE_T",
+		zap.String("type", "SessionCreated"),
+		zap.Int("bytes", len(data)))
+
+	// Use wrapper's WriteMessage which has internal mutex for thread safety
+	if err := teetConn.WriteMessage(websocket.BinaryMessage, data); err != nil {
 		return fmt.Errorf("failed to send session registration: %v", err)
 	}
 
-	t.logger.WithSession(sessionID).Debug("TEE_T session registered")
+	t.logger.WithSession(sessionID).Info("TEE_T session registered")
 	return nil
 }
 
@@ -600,9 +612,7 @@ func (w *WebSocketConn) Write(p []byte) (int, error) {
 		return 0, fmt.Errorf("failed to marshal tcp data envelope: %v", err)
 	}
 
-	// Use thread-safe WriteMessage - this WebSocketConn wraps a raw websocket.Conn
-	// so we need to add our own mutex protection
-	// For now, use the raw WriteMessage but this could be a race condition source
+	// Use wrapper's WriteMessage which has internal mutex for thread safety
 	if err := w.wsConn.WriteMessage(websocket.BinaryMessage, data); err != nil {
 		return 0, fmt.Errorf("failed to send TCP data: %v", err)
 	}

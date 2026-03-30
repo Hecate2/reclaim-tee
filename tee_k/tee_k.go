@@ -39,8 +39,8 @@ type TEEK struct {
 	// TEE_T connection settings
 	teetURL string
 
-	// Shared persistent connection to TEE_T
-	sharedTEETConn *websocket.Conn
+	// Shared persistent connection to TEE_T (single wrapper, shared mutex)
+	sharedTEETConn *shared.WSConnection
 	teetConnMutex  sync.RWMutex
 
 	// TLS configuration
@@ -62,7 +62,6 @@ type TEEK struct {
 	// Mutual attestation
 	teetAttestationVerified bool
 	teetAttestationMutex    sync.RWMutex
-	teetWriteMutex          sync.Mutex
 
 	// Persistent OPRF key share (loaded from cloud storage)
 	oprfKeyShare []byte
@@ -224,8 +223,7 @@ func (t *TEEK) cleanupSession(sessionID string) {
 	// Close the session in session manager (handles connections and state cleanup)
 	if err := t.sessionManager.CloseSession(sessionID); err != nil {
 		// Session already cleaned up - this is expected in race conditions
-		// Log at debug level to avoid log spam
-		t.logger.WithSession(sessionID).Debug("Session already cleaned up", zap.Error(err))
+		t.logger.WithSession(sessionID).Warn("Session already cleaned up", zap.Error(err))
 		return
 	}
 
@@ -241,7 +239,7 @@ func (t *TEEK) cleanupSession(sessionID string) {
 func (t *TEEK) terminateSessionWithError(sessionID string, reason shared.TerminationReason, err error, message string) {
 	// Check if session exists - if not, it's already been terminated
 	if _, sessionErr := t.sessionManager.GetSession(sessionID); sessionErr != nil {
-		t.logger.WithSession(sessionID).Debug("Session already terminated, skipping duplicate termination",
+		t.logger.WithSession(sessionID).Warn("Session already terminated, skipping duplicate termination",
 			zap.String("reason", string(reason)))
 		return
 	}
@@ -280,6 +278,37 @@ func (t *TEEK) terminateSessionWithError(sessionID string, reason shared.Termina
 	t.cleanupSession(sessionID)
 }
 
+// getEnvelopePayloadType returns a string describing the payload type for logging
+func getEnvelopePayloadType(env *teeproto.Envelope) string {
+	if env == nil {
+		return "nil"
+	}
+	switch env.Payload.(type) {
+	case *teeproto.Envelope_SessionCreated:
+		return "SessionCreated"
+	case *teeproto.Envelope_KeyShareRequest:
+		return "KeyShareRequest"
+	case *teeproto.Envelope_BatchedEncryptedRequest:
+		return "BatchedEncryptedRequest"
+	case *teeproto.Envelope_Finished:
+		return "Finished"
+	case *teeproto.Envelope_BatchedTagSecrets:
+		return "BatchedTagSecrets"
+	case *teeproto.Envelope_Error:
+		return "Error"
+	case *teeproto.Envelope_OtPrecomputeRequest:
+		return "OtPrecomputeRequest"
+	case *teeproto.Envelope_OtPrecomputeComplete:
+		return "OtPrecomputeComplete"
+	case *teeproto.Envelope_OprfOnlineFull:
+		return "OprfOnlineFull"
+	case *teeproto.Envelope_TeekAttestation:
+		return "TeekAttestation"
+	default:
+		return fmt.Sprintf("Unknown(%T)", env.Payload)
+	}
+}
+
 // sendToTEET sends a message to TEE_T with attestation check
 func (t *TEEK) sendToTEET(sessionID string, env *teeproto.Envelope) error {
 	// Check attestation flag BEFORE sending
@@ -307,8 +336,10 @@ func (t *TEEK) sendToTEET(sessionID string, env *teeproto.Envelope) error {
 		return fmt.Errorf("marshal failed: %v", err)
 	}
 
-	t.teetWriteMutex.Lock()
-	defer t.teetWriteMutex.Unlock()
+	t.logger.WithSession(sessionID).Info("Sending to TEE_T",
+		zap.String("type", getEnvelopePayloadType(env)),
+		zap.Int("bytes", len(data)))
 
+	// Use wrapper's WriteMessage which has internal mutex for thread safety
 	return conn.WriteMessage(websocket.BinaryMessage, data)
 }

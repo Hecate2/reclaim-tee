@@ -226,8 +226,7 @@ func (t *TEET) handleSessionCreation(msg *shared.Message) error {
 	}
 	teetState := &TEETSessionState{TEETClientConn: nil}
 	t.sessionManager.SetTEETSessionState(sessionID, teetState)
-	t.logger.Debug("Created TEE_T session state for registered session", zap.String("session_id", sessionID))
-	t.logger.Debug("Registered session from TEE_K", zap.String("session_id", sessionID))
+	t.logger.Info("Session registered", zap.String("sid", shared.TruncateSessionID(sessionID)))
 	return nil
 }
 
@@ -273,7 +272,8 @@ func (t *TEET) handleKeyShareRequestSession(msg *shared.Message) error {
 		return err
 	}
 	wsConn := session.TEEKConn.(*shared.WSConnection)
-	if err := wsConn.WriteMessage(websocket.BinaryMessage, data); err != nil {
+	// Use wrapper's WriteMessage which has internal mutex for thread safety
+	if err = wsConn.WriteMessage(websocket.BinaryMessage, data); err != nil {
 		t.terminateSessionWithError(sessionID, shared.ReasonNetworkFailure, err, "Failed to send key share response")
 		return err
 	}

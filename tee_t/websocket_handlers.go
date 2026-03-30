@@ -31,7 +31,7 @@ func (t *TEET) handleClientWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	conn, err := teetUpgrader.Upgrade(w, r, nil)
 	if err != nil {
-		t.logger.Error("Failed to upgrade client websocket", zap.Error(err))
+		t.logger.Debug("Failed to upgrade client websocket", zap.Error(err))
 		return
 	}
 
@@ -234,12 +234,21 @@ func (t *TEET) handleTEEKWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	t.logger.Debug("Mutual attestation completed")
 
+	// Create single shared wrapper for TEE_K connection (internal mutex handles synchronization)
+	wsConn := shared.NewWSConnection(conn)
+	t.sharedTEEKConnMu.Lock()
+	t.sharedTEEKConn = wsConn
+	t.sharedTEEKConnMu.Unlock()
+
 	// Mark TEE_K as connected (enables client connections)
 	t.setTEEKConnected(true)
 
 	// Ensure we mark disconnected when this function exits
 	defer func() {
 		t.setTEEKConnected(false)
+		t.sharedTEEKConnMu.Lock()
+		t.sharedTEEKConn = nil
+		t.sharedTEEKConnMu.Unlock()
 		t.clearOTReceiverPool() // Clear OT pool on disconnect (prevents replay)
 	}()
 
@@ -248,7 +257,7 @@ func (t *TEET) handleTEEKWebSocket(w http.ResponseWriter, r *http.Request) {
 	var activeSessionsMutex sync.RWMutex
 
 	for {
-		_, msgBytes, err := conn.ReadMessage()
+		_, msgBytes, err := wsConn.ReadMessage()
 		if err != nil {
 			if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
 				t.logger.Debug("TEE_K disconnected")
@@ -260,18 +269,24 @@ func (t *TEET) handleTEEKWebSocket(w http.ResponseWriter, r *http.Request) {
 
 		var env teeproto.Envelope
 		if err := proto.Unmarshal(msgBytes, &env); err != nil {
+			// Log hex dump of first 64 bytes for debugging proto mismatch
+			hexDump := fmt.Sprintf("%x", msgBytes)
+			if len(hexDump) > 128 {
+				hexDump = hexDump[:128] + "..."
+			}
 			t.logger.Error("Failed to parse message from TEE_K",
 				zap.Error(err),
 				zap.String("remote_addr", r.RemoteAddr),
-				zap.Int("message_size", len(msgBytes)))
-			t.sendErrorToTEEK("", fmt.Sprintf("Failed to parse message: %v", err))
+				zap.Int("message_size", len(msgBytes)),
+				zap.String("hex_preview", hexDump))
+			// Can't send error back - we don't have a valid session ID from unparsed message
 			continue
 		}
 
 		sessionID := env.GetSessionId()
 		if sessionID == "" {
 			t.logger.Error("Missing session ID in message from TEE_K")
-			t.sendErrorToTEEK("", "Missing session ID")
+			// Can't send error back - no session ID to route to
 			continue
 		}
 
@@ -282,7 +297,7 @@ func (t *TEET) handleTEEKWebSocket(w http.ResponseWriter, r *http.Request) {
 			activeSessionsMutex.Lock()
 			activeSessions[sessionID] = true
 			activeSessionsMutex.Unlock()
-			t.logger.Debug("New session from TEE_K", zap.String("sid", shared.TruncateSessionID(sessionID)))
+			t.logger.Info("New session from TEE_K", zap.String("sid", shared.TruncateSessionID(sessionID)))
 		case *teeproto.Envelope_KeyShareRequest:
 			msg = &shared.Message{SessionID: sessionID, Type: shared.MsgKeyShareRequest, Data: shared.KeyShareRequestData{KeyLength: int(p.KeyShareRequest.GetKeyLength()), IVLength: int(p.KeyShareRequest.GetIvLength())}}
 		case *teeproto.Envelope_BatchedEncryptedRequest:
@@ -327,7 +342,7 @@ func (t *TEET) handleTEEKWebSocket(w http.ResponseWriter, r *http.Request) {
 		case *teeproto.Envelope_Error:
 			// TEE_K encountered an error (e.g., TLS handshake failure)
 			// Terminate session locally without sending error back (avoid infinite loop)
-			t.logger.WithSession(sessionID).Debug("Received error from TEE_K, cleaning up")
+			t.logger.WithSession(sessionID).Warn("Received error from TEE_K, cleaning up")
 			t.cleanupSession(sessionID)
 			continue
 		case *teeproto.Envelope_OtPrecomputeRequest:
@@ -369,7 +384,8 @@ func (t *TEET) handleTEEKWebSocket(w http.ResponseWriter, r *http.Request) {
 					t.terminateSessionWithError(sessionID, shared.ReasonSessionManagerFailure, err, "Failed to get session after creation")
 					continue
 				}
-				session.TEEKConn = shared.NewWSConnection(conn)
+				// Use the shared wrapper - all sessions share one wrapper with one mutex
+				session.TEEKConn = wsConn
 				t.logger.Debug("Associated TEE_K connection with session")
 			}
 		case shared.MsgKeyShareRequest:
@@ -401,7 +417,7 @@ func (t *TEET) handleTEEKWebSocket(w http.ResponseWriter, r *http.Request) {
 	activeSessionsMutex.RUnlock()
 
 	if sessionCount > 0 {
-		t.logger.Debug("Cleaning up sessions due to TEE_K disconnect", zap.Int("count", sessionCount))
+		t.logger.Warn("Cleaning up sessions due to TEE_K disconnect", zap.Int("count", sessionCount))
 		activeSessionsMutex.RLock()
 		for sessionID := range activeSessions {
 			t.sessionTerminator.CleanupSession(sessionID)

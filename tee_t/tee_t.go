@@ -66,6 +66,10 @@ type TEET struct {
 	// TEE_K connection tracking
 	teekConnected   bool
 	teekConnectedMu sync.RWMutex
+
+	// Shared TEE_K connection wrapper (single wrapper, internal mutex handles synchronization)
+	sharedTEEKConn   *shared.WSConnection
+	sharedTEEKConnMu sync.RWMutex
 }
 
 // NewTEETWithLogger creates a TEET with a specific logger
@@ -222,8 +226,7 @@ func (t *TEET) cleanupSession(sessionID string) {
 	// Close the session in session manager (handles connections and state cleanup)
 	if err := t.sessionManager.CloseSession(sessionID); err != nil {
 		// Session already cleaned up - this is expected in race conditions
-		// Log at debug level to avoid log spam
-		t.logger.WithSession(sessionID).Debug("Session already cleaned up", zap.Error(err))
+		t.logger.WithSession(sessionID).Warn("Session already cleaned up", zap.Error(err))
 		return
 	}
 
@@ -239,7 +242,7 @@ func (t *TEET) cleanupSession(sessionID string) {
 func (t *TEET) terminateSessionWithError(sessionID string, reason shared.TerminationReason, err error, message string) {
 	// Check if session exists - if not, it's already been terminated
 	if _, sessionErr := t.sessionManager.GetSession(sessionID); sessionErr != nil {
-		t.logger.WithSession(sessionID).Debug("Session already terminated, skipping duplicate termination",
+		t.logger.WithSession(sessionID).Warn("Session already terminated, skipping duplicate termination",
 			zap.String("reason", string(reason)))
 		return
 	}

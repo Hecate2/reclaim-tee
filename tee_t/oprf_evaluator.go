@@ -229,6 +229,7 @@ func (t *TEET) sendOPRFMPCResultToTEEK(sessionID string, result *teeproto.OPRFMP
 		return fmt.Errorf("TEE_K connection is not a WebSocket connection")
 	}
 
+	// Use wrapper's WriteMessage which has internal mutex for thread safety
 	return wsConn.WriteMessage(websocket.BinaryMessage, data)
 }
 

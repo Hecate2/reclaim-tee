@@ -124,11 +124,13 @@ func (t *TEEK) performOTPrecomputation(count int, isInitial bool) error {
 		return fmt.Errorf("failed to marshal OT precompute request: %w", err)
 	}
 
-	t.teetWriteMutex.Lock()
-	err = conn.WriteMessage(websocket.BinaryMessage, data)
-	t.teetWriteMutex.Unlock()
+	t.logger.Info("Sending to TEE_T",
+		zap.String("type", "OtPrecomputeRequest"),
+		zap.Int("bytes", len(data)),
+		zap.Bool("is_initial", isInitial))
 
-	if err != nil {
+	// Use wrapper's WriteMessage which has internal mutex for thread safety
+	if err = conn.WriteMessage(websocket.BinaryMessage, data); err != nil {
 		t.clearPendingSetups() // Clear pending setups on failure
 		if !isInitial {
 			state.pool.SetExtendPending(false)
@@ -319,11 +321,12 @@ func (t *TEEK) sendOTPrecomputeComplete() error {
 		return fmt.Errorf("failed to marshal OT precompute complete: %w", err)
 	}
 
-	t.teetWriteMutex.Lock()
-	err = conn.WriteMessage(websocket.BinaryMessage, data)
-	t.teetWriteMutex.Unlock()
+	t.logger.Info("Sending to TEE_T",
+		zap.String("type", "OtPrecomputeComplete"),
+		zap.Int("bytes", len(data)))
 
-	if err != nil {
+	// Use wrapper's WriteMessage which has internal mutex for thread safety
+	if err = conn.WriteMessage(websocket.BinaryMessage, data); err != nil {
 		return fmt.Errorf("failed to send OT precompute complete: %w", err)
 	}
 

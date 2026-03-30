@@ -102,7 +102,8 @@ func (t *TEET) handleOTPrecomputeRequest(conn *shared.WSConnection, msg *teeprot
 		return fmt.Errorf("failed to marshal OT precompute response: %w", err)
 	}
 
-	if err := conn.WriteMessage(websocket.BinaryMessage, data); err != nil {
+	// Use wrapper's WriteMessage which has internal mutex for thread safety
+	if err = conn.WriteMessage(websocket.BinaryMessage, data); err != nil {
 		return fmt.Errorf("failed to send OT precompute response: %w", err)
 	}
 

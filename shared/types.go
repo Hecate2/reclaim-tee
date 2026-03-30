@@ -49,6 +49,13 @@ func (w *WSConnection) WriteMessage(messageType int, data []byte) error {
 	return w.conn.WriteMessage(messageType, data)
 }
 
+// ReadMessage reads a message from the WebSocket connection
+// Note: Reading does not require mutex protection as WebSocket reads are typically
+// done by a single goroutine, but write synchronization is handled by WriteMessage
+func (w *WSConnection) ReadMessage() (messageType int, p []byte, err error) {
+	return w.conn.ReadMessage()
+}
+
 // Message types for websocket communication
 type MessageType string
 

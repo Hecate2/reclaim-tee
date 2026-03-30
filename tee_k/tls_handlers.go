@@ -36,7 +36,7 @@ func (t *TEEK) performTLSHandshakeAndHTTP(sessionID string) error {
 	// Create session-specific TLS client
 	wsConn := session.ClientConn.(*shared.WSConnection)
 	tlsConn := &WebSocketConn{
-		wsConn:      wsConn.GetWebSocketConn(),
+		wsConn:      wsConn, // Use wrapper for thread-safe writes
 		pendingData: make(chan []byte, 10),
 		teek:        t,         // Add TEEK reference for transcript collection
 		sessionID:   sessionID, // Add session ID for per-session transcript collection
@@ -140,8 +140,7 @@ func (t *TEEK) performTLSHandshakeAndHTTP(sessionID string) error {
 		return err
 	}
 
-	t.logger.WithSession(sessionID).Debug("TLS handshake complete",
+	t.logger.WithSession(sessionID).Info("TLS handshake complete",
 		zap.Uint16("cipher_suite", cipherSuite))
-	t.logger.WithSession(sessionID).Debug("Ready for Phase 4 split AEAD response handling")
 	return nil
 }
