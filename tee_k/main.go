@@ -47,6 +47,7 @@ func main() {
 
 func startStandaloneMode(config *TEEKConfig, logger *shared.Logger) {
 	teek := NewTEEKWithConfig(config)
+	teek.sessionManager.StartCleanupRoutine()
 
 	// IMPORTANT: Establish TEE_T connection and complete OT precomputation BEFORE accepting clients
 	// This ensures no client work is wasted if OT setup fails

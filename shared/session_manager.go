@@ -242,13 +242,12 @@ func (sm *SessionManager) cleanupExpiredSessions() {
 
 	for sessionID, session := range sm.sessions {
 		var shouldCleanup bool
+		isPending := session.State == SessionStateNew && session.ClientConn == nil
 
 		// Registered but never activated (no client connected) - 2 minute timeout
-		if session.State == SessionStateNew && session.ClientConn == nil {
-			pending++
+		if isPending {
 			shouldCleanup = now.Sub(session.CreatedAt) > pendingSessionTimeout
 		} else {
-			active++
 			// Active sessions - use standard timeout (30 min)
 			shouldCleanup = now.Sub(session.LastActiveAt) > sm.sessionTimeout
 		}
@@ -264,6 +263,13 @@ func (sm *SessionManager) cleanupExpiredSessions() {
 				delete(sm.sessionsByConn, session.ClientConn)
 			}
 			delete(sm.sessions, sessionID)
+		} else {
+			// Count remaining sessions
+			if isPending {
+				pending++
+			} else {
+				active++
+			}
 		}
 	}
 
@@ -271,8 +277,8 @@ func (sm *SessionManager) cleanupExpiredSessions() {
 	if sm.logger != nil {
 		sm.logger.Info("Session status",
 			zap.Int("total", total),
-			zap.Int("active", active-cleanedUp),
-			zap.Int("pending", pending-cleanedUp),
+			zap.Int("active", active),
+			zap.Int("pending", pending),
 			zap.Int("cleaned_up", cleanedUp))
 	}
 }

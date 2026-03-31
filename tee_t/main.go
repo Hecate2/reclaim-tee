@@ -33,6 +33,7 @@ func main() {
 
 func startStandaloneMode(config *TEETConfig, logger *shared.Logger) {
 	teet := NewTEETWithLogger(config.Port, logger)
+	teet.sessionManager.StartCleanupRoutine()
 
 	server := &http.Server{
 		Addr:         fmt.Sprintf(":%d", config.Port),
