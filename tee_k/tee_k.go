@@ -107,9 +107,12 @@ func NewTEEKWithEnclaveManager(port int, enclaveManager *shared.EnclaveManager) 
 	// Initialize OPRF key share (persistent across restarts)
 	oprfKeyShare := initializeOPRFKeyShare(enclaveManager, logger, "tee_k")
 
+	sessionManager := NewTEEKSessionManager()
+	sessionManager.SetLogger(logger)
+
 	return &TEEK{
 		port:              port,
-		sessionManager:    NewTEEKSessionManager(),
+		sessionManager:    sessionManager,
 		sessionTerminator: shared.NewSessionTerminator(logger),
 		logger:            logger,
 		teetURL:           "ws://localhost:8081/teek", // Default TEE_T URL

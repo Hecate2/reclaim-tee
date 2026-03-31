@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
+	"go.uber.org/zap"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -29,7 +30,7 @@ type SessionManagerInterface interface {
 }
 
 // MaxSessions is the maximum number of concurrent sessions allowed
-const MaxSessions = 100
+const MaxSessions = 1000
 
 // SessionManager provides unified session management
 type SessionManager struct {
@@ -39,6 +40,7 @@ type SessionManager struct {
 	cleanupTicker  *time.Ticker
 	cleanupDone    chan bool
 	sessionTimeout time.Duration
+	logger         *Logger
 }
 
 // Verify that SessionManager implements SessionManagerInterface
@@ -52,6 +54,11 @@ func NewSessionManager() *SessionManager {
 		cleanupDone:    make(chan bool),
 		sessionTimeout: 30 * time.Minute, // Default 30 minute timeout
 	}
+}
+
+// SetLogger sets the logger for session status reporting
+func (sm *SessionManager) SetLogger(logger *Logger) {
+	sm.logger = logger
 }
 
 // CreateSession creates a new session with secure UUID
@@ -201,7 +208,7 @@ func (sm *SessionManager) CloseSession(sessionID string) error {
 
 // StartCleanupRoutine starts the session cleanup routine
 func (sm *SessionManager) StartCleanupRoutine() {
-	sm.cleanupTicker = time.NewTicker(5 * time.Minute)
+	sm.cleanupTicker = time.NewTicker(1 * time.Minute) // Run every minute for faster cleanup
 	go func() {
 		for {
 			select {
@@ -228,8 +235,26 @@ func (sm *SessionManager) cleanupExpiredSessions() {
 	defer sm.mutex.Unlock()
 
 	now := time.Now()
+	const pendingSessionTimeout = 2 * time.Minute // Short timeout for registered-but-not-activated sessions
+
+	var cleanedUp int
+	var pending, active int
+
 	for sessionID, session := range sm.sessions {
-		if now.Sub(session.LastActiveAt) > sm.sessionTimeout {
+		var shouldCleanup bool
+
+		// Registered but never activated (no client connected) - 2 minute timeout
+		if session.State == SessionStateNew && session.ClientConn == nil {
+			pending++
+			shouldCleanup = now.Sub(session.CreatedAt) > pendingSessionTimeout
+		} else {
+			active++
+			// Active sessions - use standard timeout (30 min)
+			shouldCleanup = now.Sub(session.LastActiveAt) > sm.sessionTimeout
+		}
+
+		if shouldCleanup {
+			cleanedUp++
 			session.IsClosed = true
 			if session.Cancel != nil {
 				session.Cancel()
@@ -240,6 +265,15 @@ func (sm *SessionManager) cleanupExpiredSessions() {
 			}
 			delete(sm.sessions, sessionID)
 		}
+	}
+
+	total := len(sm.sessions)
+	if sm.logger != nil {
+		sm.logger.Info("Session status",
+			zap.Int("total", total),
+			zap.Int("active", active-cleanedUp),
+			zap.Int("pending", pending-cleanedUp),
+			zap.Int("cleaned_up", cleanedUp))
 	}
 }
 

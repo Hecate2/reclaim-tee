@@ -34,6 +34,7 @@ func (t *TEET) handleClientWebSocket(w http.ResponseWriter, r *http.Request) {
 		t.logger.Debug("Failed to upgrade client websocket", zap.Error(err))
 		return
 	}
+	defer conn.Close() // Ensure connection is always closed on exit
 
 	// Set read limit to prevent DoS via large messages
 	conn.SetReadLimit(MaxWebSocketMessageSize)
@@ -95,7 +96,18 @@ func (t *TEET) handleClientWebSocket(w http.ResponseWriter, r *http.Request) {
 				sessionID = msg.SessionID
 				wsConn := shared.NewWSConnection(conn)
 				if err := t.sessionManager.ActivateSession(sessionID, wsConn); err != nil {
-					t.terminateSessionWithError(sessionID, shared.ReasonSessionManagerFailure, err, "Failed to activate session")
+					t.logger.WithSession(sessionID).Error("Failed to activate session", zap.Error(err))
+					// Send error directly to client since session doesn't exist
+					errEnv := &teeproto.Envelope{
+						SessionId:   sessionID,
+						TimestampMs: time.Now().UnixMilli(),
+						Payload: &teeproto.Envelope_Error{
+							Error: &teeproto.ErrorData{Message: fmt.Sprintf("Session activation failed: %v", err)},
+						},
+					}
+					if data, marshalErr := proto.Marshal(errEnv); marshalErr == nil {
+						conn.WriteMessage(websocket.BinaryMessage, data)
+					}
 					break
 				}
 
@@ -347,7 +359,7 @@ func (t *TEET) handleTEEKWebSocket(w http.ResponseWriter, r *http.Request) {
 			continue
 		case *teeproto.Envelope_OtPrecomputeRequest:
 			// Handle OT precomputation request from TEE_K (unified init/extend)
-			if err := t.handleOTPrecomputeRequest(shared.NewWSConnection(conn), p.OtPrecomputeRequest); err != nil {
+			if err := t.handleOTPrecomputeRequest(wsConn, p.OtPrecomputeRequest); err != nil {
 				t.logger.Error("Failed to handle OT precompute request", zap.Error(err))
 				// Don't terminate session - this is a system-wide operation
 			}

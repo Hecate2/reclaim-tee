@@ -98,9 +98,12 @@ func NewTEETWithEnclaveManagerAndLogger(port int, enclaveManager *shared.Enclave
 	// Initialize OPRF key share (persistent across restarts)
 	oprfKeyShare := initializeOPRFKeyShare(enclaveManager, logger, "tee_t")
 
+	sessionManager := NewTEETSessionManager()
+	sessionManager.SetLogger(logger)
+
 	teet := &TEET{
 		port:              port,
-		sessionManager:    NewTEETSessionManager(),
+		sessionManager:    sessionManager,
 		logger:            logger,
 		sessionTerminator: sessionTerminator,
 		signingKeyPair:    signingKeyPair,
