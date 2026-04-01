@@ -162,6 +162,12 @@ func (t *TEET) handleClientWebSocket(w http.ResponseWriter, r *http.Request) {
 		t.logger.Info("Session finished", zap.String("sid", shared.TruncateSessionID(sessionID)))
 		t.sessionManager.CloseSession(sessionID)
 		t.sessionTerminator.CleanupSession(sessionID)
+
+		// Close per-session connection to TEE_K
+		// This prevents TEE_K from timing out waiting for messages
+		if t.connManager != nil {
+			t.connManager.CloseSessionConnection(sessionID)
+		}
 	}
 }
 
