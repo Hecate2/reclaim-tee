@@ -35,6 +35,17 @@ func startStandaloneMode(config *TEETConfig, logger *shared.Logger) {
 	teet := NewTEETWithLogger(config.Port, logger)
 	teet.sessionManager.StartCleanupRoutine()
 
+	// Start periodic connection status logging (every minute)
+	go func() {
+		ticker := time.NewTicker(1 * time.Minute)
+		defer ticker.Stop()
+		for range ticker.C {
+			if teet.connManager != nil {
+				teet.connManager.LogConnectionStatus()
+			}
+		}
+	}()
+
 	server := &http.Server{
 		Addr:         fmt.Sprintf(":%d", config.Port),
 		Handler:      setupRoutes(teet),

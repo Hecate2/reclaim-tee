@@ -553,6 +553,32 @@ func (cm *TEEKConnectionManager) IsControlConnected() bool {
 	return cm.controlConn != nil
 }
 
+// GetSessionConnectionCount returns the current number of session connections
+func (cm *TEEKConnectionManager) GetSessionConnectionCount() int {
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
+	return len(cm.sessionConns)
+}
+
+// LogConnectionStatus logs current connection status (call periodically)
+func (cm *TEEKConnectionManager) LogConnectionStatus() {
+	cm.mu.RLock()
+	sessionCount := len(cm.sessionConns)
+	cm.mu.RUnlock()
+
+	cm.attestationMutex.RLock()
+	attested := cm.attestationVerified
+	cm.attestationMutex.RUnlock()
+
+	controlConnected := cm.IsControlConnected()
+
+	cm.logger.Info("Connection status",
+		zap.Bool("control_connected", controlConnected),
+		zap.Bool("attested", attested),
+		zap.Int("session_connections", sessionCount),
+		zap.Int("max_sessions", MaxConcurrentSessions))
+}
+
 // SendOnControl sends a message on the control connection
 // Used for error notifications when session connection may be dead
 func (cm *TEEKConnectionManager) SendOnControl(env *teeproto.Envelope) error {

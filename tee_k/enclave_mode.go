@@ -82,6 +82,22 @@ func startEnclaveMode(config *TEEKConfig, logger *shared.Logger) {
 		return
 	}
 
+	// Start periodic connection status logging (every minute)
+	go func() {
+		ticker := time.NewTicker(1 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				if teek.connManager != nil {
+					teek.connManager.LogConnectionStatus()
+				}
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
 	// Create HTTPS server with integrated WebSocket handler
 	httpsHandler := setupEnclaveRoutes(teek, enclaveManager, logger)
 	httpsServer := enclaveManager.CreateHTTPSServer(httpsHandler)

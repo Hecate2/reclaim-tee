@@ -61,6 +61,22 @@ func startEnclaveMode(config *TEETConfig, logger *shared.Logger) {
 	// Start background attestation refresh for performance optimization
 	go teet.startAttestationRefresh(ctx)
 
+	// Start periodic connection status logging (every minute)
+	go func() {
+		ticker := time.NewTicker(1 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				if teet.connManager != nil {
+					teet.connManager.LogConnectionStatus()
+				}
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
 	// Create HTTPS server with integrated WebSocket handler
 	httpsHandler := setupEnclaveRoutes(teet, enclaveManager, logger)
 	httpsServer := enclaveManager.CreateHTTPSServer(httpsHandler)

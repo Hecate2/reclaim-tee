@@ -597,6 +597,32 @@ func (cm *TEETConnectionManager) IsControlConnected() bool {
 	return cm.controlConn != nil
 }
 
+// GetSessionConnectionCount returns the current number of session connections
+func (cm *TEETConnectionManager) GetSessionConnectionCount() int {
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
+	return len(cm.sessionConns)
+}
+
+// LogConnectionStatus logs current connection status (call periodically)
+func (cm *TEETConnectionManager) LogConnectionStatus() {
+	cm.mu.RLock()
+	sessionCount := len(cm.sessionConns)
+	cm.mu.RUnlock()
+
+	cm.attestationMutex.RLock()
+	attested := cm.attestationVerified
+	cm.attestationMutex.RUnlock()
+
+	controlConnected := cm.IsControlConnected()
+
+	cm.logger.Info("Connection status",
+		zap.Bool("control_connected", controlConnected),
+		zap.Bool("attested", attested),
+		zap.Int("session_connections", sessionCount),
+		zap.Int("max_sessions", MaxConcurrentSessions))
+}
+
 // isControlMessage determines if a message should go on the control connection
 // Control messages: attestation, OT precomputation, session lifecycle, and errors
 // Error messages go on control because session connection may be dead when error occurs
