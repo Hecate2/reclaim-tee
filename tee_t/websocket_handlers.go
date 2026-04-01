@@ -372,6 +372,10 @@ func (t *TEET) handleTEEKWebSocket(w http.ResponseWriter, r *http.Request) {
 			continue
 		case *teeproto.Envelope_OprfOnlineFull:
 			// Handle 2-round MPC OPRF online message from TEE_K
+			t.logger.WithSession(sessionID).Info("OPRF timing: message received from TEE_K",
+				zap.Int("range_index", int(p.OprfOnlineFull.RangeIndex)),
+				zap.Int("garbled_tables_bytes", len(p.OprfOnlineFull.GarbledTables)),
+				zap.Int("dual_masks_bytes", len(p.OprfOnlineFull.DualMasks)))
 			if err := t.handleOPRFOnlineFull(sessionID, p.OprfOnlineFull); err != nil {
 				t.terminateSessionWithError(sessionID, shared.ReasonOPRFEvaluationFailed, err, "Failed to handle OPRF online")
 			}

@@ -67,6 +67,10 @@ func (t *TEET) handleOPRFRangesFromClient(sessionID string, msg *teeproto.OPRFRa
 // handleOPRFOnlineFull handles the 2-round online OPRF message from TEE_K
 // This is the only message in the online phase - contains all circuit data
 func (t *TEET) handleOPRFOnlineFull(sessionID string, msg *teeproto.OPRFOnlineFull) error {
+	// TIMING: Start of OPRF processing
+	startTime := time.Now()
+	msgSize := len(msg.GarbledTables) + len(msg.DualMasks)
+
 	teetState, err := t.sessionManager.GetTEETSessionState(sessionID)
 	if err != nil {
 		return fmt.Errorf("failed to get TEE_T session state: %w", err)
@@ -108,11 +112,13 @@ func (t *TEET) handleOPRFOnlineFull(sessionID string, msg *teeproto.OPRFOnlineFu
 		return fmt.Errorf("OT receiver pool not ready - precomputation may have failed")
 	}
 
-	t.logger.WithSession(sessionID).Debug("Processing MPC OPRF online",
+	// TIMING: After validation
+	validationDone := time.Now()
+
+	t.logger.WithSession(sessionID).Info("OPRF timing: started",
 		zap.Int("range_index", rangeIndex),
-		zap.Int32("tls_start", msg.TlsStart),
-		zap.Int32("tls_length", msg.TlsLength),
-		zap.Uint32("ot_start_index", msg.OtStartIndex))
+		zap.Int("msg_size_bytes", msgSize),
+		zap.Int64("validation_ms", validationDone.Sub(startTime).Milliseconds()))
 
 	// Extract ciphertext for range
 	ciphertext := teetState.ConsolidatedResponseCiphertext[msg.TlsStart : msg.TlsStart+msg.TlsLength]
@@ -134,17 +140,26 @@ func (t *TEET) handleOPRFOnlineFull(sessionID string, msg *teeproto.OPRFOnlineFu
 		return fmt.Errorf("failed to consume OT entries: %w", err)
 	}
 
+	// TIMING: After OT consumption
+	otDone := time.Now()
+
 	// Deserialize online payload
 	payload, err := oprfmpc.DeserializeOnlinePayload(msg.GarbledTables)
 	if err != nil {
 		return fmt.Errorf("failed to deserialize online payload: %w", err)
 	}
 
+	// TIMING: After garbled tables deserialization
+	deserializePayloadDone := time.Now()
+
 	// Deserialize dual masks
 	dualMasks, err := oprfmpc.DeserializeDualMasks(msg.DualMasks)
 	if err != nil {
 		return fmt.Errorf("failed to deserialize dual masks: %w", err)
 	}
+
+	// TIMING: After dual masks deserialization
+	deserializeMasksDone := time.Now()
 
 	// Add dual masks to payload for evaluation
 	payload.DualMasks = dualMasks
@@ -156,6 +171,9 @@ func (t *TEET) handleOPRFOnlineFull(sessionID string, msg *teeproto.OPRFOnlineFu
 	if err != nil {
 		return fmt.Errorf("CMACEvaluatorOnline failed: %w", err)
 	}
+
+	// TIMING: After circuit evaluation
+	evalDone := time.Now()
 
 	// Compute hash of CMAC output
 	hashOutput := sha256.Sum256(result.CMACOutput[:])
@@ -169,9 +187,6 @@ func (t *TEET) handleOPRFOnlineFull(sessionID string, msg *teeproto.OPRFOnlineFu
 		CMACOutput: result.CMACOutput,
 		HashOutput: hashOutput,
 	})
-
-	t.logger.WithSession(sessionID).Debug("MPC OPRF evaluation complete",
-		zap.Int("range_index", rangeIndex))
 
 	// Serialize output labels for garbler verification (MANDATORY)
 	outputLabelsBytes := oprfmpc.SerializeOutputLabels(result.OutputLabels)
@@ -187,6 +202,18 @@ func (t *TEET) handleOPRFOnlineFull(sessionID string, msg *teeproto.OPRFOnlineFu
 	}); err != nil {
 		return err
 	}
+
+	// TIMING: After sending result
+	sendDone := time.Now()
+
+	t.logger.WithSession(sessionID).Info("OPRF timing: complete",
+		zap.Int("range_index", rangeIndex),
+		zap.Int64("ot_consume_ms", otDone.Sub(validationDone).Milliseconds()),
+		zap.Int64("deserialize_payload_ms", deserializePayloadDone.Sub(otDone).Milliseconds()),
+		zap.Int64("deserialize_masks_ms", deserializeMasksDone.Sub(deserializePayloadDone).Milliseconds()),
+		zap.Int64("circuit_eval_ms", evalDone.Sub(deserializeMasksDone).Milliseconds()),
+		zap.Int64("send_result_ms", sendDone.Sub(evalDone).Milliseconds()),
+		zap.Int64("total_ms", sendDone.Sub(startTime).Milliseconds()))
 
 	// Check if all OPRF computations are complete (atomic check-and-set)
 	if teetState.TryMarkOPRFComplete() {
