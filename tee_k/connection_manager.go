@@ -119,11 +119,19 @@ func (cm *TEETConnectionManager) EstablishControlConnection() error {
 
 		cm.logger.Debug("Control connection to TEE_T established")
 
-		// Perform OT precomputation BEFORE starting handler goroutine
-		// This prevents goroutine leak if OT fails
+		// Start control message handler FIRST - it needs to receive OT response
+		// Use a done channel to stop it if OT fails
+		handlerDone := make(chan struct{})
+		go func() {
+			cm.handleControlMessages()
+			close(handlerDone)
+		}()
+
+		// Perform OT precomputation
 		if err := cm.teek.performOTPrecomputation(oprfmpc.OTPoolInitialSize, true); err != nil {
 			cm.logger.Error("Failed to perform OT precomputation", zap.Error(err))
-			wsConn.Close()
+			wsConn.Close() // This will cause handleControlMessages to exit
+			<-handlerDone  // Wait for handler to exit before retrying
 			cm.mu.Lock()
 			cm.controlConn = nil
 			cm.mu.Unlock()
@@ -132,10 +140,6 @@ func (cm *TEETConnectionManager) EstablishControlConnection() error {
 		}
 
 		cm.logger.Info("OT precomputation complete on control connection")
-
-		// Start control message handler AFTER OT succeeds - no goroutine leak
-		go cm.handleControlMessages()
-
 		return nil
 	}
 }
