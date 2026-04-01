@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 
 	teeproto "github.com/reclaimprotocol/reclaim-tee/proto"
@@ -166,282 +165,6 @@ func (t *TEET) handleClientWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleTEEKWebSocket handles WebSocket connections from TEE_K
-func (t *TEET) handleTEEKWebSocket(w http.ResponseWriter, r *http.Request) {
-	conn, err := teetUpgrader.Upgrade(w, r, nil)
-	if err != nil {
-		t.logger.Error("Failed to upgrade TEE_K websocket", zap.Error(err))
-		return
-	}
-
-	// Set read limit to prevent DoS via large messages
-	conn.SetReadLimit(MaxWebSocketMessageSize)
-
-	t.logger.Debug("TEE_K connected")
-
-	// Wait for attestation request (first message)
-	conn.SetReadDeadline(time.Now().Add(10 * time.Second))
-	_, msgBytes, err := conn.ReadMessage()
-	conn.SetReadDeadline(time.Time{})
-
-	if err != nil {
-		t.logger.Error("Failed to receive attestation", zap.Error(err))
-		conn.Close()
-		return
-	}
-
-	var env teeproto.Envelope
-	if err := proto.Unmarshal(msgBytes, &env); err != nil {
-		t.logger.Error("Failed to parse message", zap.Error(err))
-		t.sendErrorAndClose(conn, "", "Failed to parse attestation")
-		return
-	}
-
-	req, ok := env.Payload.(*teeproto.Envelope_TeekAttestation)
-	if !ok {
-		t.logger.Error("Expected attestation as first message")
-		t.sendErrorAndClose(conn, "", "Expected attestation request")
-		return
-	}
-
-	// Verify TEE_K attestation
-	if err := t.verifyTEEKAttestation(req.TeekAttestation); err != nil {
-		t.logger.Error("Attestation verification failed", zap.Error(err))
-		t.sendErrorAndClose(conn, "", fmt.Sprintf("Attestation failed: %v", err))
-		return
-	}
-
-	t.logger.Debug("TEE_K attestation verified")
-
-	// Generate and send our attestation
-	attestation, err := t.generateAttestationForTEEK()
-	if err != nil {
-		t.logger.Error("Failed to generate attestation", zap.Error(err))
-		t.sendErrorAndClose(conn, "", "Failed to generate attestation")
-		return
-	}
-
-	respEnv := &teeproto.Envelope{
-		SessionId:   "mutual_auth",
-		TimestampMs: time.Now().UnixMilli(),
-		Payload: &teeproto.Envelope_TeetAttestation{
-			TeetAttestation: &teeproto.TEETAttestationResponse{
-				AttestationReport: attestation,
-			},
-		},
-	}
-
-	data, err := proto.Marshal(respEnv)
-	if err != nil {
-		t.logger.Error("Failed to marshal response", zap.Error(err))
-		conn.Close()
-		return
-	}
-
-	if err := conn.WriteMessage(websocket.BinaryMessage, data); err != nil {
-		t.logger.Error("Failed to send attestation", zap.Error(err))
-		conn.Close()
-		return
-	}
-
-	t.logger.Debug("Mutual attestation completed")
-
-	// Create single shared wrapper for TEE_K connection (internal mutex handles synchronization)
-	wsConn := shared.NewWSConnection(conn)
-	t.sharedTEEKConnMu.Lock()
-	t.sharedTEEKConn = wsConn
-	t.sharedTEEKConnMu.Unlock()
-
-	// Mark TEE_K as connected (enables client connections)
-	t.setTEEKConnected(true)
-
-	// Ensure we mark disconnected when this function exits
-	defer func() {
-		t.setTEEKConnected(false)
-		t.sharedTEEKConnMu.Lock()
-		t.sharedTEEKConn = nil
-		t.sharedTEEKConnMu.Unlock()
-		t.clearOTReceiverPool() // Clear OT pool on disconnect (prevents replay)
-	}()
-
-	// Continue with existing message loop
-	activeSessions := make(map[string]bool)
-	var activeSessionsMutex sync.RWMutex
-
-	for {
-		_, msgBytes, err := wsConn.ReadMessage()
-		if err != nil {
-			if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				t.logger.Debug("TEE_K disconnected")
-			} else if !isNetworkShutdownError(err) {
-				t.logger.Error("TEE_K connection error", zap.Error(err))
-			}
-			break
-		}
-
-		var env teeproto.Envelope
-		if err := proto.Unmarshal(msgBytes, &env); err != nil {
-			// Log hex dump of first 64 bytes for debugging proto mismatch
-			hexDump := fmt.Sprintf("%x", msgBytes)
-			if len(hexDump) > 128 {
-				hexDump = hexDump[:128] + "..."
-			}
-			t.logger.Error("Failed to parse message from TEE_K",
-				zap.Error(err),
-				zap.String("remote_addr", r.RemoteAddr),
-				zap.Int("message_size", len(msgBytes)),
-				zap.String("hex_preview", hexDump))
-			// Can't send error back - we don't have a valid session ID from unparsed message
-			continue
-		}
-
-		sessionID := env.GetSessionId()
-		if sessionID == "" {
-			t.logger.Error("Missing session ID in message from TEE_K")
-			// Can't send error back - no session ID to route to
-			continue
-		}
-
-		var msg *shared.Message
-		switch p := env.Payload.(type) {
-		case *teeproto.Envelope_SessionCreated:
-			msg = &shared.Message{SessionID: sessionID, Type: shared.MsgSessionCreated, Data: map[string]any{"session_id": sessionID}}
-			activeSessionsMutex.Lock()
-			activeSessions[sessionID] = true
-			activeSessionsMutex.Unlock()
-			t.logger.Info("New session from TEE_K", zap.String("sid", shared.TruncateSessionID(sessionID)))
-		case *teeproto.Envelope_KeyShareRequest:
-			msg = &shared.Message{SessionID: sessionID, Type: shared.MsgKeyShareRequest, Data: shared.KeyShareRequestData{KeyLength: int(p.KeyShareRequest.GetKeyLength()), IVLength: int(p.KeyShareRequest.GetIvLength())}}
-		case *teeproto.Envelope_BatchedEncryptedRequest:
-			// Convert protobuf fragments to shared format
-			var fragments []shared.EncryptedRequestData
-			for _, fragment := range p.BatchedEncryptedRequest.GetFragments() {
-				var ranges []shared.RequestRedactionRange
-				for _, r := range fragment.GetRedactionRanges() {
-					ranges = append(ranges, shared.RequestRedactionRange{Start: int(r.GetStart()), Length: int(r.GetLength()), Type: r.GetType()})
-				}
-				fragments = append(fragments, shared.EncryptedRequestData{
-					EncryptedData:   fragment.GetEncryptedData(),
-					TagSecrets:      fragment.GetTagSecrets(),
-					RedactionRanges: ranges,
-					SeqNum:          fragment.GetSeqNum(),
-				})
-			}
-			msg = &shared.Message{
-				SessionID: sessionID,
-				Type:      shared.MsgBatchedEncryptedRequest,
-				Data: shared.BatchedEncryptedRequestData{
-					Fragments:   fragments,
-					BaseSeqNum:  p.BatchedEncryptedRequest.GetBaseSeqNum(),
-					CipherSuite: uint16(p.BatchedEncryptedRequest.GetCipherSuite()),
-					Commitments: p.BatchedEncryptedRequest.GetCommitments(),
-				},
-			}
-		case *teeproto.Envelope_Finished:
-			msg = &shared.Message{SessionID: sessionID, Type: shared.MsgFinished, Data: shared.FinishedMessage{}}
-		case *teeproto.Envelope_BatchedTagSecrets:
-			var ts []struct {
-				TagSecrets []byte `json:"tag_secrets"`
-				SeqNum     uint64 `json:"seq_num"`
-			}
-			for _, tsec := range p.BatchedTagSecrets.GetTagSecrets() {
-				ts = append(ts, struct {
-					TagSecrets []byte `json:"tag_secrets"`
-					SeqNum     uint64 `json:"seq_num"`
-				}{TagSecrets: tsec.GetTagSecrets(), SeqNum: tsec.GetSeqNum()})
-			}
-			msg = &shared.Message{SessionID: sessionID, Type: shared.MsgBatchedTagSecrets, Data: shared.BatchedTagSecretsData{TagSecrets: ts, SessionID: sessionID, TotalCount: int(p.BatchedTagSecrets.GetTotalCount())}}
-		case *teeproto.Envelope_Error:
-			// TEE_K encountered an error (e.g., TLS handshake failure)
-			// Terminate session locally without sending error back (avoid infinite loop)
-			t.logger.WithSession(sessionID).Warn("Received error from TEE_K, cleaning up")
-			t.cleanupSession(sessionID)
-			continue
-		case *teeproto.Envelope_OtPrecomputeRequest:
-			// Handle OT precomputation request from TEE_K (unified init/extend)
-			if err := t.handleOTPrecomputeRequest(wsConn, p.OtPrecomputeRequest); err != nil {
-				t.logger.Error("Failed to handle OT precompute request", zap.Error(err))
-				// Don't terminate session - this is a system-wide operation
-			}
-			continue
-		case *teeproto.Envelope_OtPrecomputeComplete:
-			// Handle OT precomputation complete acknowledgment from TEE_K
-			if err := t.handleOTPrecomputeComplete(p.OtPrecomputeComplete); err != nil {
-				t.logger.Error("Failed to handle OT precompute complete", zap.Error(err))
-			}
-			continue
-		case *teeproto.Envelope_OprfOnlineFull:
-			// Handle 2-round MPC OPRF online message from TEE_K
-			t.logger.WithSession(sessionID).Info("OPRF timing: message received from TEE_K",
-				zap.Int("range_index", int(p.OprfOnlineFull.RangeIndex)),
-				zap.Int("garbled_tables_bytes", len(p.OprfOnlineFull.GarbledTables)),
-				zap.Int("dual_masks_bytes", len(p.OprfOnlineFull.DualMasks)))
-			if err := t.handleOPRFOnlineFull(sessionID, p.OprfOnlineFull); err != nil {
-				t.terminateSessionWithError(sessionID, shared.ReasonOPRFEvaluationFailed, err, "Failed to handle OPRF online")
-			}
-			continue
-		default:
-			t.logger.Error("Unknown message type from TEE_K",
-				zap.String("session_id", sessionID),
-				zap.String("remote_addr", r.RemoteAddr))
-			t.sendErrorToTEEK(sessionID, "Unknown message type from TEE_K")
-			continue
-		}
-
-		t.logger.Debug("Received TEE_K message", zap.String("type", string(msg.Type)))
-
-		var handlerErr error
-		switch msg.Type {
-		case shared.MsgSessionCreated:
-			handlerErr = t.handleSessionCreation(msg)
-			if handlerErr == nil && sessionID != "" {
-				session, err := t.sessionManager.GetSession(sessionID)
-				if err != nil {
-					t.terminateSessionWithError(sessionID, shared.ReasonSessionManagerFailure, err, "Failed to get session after creation")
-					continue
-				}
-				// Use the shared wrapper - all sessions share one wrapper with one mutex
-				session.TEEKConn = wsConn
-				t.logger.Debug("Associated TEE_K connection with session")
-			}
-		case shared.MsgKeyShareRequest:
-			handlerErr = t.handleKeyShareRequestSession(msg)
-		case shared.MsgBatchedEncryptedRequest:
-			handlerErr = t.handleBatchedEncryptedRequest(msg)
-		case shared.MsgFinished:
-			handlerErr = t.handleFinishedFromTEEK(msg)
-		case shared.MsgBatchedTagSecrets:
-			handlerErr = t.handleBatchedTagSecrets(msg)
-		default:
-			err := fmt.Errorf("unknown message type: %s", string(msg.Type))
-			t.terminateSessionWithError(sessionID, shared.ReasonUnknownMessageType, err, "Unknown message type from TEE_K")
-			continue
-		}
-
-		// If handler returned error, session already terminated - continue to next message
-		if handlerErr != nil {
-			continue
-		}
-	}
-
-	// Clear OT receiver pool on TEE_K disconnect
-	// This prevents replay attacks and ensures fresh precomputation on reconnect
-	t.clearOTReceiverPool()
-
-	activeSessionsMutex.RLock()
-	sessionCount := len(activeSessions)
-	activeSessionsMutex.RUnlock()
-
-	if sessionCount > 0 {
-		t.logger.Warn("Cleaning up sessions due to TEE_K disconnect", zap.Int("count", sessionCount))
-		activeSessionsMutex.RLock()
-		for sessionID := range activeSessions {
-			t.sessionTerminator.CleanupSession(sessionID)
-		}
-		activeSessionsMutex.RUnlock()
-	}
-}
-
 // Helper function to detect network errors that occur during normal shutdown
 func isNetworkShutdownError(err error) bool {
 	if err == nil {
@@ -453,13 +176,19 @@ func isNetworkShutdownError(err error) bool {
 		strings.Contains(errStr, "broken pipe")
 }
 
-// sendErrorToTEEK sends an error message to TEE_K
+// sendErrorToTEEK sends an error message to TEE_K on control connection
+// Uses control connection because session connection may be dead when error occurs
 func (t *TEET) sendErrorToTEEK(sessionID string, errMsg string) {
 	env := &teeproto.Envelope{SessionId: sessionID, TimestampMs: time.Now().UnixMilli(),
 		Payload: &teeproto.Envelope_Error{Error: &teeproto.ErrorData{Message: errMsg}},
 	}
-	if err := t.sessionManager.RouteToTEEK(sessionID, env); err != nil {
-		t.logger.Error("Failed to send error message to TEE_K via session manager",
+	if t.connManager == nil {
+		t.logger.Error("Cannot send error to TEE_K: connection manager not initialized",
+			zap.String("session_id", sessionID))
+		return
+	}
+	if err := t.connManager.SendOnControl(env); err != nil {
+		t.logger.Error("Failed to send error message to TEE_K on control",
 			zap.String("session_id", sessionID),
 			zap.Error(err))
 	}
@@ -494,5 +223,55 @@ func (t *TEET) sendErrorAndClose(conn *websocket.Conn, sessionID string, errMsg 
 	}
 
 	time.Sleep(100 * time.Millisecond)
+	conn.Close()
+}
+
+// handleControlWebSocket handles control connections from TEE_K
+// Control connection is used for: attestation, OT precomputation, session lifecycle
+func (t *TEET) handleControlWebSocket(w http.ResponseWriter, r *http.Request) {
+	conn, err := teetUpgrader.Upgrade(w, r, nil)
+	if err != nil {
+		t.logger.Error("Failed to upgrade control websocket", zap.Error(err))
+		return
+	}
+
+	t.logger.Debug("Control WebSocket connection from TEE_K")
+
+	// Initialize connection manager if not already done
+	if t.connManager == nil {
+		t.connManager = NewTEEKConnectionManager(t, t.logger)
+	}
+
+	// Handle the control connection (blocks until disconnect)
+	if err := t.connManager.HandleControlConnection(conn); err != nil {
+		t.logger.Error("Control connection failed", zap.Error(err))
+	}
+
+	conn.Close()
+}
+
+// handleSessionWebSocket handles per-session connections from TEE_K
+// Session connections carry all session-specific data: encrypted requests, keystream, OPRF
+func (t *TEET) handleSessionWebSocket(w http.ResponseWriter, r *http.Request) {
+	conn, err := teetUpgrader.Upgrade(w, r, nil)
+	if err != nil {
+		t.logger.Error("Failed to upgrade session websocket", zap.Error(err))
+		return
+	}
+
+	t.logger.Debug("Session WebSocket connection from TEE_K")
+
+	// Check that control connection is established and attested
+	if t.connManager == nil || !t.connManager.IsAttestationVerified() {
+		t.logger.Warn("Rejecting session connection - control not attested")
+		t.sendErrorAndClose(conn, "", "Control connection not established or attested")
+		return
+	}
+
+	// Handle the session connection (blocks until disconnect)
+	if err := t.connManager.HandleSessionConnection(conn); err != nil {
+		t.logger.Error("Session connection failed", zap.Error(err))
+	}
+
 	conn.Close()
 }

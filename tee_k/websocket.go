@@ -7,7 +7,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/reclaimprotocol/reclaim-tee/oprfmpc"
 	teeproto "github.com/reclaimprotocol/reclaim-tee/proto"
 	"github.com/reclaimprotocol/reclaim-tee/shared"
 
@@ -45,86 +44,22 @@ func createTLSWebSocketDialer() *websocket.Dialer {
 	}
 }
 
-// establishSharedTEETConnection establishes the single persistent connection to TEE_T
+// establishSharedTEETConnection establishes the control connection and completes OT precomputation
 func (t *TEEK) establishSharedTEETConnection() {
-	t.logger.Debug("Establishing shared persistent connection to TEE_T")
+	t.logger.Debug("Establishing control connection to TEE_T")
 
-	for {
-		conn, err := t.attemptTEETConnection("shared", 1)
-		if err != nil {
-			t.logger.Error("Failed to establish shared TEE_T connection, retrying immediately", zap.Error(err))
-			time.Sleep(1 * time.Second)
-			continue
-		}
-
-		// Create single shared wrapper (its internal mutex handles write synchronization)
-		wsConn := shared.NewWSConnection(conn)
-
-		t.teetConnMutex.Lock()
-		t.sharedTEETConn = wsConn
-		t.teetConnMutex.Unlock()
-
-		t.logger.Debug("Shared persistent connection to TEE_T established")
-
-		// Start monitoring the connection in background (handles incoming messages)
-		go t.monitorSharedTEETConnection()
-
-		// Perform OT precomputation - this BLOCKS until complete
-		if err := t.performOTPrecomputation(oprfmpc.OTPoolInitialSize, true); err != nil {
-			t.logger.Error("Failed to perform OT precomputation", zap.Error(err))
-			// Close connection and retry
-			wsConn.Close()
-			t.teetConnMutex.Lock()
-			t.sharedTEETConn = nil
-			t.teetConnMutex.Unlock()
-			time.Sleep(1 * time.Second)
-			continue
-		}
-
-		t.logger.Info("OT precomputation complete, TEE_K ready to accept clients")
-		break
+	// Initialize connection manager if not already done
+	if t.connManager == nil {
+		t.connManager = NewTEETConnectionManager(t, t.teetURL, t.logger)
 	}
-}
 
-// monitorSharedTEETConnection monitors the shared connection and handles all incoming messages
-func (t *TEEK) monitorSharedTEETConnection() {
-	t.teetConnMutex.RLock()
-	conn := t.sharedTEETConn
-	t.teetConnMutex.RUnlock()
-
-	t.logger.Debug("Starting shared TEE_T connection message handler")
-
-	// Handle all incoming messages from TEE_T
-	for {
-		_, msgBytes, err := conn.ReadMessage()
-		if err != nil {
-			if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				t.logger.Debug("Shared TEE_T connection closed")
-			} else {
-				t.logger.Error("Shared TEE_T connection lost, reconnecting", zap.Error(err))
-			}
-
-			// Clear attestation flag on disconnect
-			t.teetAttestationMutex.Lock()
-			t.teetAttestationVerified = false
-			t.teetAttestationMutex.Unlock()
-
-			// Clear OT pool on disconnect (prevents replay attacks)
-			t.clearOTPool()
-
-			// Clear the broken connection
-			t.teetConnMutex.Lock()
-			t.sharedTEETConn = nil
-			t.teetConnMutex.Unlock()
-
-			// Reconnect (will re-do attestation and OT precomputation)
-			t.establishSharedTEETConnection()
-			break
-		}
-
-		// Parse and route the message to the appropriate session
-		t.handleSharedTEETMessage(msgBytes)
+	// Establish control connection (blocks until complete, handles retries internally)
+	if err := t.connManager.EstablishControlConnection(); err != nil {
+		t.logger.Critical("Failed to establish control connection to TEE_T", zap.Error(err))
+		return
 	}
+
+	t.logger.Info("Control connection and OT precomputation complete, TEE_K ready to accept clients")
 }
 
 // handleSharedTEETMessage processes messages from TEE_T and routes them to sessions
@@ -224,21 +159,8 @@ func (t *TEEK) handleSharedTEETMessage(msgBytes []byte) {
 	}
 }
 
-// getSharedTEETConnection returns the shared connection wrapper, establishing it if needed
-func (t *TEEK) getSharedTEETConnection() *shared.WSConnection {
-	t.teetConnMutex.RLock()
-	conn := t.sharedTEETConn
-	t.teetConnMutex.RUnlock()
-
-	if conn == nil {
-		t.logger.Warn("Shared TEE_T connection not available, this should not happen in normal operation")
-		return nil
-	}
-
-	return conn
-}
-
 // attemptTEETConnection performs a single connection attempt to TEE_T with attestation
+// Note: This is used by the connection manager for establishing the control connection
 func (t *TEEK) attemptTEETConnection(sessionID string, attempt int) (*websocket.Conn, error) {
 	logger := t.logger.WithSession(sessionID)
 
@@ -335,17 +257,15 @@ func (t *TEEK) attemptTEETConnection(sessionID string, attempt int) (*websocket.
 	return conn, nil
 }
 
-// connectToTEET now uses the shared connection instead of creating new ones
-func (t *TEEK) connectToTEET(sessionID string) (*shared.WSConnection, error) {
-	t.logger.WithSession(sessionID).Debug("Using shared persistent connection to TEE_T")
+// connectToTEET establishes a per-session connection to TEE_T
+func (t *TEEK) connectToTEET(sessionID string) error {
+	t.logger.WithSession(sessionID).Debug("Establishing per-session connection to TEE_T")
 
-	conn := t.getSharedTEETConnection()
-	if conn == nil {
-		return nil, fmt.Errorf("shared TEE_T connection not available")
+	if t.connManager == nil {
+		return fmt.Errorf("connection manager not initialized")
 	}
 
-	t.logger.WithSession(sessionID).Debug("Shared connection to TEE_T available for session")
-	return conn, nil
+	return t.connManager.EstablishSessionConnection(sessionID)
 }
 
 // handleWebSocket handles incoming WebSocket connections from clients
@@ -356,7 +276,7 @@ func (t *TEEK) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Service temporarily unavailable - OT pool not ready", http.StatusServiceUnavailable)
 		return
 	}
-	if t.getSharedTEETConnection() == nil {
+	if t.connManager == nil || !t.connManager.IsControlConnected() {
 		t.logger.Warn("Rejecting client connection - TEE_T connection not established")
 		http.Error(w, "Service temporarily unavailable - TEE connection not established", http.StatusServiceUnavailable)
 		return
@@ -507,42 +427,34 @@ func (t *TEEK) notifyTEETNewSessionWithRetry(sessionID string) error {
 	return fmt.Errorf("failed to notify TEE_T after %d attempts", maxRetries)
 }
 
-// notifyTEETNewSession sends session registration to TEE_T via shared connection
+// notifyTEETNewSession sends SessionCreated on control connection and establishes per-session connection
 func (t *TEEK) notifyTEETNewSession(sessionID string) error {
-	// Get shared connection wrapper to TEE_T
-	teetConn, err := t.connectToTEET(sessionID)
-	if err != nil {
-		return fmt.Errorf("failed to get shared TEE_T connection for session %s: %v", sessionID, err)
+	if t.connManager == nil {
+		return fmt.Errorf("connection manager not initialized")
 	}
 
-	// Store the shared connection wrapper in the session
-	session, err := t.sessionManager.GetSession(sessionID)
-	if err != nil {
-		return fmt.Errorf("session %s not found: %v", sessionID, err)
-	}
-
-	// Use the same shared wrapper - all sessions share one wrapper with one mutex
-	session.TEETConn = teetConn
-
-	// Send session registration to TEE_T via protobuf
-	env := &teeproto.Envelope{SessionId: sessionID, TimestampMs: time.Now().UnixMilli(),
-		Payload: &teeproto.Envelope_SessionCreated{SessionCreated: &teeproto.SessionCreated{}},
-	}
-	data, err := proto.Marshal(env)
-	if err != nil {
-		return fmt.Errorf("failed to marshal session registration: %v", err)
+	// Step 1: Send SessionCreated notification on control connection
+	env := &teeproto.Envelope{
+		SessionId:   sessionID,
+		TimestampMs: time.Now().UnixMilli(),
+		Payload:     &teeproto.Envelope_SessionCreated{SessionCreated: &teeproto.SessionCreated{}},
 	}
 
 	t.logger.WithSession(sessionID).Info("Sending to TEE_T",
-		zap.String("type", "SessionCreated"),
-		zap.Int("bytes", len(data)))
+		zap.String("type", "SessionCreated"))
 
-	// Use wrapper's WriteMessage which has internal mutex for thread safety
-	if err := teetConn.WriteMessage(websocket.BinaryMessage, data); err != nil {
-		return fmt.Errorf("failed to send session registration: %v", err)
+	if err := t.connManager.SendOnControl(env); err != nil {
+		return fmt.Errorf("failed to send SessionCreated: %v", err)
 	}
 
-	t.logger.WithSession(sessionID).Info("TEE_T session registered")
+	t.logger.WithSession(sessionID).Info("TEE_T session registered on control connection")
+
+	// Step 2: Establish per-session connection
+	if err := t.connManager.EstablishSessionConnection(sessionID); err != nil {
+		return fmt.Errorf("failed to establish per-session connection: %v", err)
+	}
+
+	t.logger.WithSession(sessionID).Info("Per-session connection established")
 	return nil
 }
 

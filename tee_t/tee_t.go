@@ -67,9 +67,8 @@ type TEET struct {
 	teekConnected   bool
 	teekConnectedMu sync.RWMutex
 
-	// Shared TEE_K connection wrapper (single wrapper, internal mutex handles synchronization)
-	sharedTEEKConn   *shared.WSConnection
-	sharedTEEKConnMu sync.RWMutex
+	// Per-session connection manager (control + per-session connections)
+	connManager *TEEKConnectionManager
 }
 
 // NewTEETWithLogger creates a TEET with a specific logger
@@ -272,9 +271,11 @@ func (t *TEET) terminateSessionWithError(sessionID string, reason shared.Termina
 		t.logger.WithSession(sessionID).Warn("Failed to send error to client", zap.Error(routeErr))
 	}
 
-	// Send error to TEE_K
-	if sendErr := t.sessionManager.RouteToTEEK(sessionID, env); sendErr != nil {
-		t.logger.WithSession(sessionID).Warn("Failed to send error to TEE_K", zap.Error(sendErr))
+	// Send error to TEE_K on control connection (session connection may be dead)
+	if t.connManager != nil {
+		if sendErr := t.connManager.SendOnControl(env); sendErr != nil {
+			t.logger.WithSession(sessionID).Warn("Failed to send error to TEE_K on control", zap.Error(sendErr))
+		}
 	}
 
 	// Small delay to ensure error messages are sent before connection closes

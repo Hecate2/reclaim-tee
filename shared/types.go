@@ -56,6 +56,11 @@ func (w *WSConnection) ReadMessage() (messageType int, p []byte, err error) {
 	return w.conn.ReadMessage()
 }
 
+// SetReadDeadline sets the read deadline on the underlying connection
+func (w *WSConnection) SetReadDeadline(t time.Time) error {
+	return w.conn.SetReadDeadline(t)
+}
+
 // Message types for websocket communication
 type MessageType string
 

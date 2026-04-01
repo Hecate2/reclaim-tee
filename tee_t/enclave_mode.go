@@ -107,10 +107,14 @@ func setupEnclaveRoutes(teet *TEET, enclaveManager *shared.EnclaveManager, logge
 		teet.handleClientWebSocket(w, r)
 	})
 
-	// WebSocket endpoint for TEE_K connections
-	mux.HandleFunc("/teek", func(w http.ResponseWriter, r *http.Request) {
-		// Upgrade HTTPS connection to WebSocket for TEE_K
-		teet.handleTEEKWebSocket(w, r)
+	// Per-session connection architecture (TEEs work in pairs)
+	mux.HandleFunc("/ws/control", func(w http.ResponseWriter, r *http.Request) {
+		// Control: attestation, OT, session lifecycle
+		teet.handleControlWebSocket(w, r)
+	})
+	mux.HandleFunc("/ws/session", func(w http.ResponseWriter, r *http.Request) {
+		// Per-session: all session data
+		teet.handleSessionWebSocket(w, r)
 	})
 
 	// Health check endpoint

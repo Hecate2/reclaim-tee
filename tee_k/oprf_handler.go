@@ -10,9 +10,7 @@ import (
 	teeproto "github.com/reclaimprotocol/reclaim-tee/proto"
 	"github.com/reclaimprotocol/reclaim-tee/shared"
 
-	"github.com/gorilla/websocket"
 	"go.uber.org/zap"
-	"google.golang.org/protobuf/proto"
 )
 
 // handleOPRFRangesFromClient handles OPRFRangesSubmission from client
@@ -230,11 +228,10 @@ func (t *TEEK) computeTLSSessionHash(sessionID string) ([]byte, error) {
 	return h.Sum(nil), nil
 }
 
-// sendOPRFOnlineFullToTEET sends OPRFOnlineFull message to TEE_T
+// sendOPRFOnlineFullToTEET sends OPRFOnlineFull message to TEE_T via per-session connection
 func (t *TEEK) sendOPRFOnlineFullToTEET(sessionID string, msg *teeproto.OPRFOnlineFull) error {
-	conn := t.getSharedTEETConnection()
-	if conn == nil {
-		return fmt.Errorf("no shared TEE_T connection available")
+	if t.connManager == nil {
+		return fmt.Errorf("connection manager not initialized")
 	}
 
 	env := &teeproto.Envelope{
@@ -245,17 +242,11 @@ func (t *TEEK) sendOPRFOnlineFullToTEET(sessionID string, msg *teeproto.OPRFOnli
 		},
 	}
 
-	data, err := proto.Marshal(env)
-	if err != nil {
-		return fmt.Errorf("failed to marshal OPRFOnlineFull: %w", err)
-	}
-
 	t.logger.WithSession(sessionID).Info("Sending to TEE_T",
-		zap.String("type", "OprfOnlineFull"),
-		zap.Int("bytes", len(data)))
+		zap.String("type", "OprfOnlineFull"))
 
-	// Use wrapper's WriteMessage which has internal mutex for thread safety
-	return conn.WriteMessage(websocket.BinaryMessage, data)
+	// Send on per-session connection
+	return t.connManager.SendOnSession(sessionID, env)
 }
 
 // buildOPRFOutputsForSigning builds OPRF outputs for inclusion in signed payload
@@ -321,9 +312,8 @@ func (t *TEEK) handleCiphertextReady(sessionID string, msg *teeproto.CiphertextR
 
 // sendCiphertextReadyToTEET notifies TEE_T that ciphertext consolidation is complete
 func (t *TEEK) sendCiphertextReadyToTEET(sessionID string, totalLength int) error {
-	conn := t.getSharedTEETConnection()
-	if conn == nil {
-		return fmt.Errorf("no shared TEE_T connection available")
+	if t.connManager == nil {
+		return fmt.Errorf("connection manager not initialized")
 	}
 
 	env := &teeproto.Envelope{
@@ -337,15 +327,9 @@ func (t *TEEK) sendCiphertextReadyToTEET(sessionID string, totalLength int) erro
 		},
 	}
 
-	data, err := proto.Marshal(env)
-	if err != nil {
-		return fmt.Errorf("failed to marshal CiphertextReady: %w", err)
-	}
-
 	t.logger.WithSession(sessionID).Info("Sending to TEE_T",
-		zap.String("type", "CiphertextReady"),
-		zap.Int("bytes", len(data)))
+		zap.String("type", "CiphertextReady"))
 
-	// Use wrapper's WriteMessage which has internal mutex for thread safety
-	return conn.WriteMessage(websocket.BinaryMessage, data)
+	// Send on per-session connection
+	return t.connManager.SendOnSession(sessionID, env)
 }

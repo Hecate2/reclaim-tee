@@ -86,14 +86,21 @@ func (t *TEEK) performOTPrecomputation(count int, isInitial bool) error {
 		zap.Int("count", count),
 		zap.Duration("duration", time.Since(startTime)))
 
-	// Get connection to TEE_T
-	conn := t.getSharedTEETConnection()
+	// Get control connection to TEE_T
+	if t.connManager == nil {
+		t.clearPendingSetups() // Clear pending setups on failure
+		if !isInitial {
+			state.pool.SetExtendPending(false)
+		}
+		return fmt.Errorf("connection manager not initialized")
+	}
+	conn := t.connManager.GetControlConnection()
 	if conn == nil {
 		t.clearPendingSetups() // Clear pending setups on failure
 		if !isInitial {
 			state.pool.SetExtendPending(false)
 		}
-		return fmt.Errorf("no TEE_T connection available")
+		return fmt.Errorf("no TEE_T control connection available")
 	}
 
 	// Clear response channel before sending
@@ -296,9 +303,12 @@ func (t *TEEK) signalResponseChan(err error) {
 
 // sendOTPrecomputeComplete sends the completion message to TEE_T
 func (t *TEEK) sendOTPrecomputeComplete() error {
-	conn := t.getSharedTEETConnection()
+	if t.connManager == nil {
+		return fmt.Errorf("connection manager not initialized")
+	}
+	conn := t.connManager.GetControlConnection()
 	if conn == nil {
-		return fmt.Errorf("no TEE_T connection available")
+		return fmt.Errorf("no TEE_T control connection available")
 	}
 
 	poolSize := uint32(0)

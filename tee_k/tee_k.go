@@ -12,9 +12,7 @@ import (
 	teeproto "github.com/reclaimprotocol/reclaim-tee/proto"
 	"github.com/reclaimprotocol/reclaim-tee/shared"
 
-	"github.com/gorilla/websocket"
 	"go.uber.org/zap"
-	"google.golang.org/protobuf/proto"
 )
 
 // RedactionOperation represents a redaction to be applied to a specific sequence
@@ -39,9 +37,8 @@ type TEEK struct {
 	// TEE_T connection settings
 	teetURL string
 
-	// Shared persistent connection to TEE_T (single wrapper, shared mutex)
-	sharedTEETConn *shared.WSConnection
-	teetConnMutex  sync.RWMutex
+	// Per-session connection manager (control + per-session connections)
+	connManager *TEETConnectionManager
 
 	// TLS configuration
 	forceTLSVersion  string                     // Force specific TLS version: "1.2", "1.3", or "" for auto
@@ -59,7 +56,7 @@ type TEEK struct {
 	attestationMutex  sync.RWMutex
 	attestationExpiry time.Time
 
-	// Mutual attestation
+	// Mutual attestation (managed by connection manager)
 	teetAttestationVerified bool
 	teetAttestationMutex    sync.RWMutex
 
@@ -223,6 +220,11 @@ func (t *TEEK) getSessionResponseState(sessionID string) (*shared.ResponseSessio
 // cleanupSession performs complete cleanup of session resources
 // This function is idempotent - safe to call multiple times for the same session
 func (t *TEEK) cleanupSession(sessionID string) {
+	// Close per-session connection to TEE_T
+	if t.connManager != nil {
+		t.connManager.CloseSessionConnection(sessionID, "session_cleanup")
+	}
+
 	// Close the session in session manager (handles connections and state cleanup)
 	if err := t.sessionManager.CloseSession(sessionID); err != nil {
 		// Session already cleaned up - this is expected in race conditions
@@ -312,14 +314,14 @@ func getEnvelopePayloadType(env *teeproto.Envelope) string {
 	}
 }
 
-// sendToTEET sends a message to TEE_T with attestation check
+// sendToTEET sends a message to TEE_T, routing to control or session connection as appropriate
 func (t *TEEK) sendToTEET(sessionID string, env *teeproto.Envelope) error {
-	// Check attestation flag BEFORE sending
-	t.teetAttestationMutex.RLock()
-	verified := t.teetAttestationVerified
-	t.teetAttestationMutex.RUnlock()
+	if t.connManager == nil {
+		return fmt.Errorf("connection manager not initialized")
+	}
 
-	if !verified {
+	// Check attestation via connection manager
+	if !t.connManager.IsAttestationVerified() {
 		err := fmt.Errorf("cannot send to TEE_T: attestation not verified")
 		t.logger.WithSession(sessionID).Error("Attestation check failed", zap.Error(err))
 		t.terminateSessionWithError(sessionID, shared.ReasonAttestationVerificationFailed, err,
@@ -327,22 +329,12 @@ func (t *TEEK) sendToTEET(sessionID string, env *teeproto.Envelope) error {
 		return err
 	}
 
-	// Get connection
-	conn := t.getSharedTEETConnection()
-	if conn == nil {
-		return fmt.Errorf("no TEE_T connection")
-	}
-
-	// Marshal and send
-	data, err := proto.Marshal(env)
-	if err != nil {
-		return fmt.Errorf("marshal failed: %v", err)
-	}
-
 	t.logger.WithSession(sessionID).Info("Sending to TEE_T",
-		zap.String("type", getEnvelopePayloadType(env)),
-		zap.Int("bytes", len(data)))
+		zap.String("type", getEnvelopePayloadType(env)))
 
-	// Use wrapper's WriteMessage which has internal mutex for thread safety
-	return conn.WriteMessage(websocket.BinaryMessage, data)
+	// Route control messages to control connection, session messages to session connection
+	if isControlMessage(env) {
+		return t.connManager.SendOnControl(env)
+	}
+	return t.connManager.SendOnSession(sessionID, env)
 }

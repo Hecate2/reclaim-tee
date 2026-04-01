@@ -74,6 +74,11 @@ message Envelope {
     OTPrecomputeResponse ot_precompute_response = 65;   // TEE_T -> TEE_K
     OTPrecomputeComplete ot_precompute_complete = 66;   // TEE_K -> TEE_T (after initial setup only)
     OPRFOnlineFull oprf_online_full = 67;               // TEE_K -> TEE_T (2-round online phase)
+
+    // Per-session connection management (TEE_K <-> TEE_T)
+    SessionConnectionInit session_connection_init = 80;   // TEE_K -> TEE_T (on per-session WS)
+    SessionConnectionAck session_connection_ack = 81;     // TEE_T -> TEE_K (on per-session WS)
+    SessionClosed session_closed = 82;                    // TEE_K -> TEE_T (on control WS)
   }
 }
 
@@ -304,5 +309,21 @@ message OPRFMPCResult {
   bytes cmac_output = 4;         // 16 bytes
   bytes hash_output = 5;         // 32 bytes (SHA-256 of CMAC)
   bytes output_labels = 6;       // MANDATORY: actual output wire labels for garbler verification
+}
+
+// Per-session connection management messages
+message SessionConnectionInit {
+  string session_id = 1;         // Session ID to bind this connection to
+}
+
+message SessionConnectionAck {
+  string session_id = 1;
+  bool success = 2;
+  string error_message = 3;      // If !success
+}
+
+message SessionClosed {
+  string session_id = 1;
+  string reason = 2;             // Reason for closure (normal, error, timeout, etc.)
 }
 

@@ -66,6 +66,9 @@ const (
 
 	// MPC OPRF Protocol Errors - ZERO TOLERANCE
 	ReasonOPRFProtocolFailed TerminationReason = "oprf_protocol_failed"
+
+	// Handler errors - ZERO TOLERANCE
+	ReasonHandlerFailed TerminationReason = "handler_failed"
 )
 
 // TerminationSeverity indicates how critical the termination reason is
@@ -149,7 +152,8 @@ func (r TerminationReason) GetSeverity() TerminationSeverity {
 		ReasonRedactionVerificationFailed,
 		ReasonTagComputationFailed,
 		ReasonStreamReconstructionFailed,
-		ReasonOPRFProtocolFailed:
+		ReasonOPRFProtocolFailed,
+		ReasonHandlerFailed:
 		return SeverityHigh
 
 	default:
