@@ -624,3 +624,28 @@ func (cm *TEEKConnectionManager) SendOnControl(env *teeproto.Envelope) error {
 
 	return conn.WriteMessage(websocket.BinaryMessage, data)
 }
+
+// CloseSessionConnection closes a per-session connection from TEE_T side
+// Called when client disconnects from TEE_T, to prevent TEE_K from timing out
+func (cm *TEEKConnectionManager) CloseSessionConnection(sessionID string) {
+	cm.mu.Lock()
+	sessionConn := cm.sessionConns[sessionID]
+	if sessionConn != nil {
+		delete(cm.sessionConns, sessionID)
+	}
+	cm.mu.Unlock()
+
+	if sessionConn == nil {
+		return
+	}
+
+	cm.logger.WithSession(sessionID).Debug("Closing per-session connection (client disconnected)")
+
+	// Mark as closed and close connection (thread-safe)
+	sessionConn.mu.Lock()
+	if !sessionConn.closed {
+		sessionConn.closed = true
+		sessionConn.conn.Close()
+	}
+	sessionConn.mu.Unlock()
+}

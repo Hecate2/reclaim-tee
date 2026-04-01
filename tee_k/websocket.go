@@ -305,7 +305,7 @@ func (t *TEEK) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	// Notify TEE_T about the new session (with retry for shared connection)
 	if err := t.notifyTEETNewSessionWithRetry(sessionID); err != nil {
 		t.logger.WithSession(sessionID).Error("Failed to notify TEE_T about session after retries", zap.Error(err))
-		t.sessionManager.CloseSession(sessionID)
+		t.cleanupSession(sessionID) // Use cleanupSession to send SessionClosed to TEE_T
 		return
 	}
 
@@ -315,7 +315,7 @@ func (t *TEEK) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 	if data, err := proto.Marshal(env); err != nil || wsConn.WriteMessage(websocket.BinaryMessage, data) != nil {
 		t.logger.WithSession(sessionID).Error("Failed to send session ready to client", zap.Error(err))
-		t.sessionManager.CloseSession(sessionID)
+		t.cleanupSession(sessionID) // Use cleanupSession to send SessionClosed to TEE_T
 		return
 	}
 
@@ -395,7 +395,7 @@ func (t *TEEK) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	// Clean up session when connection closes
 	t.logger.WithSession(sessionID).Info("Session finished")
-	t.sessionManager.CloseSession(sessionID)
+	t.cleanupSession(sessionID) // Use cleanupSession to send SessionClosed to TEE_T
 }
 
 // notifyTEETNewSessionWithRetry retries session notification if shared connection isn't ready

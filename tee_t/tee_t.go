@@ -227,8 +227,8 @@ func (t *TEET) isTEEKConnected() bool {
 func (t *TEET) cleanupSession(sessionID string) {
 	// Close the session in session manager (handles connections and state cleanup)
 	if err := t.sessionManager.CloseSession(sessionID); err != nil {
-		// Session already cleaned up - this is expected in race conditions
-		t.logger.WithSession(sessionID).Warn("Session already cleaned up", zap.Error(err))
+		// Session already cleaned up - expected when both sides close proactively
+		t.logger.WithSession(sessionID).Debug("Session already cleaned up", zap.Error(err))
 		return
 	}
 
