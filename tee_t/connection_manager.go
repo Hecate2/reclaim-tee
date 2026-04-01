@@ -19,10 +19,6 @@ const MaxConcurrentSessions = 100
 // SessionReadTimeout is the maximum time to wait for a message on a session connection
 const SessionReadTimeout = 1 * time.Minute
 
-// ControlReadTimeout is the maximum time to wait for a message on the control connection
-// Longer than session timeout since control handles OT which can take time
-const ControlReadTimeout = 5 * time.Minute
-
 // TEEKConnectionManager manages all connections from TEE_K
 // - One persistent control connection for attestation, OT precomputation, and session lifecycle
 // - One per-session connection for each active session's data flow
@@ -162,8 +158,8 @@ func (cm *TEEKConnectionManager) handleControlMessages(conn *shared.WSConnection
 	cm.logger.Debug("Starting control message handler")
 
 	for {
-		// Set read deadline to detect dead connections
-		conn.SetReadDeadline(time.Now().Add(ControlReadTimeout))
+		// No read deadline on control connection - it should stay alive forever
+		// Dead connection detection relies on WebSocket ping/pong or TCP keepalive
 		_, msgBytes, err := conn.ReadMessage()
 		if err != nil {
 			if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
