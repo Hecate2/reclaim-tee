@@ -318,7 +318,7 @@ func (cm *TEETConnectionManager) handleControlMessage(msgBytes []byte) {
 func (cm *TEETConnectionManager) EstablishSessionConnection(sessionID string) error {
 	cm.logger.WithSession(sessionID).Debug("Establishing per-session connection to TEE_T")
 
-	// Check session limit to prevent resource exhaustion
+	// Pre-check session limit (will recheck under lock before insert)
 	cm.mu.RLock()
 	sessionCount := len(cm.sessionConns)
 	cm.mu.RUnlock()
@@ -411,7 +411,13 @@ func (cm *TEETConnectionManager) EstablishSessionConnection(sessionID string) er
 		established: time.Now(),
 	}
 
+	// Recheck session limit under lock to prevent TOCTOU race
 	cm.mu.Lock()
+	if len(cm.sessionConns) >= MaxConcurrentSessions {
+		cm.mu.Unlock()
+		wsConn.Close()
+		return fmt.Errorf("max concurrent sessions (%d) reached (race)", MaxConcurrentSessions)
+	}
 	cm.sessionConns[sessionID] = sessionConn
 	cm.mu.Unlock()
 

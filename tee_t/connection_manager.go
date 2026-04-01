@@ -19,6 +19,10 @@ const MaxConcurrentSessions = 100
 // SessionReadTimeout is the maximum time to wait for a message on a session connection
 const SessionReadTimeout = 1 * time.Minute
 
+// ControlReadTimeout is the maximum time to wait for a message on the control connection
+// Longer than session timeout since control handles OT which can take time
+const ControlReadTimeout = 5 * time.Minute
+
 // TEEKConnectionManager manages all connections from TEE_K
 // - One persistent control connection for attestation, OT precomputation, and session lifecycle
 // - One per-session connection for each active session's data flow
@@ -158,6 +162,8 @@ func (cm *TEEKConnectionManager) handleControlMessages(conn *shared.WSConnection
 	cm.logger.Debug("Starting control message handler")
 
 	for {
+		// Set read deadline to detect dead connections
+		conn.SetReadDeadline(time.Now().Add(ControlReadTimeout))
 		_, msgBytes, err := conn.ReadMessage()
 		if err != nil {
 			if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
@@ -170,8 +176,9 @@ func (cm *TEEKConnectionManager) handleControlMessages(conn *shared.WSConnection
 
 		var env teeproto.Envelope
 		if err := proto.Unmarshal(msgBytes, &env); err != nil {
-			cm.logger.Error("Failed to parse control message", zap.Error(err))
-			continue
+			// Parse failure indicates protocol corruption - terminate connection
+			cm.logger.Error("Failed to parse control message - closing connection", zap.Error(err))
+			return
 		}
 
 		sessionID := env.GetSessionId()
@@ -202,11 +209,18 @@ func (cm *TEEKConnectionManager) handleControlMessages(conn *shared.WSConnection
 			// Also cleanup per-session connection if exists
 			cm.mu.Lock()
 			if sessionConn, ok := cm.sessionConns[sessionID]; ok {
-				sessionConn.closed = true
-				sessionConn.conn.Close()
 				delete(cm.sessionConns, sessionID)
+				cm.mu.Unlock()
+				// Lock sessionConn.mu to safely set closed flag
+				sessionConn.mu.Lock()
+				if !sessionConn.closed {
+					sessionConn.closed = true
+					sessionConn.conn.Close()
+				}
+				sessionConn.mu.Unlock()
+			} else {
+				cm.mu.Unlock()
 			}
-			cm.mu.Unlock()
 
 		case *teeproto.Envelope_OtPrecomputeRequest:
 			// OT precomputation request
@@ -229,11 +243,18 @@ func (cm *TEEKConnectionManager) handleControlMessages(conn *shared.WSConnection
 				// Also cleanup per-session connection if exists
 				cm.mu.Lock()
 				if sessionConn, ok := cm.sessionConns[sessionID]; ok {
-					sessionConn.closed = true
-					sessionConn.conn.Close()
 					delete(cm.sessionConns, sessionID)
+					cm.mu.Unlock()
+					// Lock sessionConn.mu to safely set closed flag
+					sessionConn.mu.Lock()
+					if !sessionConn.closed {
+						sessionConn.closed = true
+						sessionConn.conn.Close()
+					}
+					sessionConn.mu.Unlock()
+				} else {
+					cm.mu.Unlock()
 				}
-				cm.mu.Unlock()
 			}
 
 		default:
@@ -308,10 +329,12 @@ func (cm *TEEKConnectionManager) HandleSessionConnection(conn *websocket.Conn) e
 	cm.sessionConns[sessionID] = sessionConn
 	cm.mu.Unlock()
 
-	// Associate connection with session for routing
+	// Associate connection with session for routing (use mutex to prevent race)
 	session, _ := cm.teet.sessionManager.GetSession(sessionID)
 	if session != nil {
+		session.ConnMutex.Lock()
 		session.TEEKConn = wsConn
+		session.ConnMutex.Unlock()
 	}
 
 	// Send acknowledgment

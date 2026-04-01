@@ -179,6 +179,7 @@ type Session struct {
 	ClientConn   Connection
 	TEEKConn     Connection
 	TEETConn     Connection // Per-session connection to TEE_T
+	ConnMutex    sync.RWMutex // Protects connection field assignments
 	CreatedAt    time.Time
 	LastActiveAt time.Time
 	State        SessionState
