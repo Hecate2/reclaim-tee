@@ -21,6 +21,9 @@ const MaxConcurrentSessions = 100
 // SessionReadTimeout is the maximum time to wait for a message on a session connection
 const SessionReadTimeout = 1 * time.Minute
 
+// SessionCreatedAckTimeout is how long to wait for SessionCreatedAck from TEE_T
+const SessionCreatedAckTimeout = 5 * time.Second
+
 // TEETConnectionManager manages all connections to TEE_T
 // - One persistent control connection for attestation, OT precomputation, and session lifecycle
 // - One per-session connection for each active session's data flow
@@ -34,6 +37,10 @@ type TEETConnectionManager struct {
 	// Per-session connections (limited to MaxConcurrentSessions)
 	sessionConns map[string]*SessionTEETConnection // sessionID -> connection
 	sessionURL   string                            // e.g., ws://localhost:8081/ws/session
+
+	// Pending SessionCreatedAck channels (signaled when ack received)
+	pendingAcks   map[string]chan struct{}
+	pendingAcksMu sync.Mutex
 
 	// References
 	teek   *TEEK
@@ -66,6 +73,7 @@ func NewTEETConnectionManager(teek *TEEK, baseURL string, logger *shared.Logger)
 		controlURL:   controlURL,
 		sessionURL:   sessionURL,
 		sessionConns: make(map[string]*SessionTEETConnection),
+		pendingAcks:  make(map[string]chan struct{}),
 		teek:         teek,
 		logger:       logger,
 	}
@@ -300,6 +308,17 @@ func (cm *TEETConnectionManager) handleControlMessage(msgBytes []byte) {
 			cm.logger.Error("OT precompute response failed", zap.Error(err))
 		}
 
+	case *teeproto.Envelope_SessionCreatedAck:
+		// TEE_T acknowledges session creation - signal waiting goroutine
+		sessionID := p.SessionCreatedAck.GetSessionId()
+		cm.pendingAcksMu.Lock()
+		if ch, ok := cm.pendingAcks[sessionID]; ok {
+			close(ch)
+			delete(cm.pendingAcks, sessionID)
+		}
+		cm.pendingAcksMu.Unlock()
+		cm.logger.WithSession(sessionID).Debug("Received SessionCreatedAck")
+
 	case *teeproto.Envelope_Error:
 		// Error from TEE_T - cleanup the affected session
 		sessionID := env.GetSessionId()
@@ -311,6 +330,31 @@ func (cm *TEETConnectionManager) handleControlMessage(msgBytes []byte) {
 
 	default:
 		cm.logger.Warn("Unexpected message type on control connection", zap.String("type", fmt.Sprintf("%T", p)))
+	}
+}
+
+// WaitForSessionCreatedAck waits for TEE_T to acknowledge session creation
+// Returns nil if ack received, error on timeout
+func (cm *TEETConnectionManager) WaitForSessionCreatedAck(sessionID string) error {
+	// Create channel for this session
+	ch := make(chan struct{})
+	cm.pendingAcksMu.Lock()
+	cm.pendingAcks[sessionID] = ch
+	cm.pendingAcksMu.Unlock()
+
+	// Cleanup on exit
+	defer func() {
+		cm.pendingAcksMu.Lock()
+		delete(cm.pendingAcks, sessionID)
+		cm.pendingAcksMu.Unlock()
+	}()
+
+	// Wait for ack or timeout
+	select {
+	case <-ch:
+		return nil
+	case <-time.After(SessionCreatedAckTimeout):
+		return fmt.Errorf("timeout waiting for SessionCreatedAck")
 	}
 }
 

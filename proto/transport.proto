@@ -79,6 +79,7 @@ message Envelope {
     SessionConnectionInit session_connection_init = 80;   // TEE_K -> TEE_T (on per-session WS)
     SessionConnectionAck session_connection_ack = 81;     // TEE_T -> TEE_K (on per-session WS)
     SessionClosed session_closed = 82;                    // TEE_K -> TEE_T (on control WS)
+    SessionCreatedAck session_created_ack = 83;           // TEE_T -> TEE_K (on control WS)
   }
 }
 
@@ -239,6 +240,7 @@ message BatchedSignedRedactedDecryptionStreams {
 }
 
 message SessionCreated {}
+message SessionCreatedAck { string session_id = 1; }
 message SessionReady { bool ready = 1; }
 
 // Mutual attestation messages

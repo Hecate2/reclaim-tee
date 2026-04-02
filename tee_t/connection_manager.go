@@ -193,6 +193,19 @@ func (cm *TEEKConnectionManager) handleControlMessages(conn *shared.WSConnection
 				cm.logger.WithSession(sessionID).Error("Failed to create session", zap.Error(err))
 			} else {
 				cm.logger.Info("Session registered", zap.String("sid", shared.TruncateSessionID(sessionID)))
+				// Send acknowledgment so TEE_K knows it can establish per-session connection
+				ackEnv := &teeproto.Envelope{
+					SessionId:   sessionID,
+					TimestampMs: time.Now().UnixMilli(),
+					Payload: &teeproto.Envelope_SessionCreatedAck{
+						SessionCreatedAck: &teeproto.SessionCreatedAck{
+							SessionId: sessionID,
+						},
+					},
+				}
+				if err := cm.SendOnControl(ackEnv); err != nil {
+					cm.logger.WithSession(sessionID).Error("Failed to send SessionCreatedAck", zap.Error(err))
+				}
 			}
 
 		case *teeproto.Envelope_SessionClosed:

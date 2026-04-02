@@ -447,9 +447,14 @@ func (t *TEEK) notifyTEETNewSession(sessionID string) error {
 		return fmt.Errorf("failed to send SessionCreated: %v", err)
 	}
 
-	t.logger.WithSession(sessionID).Info("TEE_T session registered on control connection")
+	// Step 2: Wait for TEE_T to acknowledge session creation
+	if err := t.connManager.WaitForSessionCreatedAck(sessionID); err != nil {
+		return fmt.Errorf("failed to get session ack: %v", err)
+	}
 
-	// Step 2: Establish per-session connection
+	t.logger.WithSession(sessionID).Debug("TEE_T acknowledged session creation")
+
+	// Step 3: Establish per-session connection
 	if err := t.connManager.EstablishSessionConnection(sessionID); err != nil {
 		return fmt.Errorf("failed to establish per-session connection: %v", err)
 	}
