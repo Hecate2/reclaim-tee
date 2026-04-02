@@ -90,7 +90,7 @@ func (cm *TEEKConnectionManager) HandleControlConnection(conn *websocket.Conn) e
 		return fmt.Errorf("attestation verification failed: %v", err)
 	}
 
-	cm.logger.Debug("TEE_K attestation verified on control connection")
+	cm.logger.Info("TEE_K attestation verified on control connection")
 
 	// Generate and send our attestation
 	attestation, err := cm.teet.generateAttestationForTEEK()
@@ -117,7 +117,7 @@ func (cm *TEEKConnectionManager) HandleControlConnection(conn *websocket.Conn) e
 		return fmt.Errorf("failed to send attestation response: %v", err)
 	}
 
-	cm.logger.Debug("Mutual attestation completed on control connection")
+	cm.logger.Info("Mutual attestation completed on control connection")
 
 	// Create wrapper and store connection
 	wsConn := shared.NewWSConnection(conn)
@@ -155,12 +155,17 @@ func (cm *TEEKConnectionManager) HandleControlConnection(conn *websocket.Conn) e
 
 // handleControlMessages processes messages on the control connection
 func (cm *TEEKConnectionManager) handleControlMessages(conn *shared.WSConnection) {
-	cm.logger.Debug("Starting control message handler")
+	cm.logger.Info("Starting control message handler - ready to receive messages")
 
+	messageCount := 0
 	for {
 		// No read deadline on control connection - it should stay alive forever
 		// Dead connection detection relies on WebSocket ping/pong or TCP keepalive
 		_, msgBytes, err := conn.ReadMessage()
+		messageCount++
+		if messageCount == 1 {
+			cm.logger.Info("First control message received", zap.Int("bytes", len(msgBytes)))
+		}
 		if err != nil {
 			if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
 				cm.logger.Debug("Control connection closed")

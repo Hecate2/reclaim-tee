@@ -125,7 +125,7 @@ func (cm *TEETConnectionManager) EstablishControlConnection() error {
 		cm.controlConn = wsConn
 		cm.mu.Unlock()
 
-		cm.logger.Debug("Control connection to TEE_T established")
+		cm.logger.Info("Control connection to TEE_T established")
 
 		// Start control message handler FIRST - it needs to receive OT response
 		// Use a done channel to stop it if OT fails
@@ -171,7 +171,7 @@ func (cm *TEETConnectionManager) attemptControlConnection() (*websocket.Conn, er
 		return nil, err
 	}
 
-	cm.logger.Debug("Control WebSocket connected, starting attestation exchange")
+	cm.logger.Info("Control WebSocket connected, starting attestation exchange")
 
 	// Generate and send TEE_K attestation
 	attestation, err := cm.teek.generateAttestationForTEET()
@@ -241,7 +241,7 @@ func (cm *TEETConnectionManager) attemptControlConnection() (*websocket.Conn, er
 	cm.teek.teetAttestationVerified = true
 	cm.teek.teetAttestationMutex.Unlock()
 
-	cm.logger.Debug("TEE_T attestation verified on control connection")
+	cm.logger.Info("TEE_T attestation verified on control connection")
 
 	return conn, nil
 }
@@ -256,7 +256,7 @@ func (cm *TEETConnectionManager) handleControlMessages() {
 		return
 	}
 
-	cm.logger.Debug("Starting control connection message handler")
+	cm.logger.Info("Starting control connection message handler")
 
 	for {
 		_, msgBytes, err := conn.ReadMessage()
