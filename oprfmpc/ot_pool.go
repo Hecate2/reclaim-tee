@@ -213,19 +213,27 @@ func (p *OTReceiverPool) AddEntries(entries []*OTReceiverEntry) {
 	p.totalCount += len(entries)
 }
 
-// Consume retrieves entries from the pool starting at the given index
-// The startIndex must match the garbler's OT start index
+// Consume retrieves entries from the pool starting at the given index.
+// If startIndex is ahead of nextIndex, the skipped entries are marked as wasted
+// (this happens when TEE_K reserved entries but OPRF failed before reaching TEE_T).
 func (p *OTReceiverPool) Consume(startIndex int, count int) ([]*OTReceiverEntry, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	if startIndex != p.nextIndex {
-		return nil, fmt.Errorf("OT index mismatch: expected %d, got %d", p.nextIndex, startIndex)
+	if startIndex < p.nextIndex {
+		return nil, fmt.Errorf("OT index behind: expected >= %d, got %d (possible replay)", p.nextIndex, startIndex)
 	}
 
-	if p.nextIndex+count > p.totalCount {
-		return nil, fmt.Errorf("insufficient OT entries: need %d, have %d available",
-			count, p.totalCount-p.nextIndex)
+	// Skip ahead if TEE_K wasted entries (e.g., OPRF failed after reserving)
+	if startIndex > p.nextIndex {
+		skipped := startIndex - p.nextIndex
+		p.nextIndex = startIndex
+		p.usedCount += skipped
+	}
+
+	if startIndex+count > p.totalCount {
+		return nil, fmt.Errorf("insufficient OT entries: need %d at index %d, have %d total",
+			count, startIndex, p.totalCount)
 	}
 
 	entries := make([]*OTReceiverEntry, count)
