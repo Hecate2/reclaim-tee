@@ -579,7 +579,9 @@ func (t *TEEK) generateAndSendRedactedDecryptionStream(sessionID string, spec sh
 	// Copy to TEEKSessionState for MPC OPRF access - use ORIGINAL keystream, not redacted
 	teekState, err := t.sessionManager.GetTEEKSessionState(sessionID)
 	if err == nil {
+		teekState.LockOPRF()
 		teekState.ConsolidatedKeystream = consolidatedOriginalKeystream // Use ORIGINAL for OPRF
+		teekState.UnlockOPRF()
 		// Process any queued OPRF ranges now that keystream is available
 		if teekState.ClientRangesReceived && len(teekState.OPRFRanges) > 0 {
 			if err := t.processQueuedOPRFRanges(sessionID, teekState); err != nil {

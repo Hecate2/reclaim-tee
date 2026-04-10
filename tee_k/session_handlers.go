@@ -108,6 +108,18 @@ func (t *TEEK) handleRedactedRequest(sessionID string, msg *shared.Message) erro
 		zap.Int("bytes", len(redactedRequest.RedactedRequest)),
 		zap.Int("ranges", len(redactedRequest.RedactionRanges)))
 
+	if len(redactedRequest.RedactedRequest) > shared.MaxHTTPRequestSize {
+		err := fmt.Errorf("HTTP request too large: %d bytes (max %d)", len(redactedRequest.RedactedRequest), shared.MaxHTTPRequestSize)
+		t.terminateSessionWithError(sessionID, shared.ReasonProtocolViolation, err, "Request exceeds maximum size")
+		return err
+	}
+
+	if len(redactedRequest.RedactionRanges) > shared.MaxRedactionRanges {
+		err := fmt.Errorf("too many redaction ranges: %d (max %d)", len(redactedRequest.RedactionRanges), shared.MaxRedactionRanges)
+		t.terminateSessionWithError(sessionID, shared.ReasonProtocolViolation, err, "Too many redaction ranges")
+		return err
+	}
+
 	// SECURITY: Validate commitment count matches redaction range count
 	// Each redaction range requires a corresponding commitment to bind the client to specific values
 	if len(redactedRequest.RedactionRanges) > 0 {
@@ -386,6 +398,10 @@ func (t *TEEK) handleRedactionSpec(sessionID string, msg *shared.Message) error 
 
 // validateResponseRedactionSpec validates the response redaction specification from client
 func (t *TEEK) validateResponseRedactionSpec(spec shared.ResponseRedactionSpec) error {
+	if len(spec.Ranges) > shared.MaxResponseRedactionRanges {
+		return fmt.Errorf("too many response redaction ranges: %d (max %d)", len(spec.Ranges), shared.MaxResponseRedactionRanges)
+	}
+
 	// Validate ranges don't overlap and are within bounds
 	for i, range1 := range spec.Ranges {
 		// Check for overlaps with other ranges

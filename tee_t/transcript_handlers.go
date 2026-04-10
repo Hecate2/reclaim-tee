@@ -77,12 +77,12 @@ func (t *TEET) checkFinishedCondition(sessionID string) error {
 	session.FinishedStateMutex.Unlock()
 
 	// Check if OPRF is ready (complete, not needed, or failed)
-	oprfReady := isOPRFReadyT(teetState.OPRFState)
+	oprfReady := isOPRFReadyT(teetState.OPRFState.Load())
 
 	if teekFinished && oprfReady {
 		t.logger.Debug("TEE_K has sent finished and OPRF ready - starting transcript signing",
 			zap.String("session_id", sessionID),
-			zap.String("oprf_state", string(teetState.OPRFState)))
+			zap.String("oprf_state", shared.OPRFSessionState(teetState.OPRFState.Load()).String()))
 
 		// teetState already obtained above for OPRF check
 

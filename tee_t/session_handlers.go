@@ -302,6 +302,18 @@ func (t *TEET) handleBatchedEncryptedRequest(msg *shared.Message) error {
 		zap.Int("fragment_count", len(batchedReq.Fragments)),
 		zap.Uint64("base_seq_num", batchedReq.BaseSeqNum))
 
+	if len(batchedReq.Fragments) > shared.MaxEncryptedFragments {
+		err := fmt.Errorf("too many fragments: %d (max %d)", len(batchedReq.Fragments), shared.MaxEncryptedFragments)
+		t.terminateSessionWithError(sessionID, shared.ReasonProtocolViolation, err, "Too many fragments")
+		return err
+	}
+
+	if len(batchedReq.Commitments) > shared.MaxRedactionRanges {
+		err := fmt.Errorf("too many commitments: %d (max %d)", len(batchedReq.Commitments), shared.MaxRedactionRanges)
+		t.terminateSessionWithError(sessionID, shared.ReasonProtocolViolation, err, "Too many commitments")
+		return err
+	}
+
 	session, err := t.sessionManager.GetSession(sessionID)
 	if err != nil {
 		t.terminateSessionWithError(sessionID, shared.ReasonSessionNotFound, err, "Failed to get session")

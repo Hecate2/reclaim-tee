@@ -63,14 +63,6 @@ func (sm *SessionManager) SetLogger(logger *Logger) {
 
 // CreateSession creates a new session with secure UUID
 func (sm *SessionManager) CreateSession(clientConn Connection) (string, error) {
-	sm.mutex.Lock()
-	currentCount := len(sm.sessions)
-	sm.mutex.Unlock()
-
-	if currentCount >= MaxSessions {
-		return "", fmt.Errorf("maximum session limit reached (%d)", MaxSessions)
-	}
-
 	sessionID, err := uuid.NewRandom()
 	if err != nil {
 		return "", fmt.Errorf("failed to generate session ID: %w", err)
@@ -79,11 +71,11 @@ func (sm *SessionManager) CreateSession(clientConn Connection) (string, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	session := &Session{
-		ID:             sessionID.String(),
-		ClientConn:     clientConn,
-		CreatedAt:      time.Now(),
-		LastActiveAt:   time.Now(),
-		State:          SessionStateNew,
+		ID:           sessionID.String(),
+		ClientConn:   clientConn,
+		CreatedAt:    time.Now(),
+		LastActiveAt: time.Now(),
+		State:        SessionStateNew,
 		RedactionState: &RedactionSessionState{},
 		ResponseState: &ResponseSessionState{
 			PendingResponses:          make(map[string][]byte),
@@ -98,8 +90,15 @@ func (sm *SessionManager) CreateSession(clientConn Connection) (string, error) {
 	sm.mutex.Lock()
 	defer sm.mutex.Unlock()
 
+	if len(sm.sessions) >= MaxSessions {
+		cancel()
+		return "", fmt.Errorf("maximum session limit reached (%d)", MaxSessions)
+	}
+
 	sm.sessions[session.ID] = session
-	sm.sessionsByConn[clientConn] = session
+	if clientConn != nil {
+		sm.sessionsByConn[clientConn] = session
+	}
 
 	return session.ID, nil
 }
@@ -111,6 +110,10 @@ func (sm *SessionManager) RegisterSession(sessionID string) error {
 
 	if len(sm.sessions) >= MaxSessions {
 		return fmt.Errorf("maximum session limit reached (%d)", MaxSessions)
+	}
+
+	if _, exists := sm.sessions[sessionID]; exists {
+		return fmt.Errorf("session %s already registered", sessionID)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)

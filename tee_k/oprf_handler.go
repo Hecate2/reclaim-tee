@@ -24,7 +24,7 @@ func (t *TEEK) handleOPRFRangesFromClient(sessionID string, msg *teeproto.OPRFRa
 
 	// If no ranges, mark OPRF as not needed
 	if len(msg.GetRanges()) == 0 {
-		teekState.OPRFState = shared.OPRFStateNone
+		teekState.OPRFState.Store(int32(shared.OPRFStateNone))
 		t.logger.WithSession(sessionID).Debug("No OPRF ranges")
 		// Check if we can send signature now
 		t.checkAndSendSignatureIfReady(sessionID)
@@ -34,7 +34,7 @@ func (t *TEEK) handleOPRFRangesFromClient(sessionID string, msg *teeproto.OPRFRa
 	// Initialize OPRF state
 	teekState.OPRFRanges = msg.GetRanges()
 	teekState.ClientRangesReceived = true
-	teekState.OPRFState = shared.OPRFStateInProgress
+	teekState.OPRFState.Store(int32(shared.OPRFStateInProgress))
 	teekState.OPRFExpectedCount = len(msg.GetRanges())
 	teekState.GarblerOnlineSessions = make(map[int]*oprfmpc.CMACGarblerOnlineSession)
 	teekState.OPRFResults = make(map[int]*shared.OPRFResult)
@@ -61,7 +61,7 @@ func (t *TEEK) processQueuedOPRFRanges(sessionID string, teekState *TEEKSessionS
 	if !teekState.ClientRangesReceived || len(teekState.OPRFRanges) == 0 {
 		return nil // No ranges to process
 	}
-	if teekState.OPRFState != shared.OPRFStateInProgress {
+	if shared.OPRFSessionState(teekState.OPRFState.Load()) != shared.OPRFStateInProgress {
 		return nil // Already processed or not needed
 	}
 	if len(teekState.GarblerOnlineSessions) > 0 {
@@ -80,9 +80,10 @@ func (t *TEEK) processQueuedOPRFRanges(sessionID string, teekState *TEEKSessionS
 		if r.TlsStart < 0 || r.TlsLength <= 0 || r.TlsLength > 64 {
 			return fmt.Errorf("invalid range %d: start=%d length=%d", i, r.TlsStart, r.TlsLength)
 		}
-		if int(r.TlsStart+r.TlsLength) > len(teekState.ConsolidatedKeystream) {
+		rangeEnd := int(r.TlsStart) + int(r.TlsLength)
+		if rangeEnd > len(teekState.ConsolidatedKeystream) {
 			return fmt.Errorf("range %d exceeds keystream (end=%d, keystream_len=%d)",
-				i, r.TlsStart+r.TlsLength, len(teekState.ConsolidatedKeystream))
+				i, rangeEnd, len(teekState.ConsolidatedKeystream))
 		}
 
 		if err := t.initiateOPRFForRange(sessionID, teekState, i, r); err != nil {
@@ -102,7 +103,8 @@ func (t *TEEK) initiateOPRFForRange(sessionID string, teekState *TEEKSessionStat
 	}
 
 	// Extract keystream for range and build garbler input
-	keystream := teekState.ConsolidatedKeystream[r.TlsStart : r.TlsStart+r.TlsLength]
+	start := int(r.TlsStart)
+	keystream := teekState.ConsolidatedKeystream[start : start+int(r.TlsLength)]
 	paddedKeystream, err := oprfmpc.PadZeros64(keystream, int(r.TlsLength))
 	if err != nil {
 		return fmt.Errorf("failed to pad keystream: %w", err)
@@ -256,7 +258,7 @@ func (t *TEEK) buildOPRFOutputsForSigning(teekState *TEEKSessionState) []*teepro
 	// Get snapshot of results with lock
 	oprfResults := teekState.GetAllOPRFResults()
 
-	if teekState.OPRFState != shared.OPRFStateComplete || len(oprfResults) == 0 {
+	if shared.OPRFSessionState(teekState.OPRFState.Load()) != shared.OPRFStateComplete || len(oprfResults) == 0 {
 		return nil
 	}
 
@@ -286,9 +288,9 @@ func (t *TEEK) buildOPRFOutputsForSigning(teekState *TEEKSessionState) []*teepro
 
 // isOPRFReady checks if OPRF processing is complete or not needed
 // ZERO ERROR POLICY: Failed state is NOT ready - session should have been terminated
-func isOPRFReady(state shared.OPRFSessionState) bool {
-	return state == shared.OPRFStateNone ||
-		state == shared.OPRFStateComplete
+func isOPRFReady(state int32) bool {
+	s := shared.OPRFSessionState(state)
+	return s == shared.OPRFStateNone || s == shared.OPRFStateComplete
 }
 
 // handleCiphertextReady verifies ciphertext length matches keystream

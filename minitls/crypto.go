@@ -8,6 +8,7 @@ import (
 	"crypto/sha512"
 	"encoding/binary"
 	"fmt"
+	"math"
 
 	"hash"
 
@@ -326,6 +327,22 @@ func (a *AEAD) GetSequence() uint64 {
 	return a.seq
 }
 
+var ErrSequenceNumberOverflow = fmt.Errorf("sequence number overflow: must renegotiate connection")
+
+func (a *AEAD) EncryptChecked(plaintext, additionalData []byte) ([]byte, error) {
+	if a.seq == math.MaxUint64 {
+		return nil, ErrSequenceNumberOverflow
+	}
+	return a.Encrypt(plaintext, additionalData), nil
+}
+
+func (a *AEAD) DecryptChecked(ciphertext, additionalData []byte) ([]byte, error) {
+	if a.seq == math.MaxUint64 {
+		return nil, ErrSequenceNumberOverflow
+	}
+	return a.Decrypt(ciphertext, additionalData)
+}
+
 // CalculateServerFinishedVerifyData calculates the expected verify_data for server Finished message
 func (ks *KeySchedule) CalculateServerFinishedVerifyData(transcriptHash []byte) ([]byte, error) {
 	if ks.serverFinishedKey == nil {
@@ -376,6 +393,9 @@ func NewSplitAEAD(key, iv []byte, cipherSuite uint16) *SplitAEAD {
 
 // EncryptWithoutTag encrypts plaintext but doesn't compute the tag (TEE_K responsibility)
 func (sa *SplitAEAD) EncryptWithoutTag(plaintext, additionalData []byte) ([]byte, []byte, error) {
+	if sa.seq == math.MaxUint64 {
+		return nil, nil, ErrSequenceNumberOverflow
+	}
 	// Use cipher-suite-specific nonce construction
 	nonce := sa.constructNonce(sa.seq)
 

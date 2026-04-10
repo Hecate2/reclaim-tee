@@ -27,7 +27,7 @@ func (t *TEET) handleOPRFRangesFromClient(sessionID string, msg *teeproto.OPRFRa
 
 	// If no ranges, mark OPRF as not needed
 	if len(msg.GetRanges()) == 0 {
-		teetState.OPRFState = shared.OPRFStateNone
+		teetState.OPRFState.Store(int32(shared.OPRFStateNone))
 		t.logger.WithSession(sessionID).Debug("No OPRF ranges - skipping MPC OPRF")
 		// Check if we can finalize now
 		t.checkFinishedCondition(sessionID)
@@ -39,16 +39,17 @@ func (t *TEET) handleOPRFRangesFromClient(sessionID string, msg *teeproto.OPRFRa
 		if r.TlsStart < 0 || r.TlsLength <= 0 || r.TlsLength > 64 {
 			return fmt.Errorf("invalid range %d: start=%d length=%d", i, r.TlsStart, r.TlsLength)
 		}
-		if int(r.TlsStart+r.TlsLength) > len(teetState.ConsolidatedResponseCiphertext) {
+		rangeEnd := int(r.TlsStart) + int(r.TlsLength)
+		if rangeEnd > len(teetState.ConsolidatedResponseCiphertext) {
 			return fmt.Errorf("range %d exceeds ciphertext (end=%d, ciphertext_len=%d)",
-				i, r.TlsStart+r.TlsLength, len(teetState.ConsolidatedResponseCiphertext))
+				i, rangeEnd, len(teetState.ConsolidatedResponseCiphertext))
 		}
 	}
 
 	// Initialize OPRF state
 	teetState.ClientOPRFRanges = msg.GetRanges()
 	teetState.ClientRangesReceived = true
-	teetState.OPRFState = shared.OPRFStateInProgress
+	teetState.OPRFState.Store(int32(shared.OPRFStateInProgress))
 	teetState.OPRFExpectedCount = len(msg.GetRanges())
 	teetState.OPRFResults = make(map[int]*shared.OPRFResult)
 
@@ -121,7 +122,9 @@ func (t *TEET) handleOPRFOnlineFull(sessionID string, msg *teeproto.OPRFOnlineFu
 		zap.Int64("validation_ms", validationDone.Sub(startTime).Milliseconds()))
 
 	// Extract ciphertext for range
-	ciphertext := teetState.ConsolidatedResponseCiphertext[msg.TlsStart : msg.TlsStart+msg.TlsLength]
+	start := int(msg.TlsStart)
+	end := start + int(msg.TlsLength)
+	ciphertext := teetState.ConsolidatedResponseCiphertext[start:end]
 
 	// Pad to 64 bytes
 	paddedCiphertext, err := oprfmpc.PadZeros64(ciphertext, int(msg.TlsLength))
@@ -267,7 +270,7 @@ func (t *TEET) buildOPRFOutputsForSigning(teetState *TEETSessionState) []*teepro
 	// Get snapshot of results with lock
 	oprfResults := teetState.GetAllOPRFResults()
 
-	if teetState.OPRFState != shared.OPRFStateComplete || len(oprfResults) == 0 {
+	if shared.OPRFSessionState(teetState.OPRFState.Load()) != shared.OPRFStateComplete || len(oprfResults) == 0 {
 		return nil
 	}
 
@@ -297,7 +300,7 @@ func (t *TEET) buildOPRFOutputsForSigning(teetState *TEETSessionState) []*teepro
 
 // isOPRFReadyT checks if OPRF processing is complete or not needed
 // ZERO ERROR POLICY: Failed state is NOT ready - session should have been terminated
-func isOPRFReadyT(state shared.OPRFSessionState) bool {
-	return state == shared.OPRFStateNone ||
-		state == shared.OPRFStateComplete
+func isOPRFReadyT(state int32) bool {
+	s := shared.OPRFSessionState(state)
+	return s == shared.OPRFStateNone || s == shared.OPRFStateComplete
 }

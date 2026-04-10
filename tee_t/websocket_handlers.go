@@ -112,11 +112,11 @@ func (t *TEET) handleClientWebSocket(w http.ResponseWriter, r *http.Request) {
 
 				teetState, err := t.sessionManager.GetTEETSessionState(sessionID)
 				if err != nil {
-					teetState = &TEETSessionState{TEETClientConn: conn}
-					t.sessionManager.SetTEETSessionState(sessionID, teetState)
-				} else {
-					teetState.TEETClientConn = conn
+					t.logger.WithSession(sessionID).Error("TEETSessionState not found - session not registered via control connection", zap.Error(err))
+					t.terminateSessionWithError(sessionID, shared.ReasonSessionNotFound, err, "Session state not initialized")
+					break
 				}
+				teetState.TEETClientConn = conn
 				t.logger.Info("Session activated", zap.String("sid", shared.TruncateSessionID(sessionID)))
 			} else if msg.SessionID != sessionID {
 				err := fmt.Errorf("expected %s, got %s", sessionID, msg.SessionID)

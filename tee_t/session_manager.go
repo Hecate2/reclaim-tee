@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"maps"
 	"sync"
+	"sync/atomic"
 
 	teeproto "github.com/reclaimprotocol/reclaim-tee/proto"
 	"github.com/reclaimprotocol/reclaim-tee/shared"
@@ -26,7 +27,7 @@ type TEETSessionState struct {
 	ClientOPRFRanges     []*teeproto.OPRFRangeSpec  // Client-provided OPRF ranges
 	ClientRangesReceived bool                       // Whether client has sent ranges
 	OPRFResults          map[int]*shared.OPRFResult // Completed OPRF results by range index
-	OPRFState            shared.OPRFSessionState    // Current OPRF processing state
+	OPRFState            atomic.Int32               // Current OPRF processing state (shared.OPRFSessionState values)
 	OPRFExpectedCount    int                        // Number of OPRF results expected
 	TLSSessionHash       []byte                     // Cached TLS session hash for replay protection
 
@@ -125,11 +126,11 @@ func (s *TEETSessionState) GetOPRFResultCount() int {
 func (s *TEETSessionState) TryMarkOPRFComplete() bool {
 	s.oprfMu.Lock()
 	defer s.oprfMu.Unlock()
-	if s.OPRFState == shared.OPRFStateComplete {
+	if shared.OPRFSessionState(s.OPRFState.Load()) == shared.OPRFStateComplete {
 		return false // Already complete
 	}
 	if len(s.OPRFResults) >= s.OPRFExpectedCount {
-		s.OPRFState = shared.OPRFStateComplete
+		s.OPRFState.Store(int32(shared.OPRFStateComplete))
 		return true
 	}
 	return false

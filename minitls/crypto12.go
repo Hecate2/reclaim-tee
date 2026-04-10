@@ -5,6 +5,7 @@ import (
 	"crypto/cipher"
 	"encoding/binary"
 	"fmt"
+	"math"
 
 	"golang.org/x/crypto/chacha20poly1305"
 )
@@ -77,6 +78,9 @@ func getTLS12AEADKeyLengths(cipherSuite uint16) (keyLen int, ivLen int) {
 
 // Encrypt encrypts plaintext using TLS 1.2 AEAD as per RFC 5246 Section 6.2.3.3
 func (ctx *TLS12AEADContext) Encrypt(plaintext []byte, recordHeader []byte) ([]byte, error) {
+	if ctx.writeSeq == math.MaxUint64 {
+		return nil, ErrSequenceNumberOverflow
+	}
 	// Create AEAD instance using native Go crypto (not our TLS 1.3 implementation!)
 	var aead cipher.AEAD
 	var err error
@@ -156,6 +160,9 @@ func (ctx *TLS12AEADContext) Encrypt(plaintext []byte, recordHeader []byte) ([]b
 
 // Decrypt decrypts ciphertext using TLS 1.2 AEAD as per RFC 5246 Section 6.2.3.3
 func (ctx *TLS12AEADContext) Decrypt(ciphertext []byte, recordHeader []byte) ([]byte, error) {
+	if ctx.readSeq == math.MaxUint64 {
+		return nil, ErrSequenceNumberOverflow
+	}
 	// Create AEAD instance using native Go crypto (not our TLS 1.3 implementation!)
 	var aead cipher.AEAD
 	var err error
@@ -206,7 +213,11 @@ func (ctx *TLS12AEADContext) Decrypt(ciphertext []byte, recordHeader []byte) ([]
 			return nil, fmt.Errorf("AES-GCM ciphertext too short for explicit IV")
 		}
 		explicitIV := binary.BigEndian.Uint64(ciphertext[0:8])
-		// explicitIVBytes := ciphertext[0:8]
+
+		// RFC 5288 Section 3: explicit nonce MUST be the sequence number
+		if explicitIV != ctx.readSeq {
+			return nil, fmt.Errorf("explicit IV mismatch: expected seq %d, got %d", ctx.readSeq, explicitIV)
+		}
 
 		// 12-byte nonce = implicit_iv(4) || explicit_nonce(8)
 		nonce = make([]byte, 12)

@@ -150,18 +150,41 @@ const (
 )
 
 // OPRFSessionState represents the state of MPC OPRF processing for a session
-type OPRFSessionState string
+type OPRFSessionState int32
 
 const (
-	OPRFStateNone       OPRFSessionState = ""
-	OPRFStateInProgress OPRFSessionState = "in_progress"
-	OPRFStateComplete   OPRFSessionState = "complete"
-	OPRFStateFailed     OPRFSessionState = "failed"
+	OPRFStateNone       OPRFSessionState = 0
+	OPRFStateInProgress OPRFSessionState = 1
+	OPRFStateComplete   OPRFSessionState = 2
+	OPRFStateFailed     OPRFSessionState = 3
 )
+
+func (s OPRFSessionState) String() string {
+	switch s {
+	case OPRFStateNone:
+		return ""
+	case OPRFStateInProgress:
+		return "in_progress"
+	case OPRFStateComplete:
+		return "complete"
+	case OPRFStateFailed:
+		return "failed"
+	default:
+		return "unknown"
+	}
+}
 
 // MPC OPRF error reasons
 const (
 	ReasonOPRFEvaluationFailed = "oprf_evaluation_failed"
+)
+
+// Input size limits to prevent memory exhaustion attacks
+const (
+	MaxRedactionRanges         = 1000
+	MaxHTTPRequestSize         = 1 * 1024 * 1024
+	MaxEncryptedFragments      = 500
+	MaxResponseRedactionRanges = 1000
 )
 
 // OPRFResult holds the result of MPC OPRF computation for a single range

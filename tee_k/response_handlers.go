@@ -212,7 +212,7 @@ func (t *TEEK) checkAndSendSignatureIfReady(sessionID string) error {
 	signatureAlreadySent := session.SignatureSent
 
 	// Check if OPRF is ready (complete, not needed, or failed)
-	oprfReady := isOPRFReady(teekState.OPRFState)
+	oprfReady := isOPRFReady(teekState.OPRFState.Load())
 
 	// All processing is complete when:
 	// 1. We have transcript data (from finished message)

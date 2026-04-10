@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"maps"
 	"sync"
+	"sync/atomic"
 
 	"github.com/reclaimprotocol/reclaim-tee/minitls"
 	"github.com/reclaimprotocol/reclaim-tee/oprfmpc"
@@ -36,7 +37,7 @@ type TEEKSessionState struct {
 	GarblerOnlineSessions map[int]*oprfmpc.CMACGarblerOnlineSession // Per-range garbler sessions
 	OPRFRanges            []*teeproto.OPRFRangeSpec                 // Client-provided OPRF ranges
 	OPRFResults           map[int]*shared.OPRFResult                // Completed OPRF results by range index
-	OPRFState             shared.OPRFSessionState                   // Current OPRF processing state
+	OPRFState             atomic.Int32                              // Current OPRF processing state (shared.OPRFSessionState values)
 	OPRFExpectedCount     int                                       // Number of OPRF results expected
 	ClientRangesReceived  bool                                      // Whether client has sent ranges
 
@@ -143,11 +144,11 @@ func (s *TEEKSessionState) GetOPRFResultCount() int {
 func (s *TEEKSessionState) TryMarkOPRFComplete() bool {
 	s.oprfMu.Lock()
 	defer s.oprfMu.Unlock()
-	if s.OPRFState == shared.OPRFStateComplete {
+	if shared.OPRFSessionState(s.OPRFState.Load()) == shared.OPRFStateComplete {
 		return false // Already complete
 	}
 	if len(s.OPRFResults) >= s.OPRFExpectedCount {
-		s.OPRFState = shared.OPRFStateComplete
+		s.OPRFState.Store(int32(shared.OPRFStateComplete))
 		return true
 	}
 	return false
