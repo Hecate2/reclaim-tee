@@ -70,6 +70,24 @@ var logger *shared.Logger
 // Stores completed algorithm init status
 var pendingInits sync.Map
 
+// Last detailed error message for reclaim_get_error_message
+var lastErrorMu sync.Mutex
+var lastErrorMsg string
+
+func setLastError(msg string) {
+	lastErrorMu.Lock()
+	lastErrorMsg = msg
+	lastErrorMu.Unlock()
+}
+
+func getAndClearLastError() string {
+	lastErrorMu.Lock()
+	msg := lastErrorMsg
+	lastErrorMsg = ""
+	lastErrorMu.Unlock()
+	return msg
+}
+
 // ClaimData represents the JSON structure for claim data returned from attestor
 type ClaimData struct {
 	Identifier string `json:"identifier"`
@@ -92,6 +110,7 @@ func reclaim_execute_protocol(request_json *C.char, config_json *C.char, claim_j
 					zap.Any("panic", r),
 					zap.Stack("stack"))
 			}
+			setLastError(fmt.Sprintf("panic: %v", r))
 			retErr = C.RECLAIM_ERROR_PROTOCOL_FAILED
 		}
 	}()
@@ -119,6 +138,7 @@ func reclaim_execute_protocol(request_json *C.char, config_json *C.char, claim_j
 			zap.Bool("request_json_nil", request_json == nil),
 			zap.Bool("claim_json_nil", claim_json == nil),
 			zap.Bool("claim_length_nil", claim_length == nil))
+		setLastError("Invalid arguments: one or more required parameters is nil")
 		return C.RECLAIM_ERROR_INVALID_ARGS
 	}
 
@@ -135,6 +155,7 @@ func reclaim_execute_protocol(request_json *C.char, config_json *C.char, claim_j
 			zap.Error(err),
 			zap.String("request_json", goRequestJSON),
 			zap.String("config_json", goConfigJSON))
+		setLastError(fmt.Sprintf("Failed to create client: %v", err))
 		return C.RECLAIM_ERROR_INVALID_ARGS
 	}
 	defer reclaimClient.Close()
@@ -150,6 +171,7 @@ func reclaim_execute_protocol(request_json *C.char, config_json *C.char, claim_j
 	if err := json.Unmarshal([]byte(goRequestJSON), &providerData); err != nil {
 		logger.Error("Failed to parse provider params for logging",
 			zap.Error(err))
+		setLastError(fmt.Sprintf("Failed to parse provider params: %v", err))
 		return C.RECLAIM_ERROR_INVALID_ARGS
 	}
 
@@ -164,6 +186,7 @@ func reclaim_execute_protocol(request_json *C.char, config_json *C.char, claim_j
 		logger.Error("Complete protocol execution failed",
 			zap.Error(err),
 			zap.String("provider", providerData.Name))
+		setLastError(err.Error())
 		return C.RECLAIM_ERROR_PROTOCOL_FAILED
 	}
 
@@ -181,6 +204,7 @@ func reclaim_execute_protocol(request_json *C.char, config_json *C.char, claim_j
 	// Signature are required
 	if result.Signature == nil {
 		logger.Error("No signatures returned from attestor")
+		setLastError("No signatures returned from attestor")
 		return C.RECLAIM_ERROR_PROTOCOL_FAILED
 	}
 
@@ -213,6 +237,7 @@ func reclaim_execute_protocol(request_json *C.char, config_json *C.char, claim_j
 	jsonData, err := json.Marshal(response)
 	if err != nil {
 		logger.Error("Failed to marshal claim response", zap.Error(err))
+		setLastError(fmt.Sprintf("Failed to marshal response: %v", err))
 		return C.RECLAIM_ERROR_MEMORY
 	}
 
@@ -246,6 +271,13 @@ func reclaim_get_error_message(error C.reclaim_error_t) (result *C.char) {
 			result = C.CString("Internal error occurred")
 		}
 	}()
+
+	// Return detailed error if available (consumed on read)
+	if detail := getAndClearLastError(); detail != "" {
+		return C.CString(detail)
+	}
+
+	// Fallback to generic message
 	var message string
 	switch error {
 	case C.RECLAIM_SUCCESS:
