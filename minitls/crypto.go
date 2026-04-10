@@ -433,17 +433,17 @@ func (sa *SplitAEAD) EncryptWithoutTag(plaintext, additionalData []byte) ([]byte
 		// ChaCha20-Poly1305 case: encrypt with ChaCha20 stream directly
 
 		// Create ChaCha20 cipher
-		cipher, err := chacha20.NewUnauthenticatedCipher(sa.key, nonce)
+		cphr, err := chacha20.NewUnauthenticatedCipher(sa.key, nonce)
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to create ChaCha20 cipher: %v", err)
 		}
 
 		// Set counter to 1 for data encryption (counter 0 is reserved for Poly1305 key)
-		cipher.SetCounter(1)
+		cphr.SetCounter(1)
 
 		// Encrypt plaintext using ChaCha20
 		ciphertext = make([]byte, len(plaintext))
-		cipher.XORKeyStream(ciphertext, plaintext)
+		cphr.XORKeyStream(ciphertext, plaintext)
 
 		// Generate tag computation material for ChaCha20-Poly1305:
 		// First 32 bytes of the Stream Block derived using key K, nonce N and counter 0
@@ -598,11 +598,6 @@ func GenerateDecryptionStreamWithNonce(key, iv []byte, seqNum uint64, length int
 	return stream, nonce, nil
 }
 
-func GenerateDecryptionStream(key, iv []byte, seqNum uint64, length int, cipherSuite uint16, explicitIV []byte) ([]byte, error) {
-	stream, _, err := GenerateDecryptionStreamWithNonce(key, iv, seqNum, length, cipherSuite, explicitIV)
-	return stream, err
-}
-
 // GenerateAESKeystream generates AES-CTR keystream using a nonce
 func GenerateAESKeystream(key, nonce []byte, length int) ([]byte, error) {
 	return generateAESDecryptionStream(key, nonce, length)
@@ -720,19 +715,19 @@ func generateChaCha20DecryptionStream(key, nonce []byte, length int) ([]byte, er
 // generateChaChaTagSecrets generates tag computation material for ChaCha20-Poly1305
 // Returns first 32 bytes of the Stream Block derived using key K, nonce N and counter 0
 func (sa *SplitAEAD) generateChaChaTagSecrets(nonce []byte) []byte {
-	cipher, err := chacha20.NewUnauthenticatedCipher(sa.key, nonce)
+	cphr, err := chacha20.NewUnauthenticatedCipher(sa.key, nonce)
 	if err != nil {
 		// This should not happen with valid key/nonce lengths
 		return nil
 	}
 
 	// Set counter to 0 for Poly1305 key generation
-	cipher.SetCounter(0)
+	cphr.SetCounter(0)
 
 	// Get first 32 bytes of keystream (counter 0) for Poly1305 key
 	poly1305Key := make([]byte, 32)
 	zeros := make([]byte, 32)
-	cipher.XORKeyStream(poly1305Key, zeros)
+	cphr.XORKeyStream(poly1305Key, zeros)
 
 	return poly1305Key
 }
