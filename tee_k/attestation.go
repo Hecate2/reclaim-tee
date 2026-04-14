@@ -54,11 +54,18 @@ func (t *TEEK) refreshAttestation() error {
 	// Get ETH address for this key pair
 	ethAddress := t.signingKeyPair.GetEthAddress()
 
-	// Create user data containing the ETH address
-	userData := fmt.Sprintf("tee_k_public_key:%s", ethAddress.Hex())
+	// Get TLS certificate hash to bind attestation to our TLS identity
+	tlsCert, err := t.enclaveManager.GetCertificateRaw()
+	if err != nil {
+		return fmt.Errorf("failed to get TLS certificate: %v", err)
+	}
+	certHash := sha256.Sum256(tlsCert)
 
-	// Generate attestation document using enclave manager
-	attestationDoc, err := t.enclaveManager.GenerateAttestation(context.Background(), []byte(userData))
+	// Generate attestation with public key and cert hash as separate nonces
+	publicKeyNonce := fmt.Sprintf("tee_k_public_key:%s", ethAddress.Hex())
+	certHashNonce := fmt.Sprintf("tee_k_cert_hash:%x", certHash[:])
+
+	attestationDoc, err := t.enclaveManager.GenerateAttestation(context.Background(), publicKeyNonce, certHashNonce)
 	if err != nil {
 		return fmt.Errorf("failed to generate attestation: %v", err)
 	}
@@ -129,11 +136,19 @@ func (t *TEEK) generateAttestationForTEET() (*teeproto.AttestationReport, error)
 		}, nil
 	}
 
-	// Enclave mode: generate real attestation with eth address in userData
+	// Enclave mode: generate attestation with eth address and cert hash in userData
 	ethAddress := t.signingKeyPair.GetEthAddress()
-	userData := fmt.Sprintf("tee_k_public_key:%s", ethAddress.Hex())
 
-	attestationDoc, err := t.enclaveManager.GenerateAttestation(context.Background(), []byte(userData))
+	tlsCert, err := t.enclaveManager.GetCertificateRaw()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get TLS certificate: %v", err)
+	}
+	certHash := sha256.Sum256(tlsCert)
+
+	publicKeyNonce := fmt.Sprintf("tee_k_public_key:%s", ethAddress.Hex())
+	certHashNonce := fmt.Sprintf("tee_k_cert_hash:%x", certHash[:])
+
+	attestationDoc, err := t.enclaveManager.GenerateAttestation(context.Background(), publicKeyNonce, certHashNonce)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate attestation: %v", err)
 	}

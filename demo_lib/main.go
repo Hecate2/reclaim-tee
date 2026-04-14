@@ -246,9 +246,9 @@ func main() {
 	// - teetUrl: wss://tee-t.reclaimprotocol.org/ws (enclave mode)
 	// - attestorUrl: ws://localhost:8001/ws
 	configData := map[string]interface{}{
-		"attestorUrl": "ws://localhost:8001/ws", // Attestor WebSocket URL
-		"teekUrl":     "wss://tk.reclaimprotocol.org/ws",
-		"teetUrl":     "wss://tt.reclaimprotocol.org/ws",
+		"attestorUrl": "wss://attestor.reclaimprotocol.org:444/ws", // Attestor WebSocket URL
+		"teekUrl":     "wss://eu.tk.reclaimprotocol.org/ws",
+		"teetUrl":     "wss://eu.tt.reclaimprotocol.org/ws",
 	}
 
 	providerJSON, err := json.Marshal(providerData)

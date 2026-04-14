@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -164,11 +165,18 @@ func setupEnclaveRoutes(teek *TEEK, enclaveManager *shared.EnclaveManager, logge
 
 		ethAddress := teek.signingKeyPair.GetEthAddress()
 
-		// Create user data containing the ETH address
-		userData := fmt.Sprintf("tee_k_public_key:%s", ethAddress.Hex())
-		logger.Debug("Including ETH address in attestation")
+		// Include both public key and cert hash in attestation userData
+		tlsCert, err := enclaveManager.GetCertificateRaw()
+		if err != nil {
+			logger.Error("Failed to get TLS certificate for attestation", zap.Error(err))
+			http.Error(w, "Failed to get TLS certificate", http.StatusInternalServerError)
+			return
+		}
+		certHash := sha256.Sum256(tlsCert)
+		publicKeyNonce := fmt.Sprintf("tee_k_public_key:%s", ethAddress.Hex())
+		certHashNonce := fmt.Sprintf("tee_k_cert_hash:%x", certHash[:])
 
-		attestationDoc, err := enclaveManager.GenerateAttestation(r.Context(), []byte(userData))
+		attestationDoc, err := enclaveManager.GenerateAttestation(r.Context(), publicKeyNonce, certHashNonce)
 		if err != nil {
 			logger.Error("Attestation generation failed", zap.Error(err))
 			http.Error(w, "Failed to generate attestation", http.StatusInternalServerError)

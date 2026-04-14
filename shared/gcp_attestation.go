@@ -13,9 +13,8 @@ import (
 	"time"
 )
 
-func GenerateGCPAttestation(ctx context.Context, userData []byte) ([]byte, error) {
-	// Request a custom attestation token with nonce containing the ETH address
-	// This binds the ETH address to the attestation via the eat_nonce claim
+func GenerateGCPAttestation(ctx context.Context, nonces ...string) ([]byte, error) {
+	// Request a custom attestation token with nonces bound to the attestation via eat_nonce claim
 	socketPath := "/run/container_launcher/teeserver.sock"
 
 	client := &http.Client{
@@ -27,14 +26,15 @@ func GenerateGCPAttestation(ctx context.Context, userData []byte) ([]byte, error
 		Timeout: 10 * time.Second,
 	}
 
-	// Ensure nonce is within required length (8-88 bytes per GCP documentation)
-	nonce := string(userData)
-	if len(nonce) < 8 {
-		// Pad if too short (minimum 8 bytes)
-		nonce = fmt.Sprintf("%s%s", nonce, "        ")[:8]
-	} else if len(nonce) > 88 {
-		// Truncate if too long (maximum 88 bytes)
-		nonce = nonce[:88]
+	// Ensure each nonce is within required length (8-88 bytes per GCP documentation)
+	validated := make([]string, len(nonces))
+	for i, nonce := range nonces {
+		if len(nonce) < 8 {
+			nonce = fmt.Sprintf("%s%s", nonce, "        ")[:8]
+		} else if len(nonce) > 88 {
+			nonce = nonce[:88]
+		}
+		validated[i] = nonce
 	}
 
 	// Create POST request with JSON body
@@ -42,7 +42,7 @@ func GenerateGCPAttestation(ctx context.Context, userData []byte) ([]byte, error
 	requestBody := map[string]any{
 		"audience":   "https://reclaimprotocol.org",
 		"token_type": "PKI",
-		"nonces":     []string{nonce},
+		"nonces":     validated,
 	}
 
 	jsonBody, err := json.Marshal(requestBody)

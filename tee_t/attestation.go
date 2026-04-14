@@ -44,7 +44,7 @@ func (t *TEET) refreshAttestation() error {
 	ethAddress := t.signingKeyPair.GetEthAddress()
 	userData := fmt.Sprintf("tee_t_public_key:%s", ethAddress.Hex())
 
-	raw, err := t.enclaveManager.GenerateAttestation(context.Background(), []byte(userData))
+	raw, err := t.enclaveManager.GenerateAttestation(context.Background(), userData)
 	if err != nil {
 		return fmt.Errorf("failed to generate attestation: %v", err)
 	}
@@ -117,7 +117,7 @@ func (t *TEET) generateAttestationForTEEK() (*teeproto.AttestationReport, error)
 	t.logger.Debug("Generating attestation for TEE_K",
 		zap.Int("cert_bytes", len(tlsCert)))
 
-	attestationDoc, err := t.enclaveManager.GenerateAttestation(context.Background(), []byte(userData))
+	attestationDoc, err := t.enclaveManager.GenerateAttestation(context.Background(), userData)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate attestation: %v", err)
 	}

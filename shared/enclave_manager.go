@@ -249,9 +249,9 @@ func (em *EnclaveManager) CreateHTTPSServer(handler http.Handler) HTTPSServer {
 	}
 }
 
-// GenerateAttestation creates a GCP attestation document with optional user data
-func (em *EnclaveManager) GenerateAttestation(ctx context.Context, userData []byte) ([]byte, error) {
-	return GenerateGCPAttestation(ctx, userData)
+// GenerateAttestation creates a GCP attestation document with nonces bound to eat_nonce claim
+func (em *EnclaveManager) GenerateAttestation(ctx context.Context, nonces ...string) ([]byte, error) {
+	return GenerateGCPAttestation(ctx, nonces...)
 }
 
 // GetConfig returns the enclave configuration
