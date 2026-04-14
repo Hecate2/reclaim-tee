@@ -96,7 +96,7 @@ func NewTEEKWithEnclaveManager(port int, enclaveManager *shared.EnclaveManager) 
 	}
 	logger.Info("Initialized cached certificate fetcher", zap.String("mode", func() string {
 		if enclaveManager != nil {
-			return "vsock"
+			return "enclave"
 		}
 		return "http"
 	}()))

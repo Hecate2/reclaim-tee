@@ -260,7 +260,7 @@ func (x *TOutputPayload) GetOprfOutputs() []*OPRFOutput {
 // Attestation report with structured data
 type AttestationReport struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	Type          string                 `protobuf:"bytes,1,opt,name=type,proto3" json:"type,omitempty"`     // "nitro" or "gcp"
+	Type          string                 `protobuf:"bytes,1,opt,name=type,proto3" json:"type,omitempty"`     // "gcp"
 	Report        []byte                 `protobuf:"bytes,2,opt,name=report,proto3" json:"report,omitempty"` // raw provider-specific attestation bytes
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache

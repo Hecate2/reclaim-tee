@@ -63,15 +63,9 @@ func (t *TEEK) refreshAttestation() error {
 		return fmt.Errorf("failed to generate attestation: %v", err)
 	}
 
-	// Determine attestation type from platform
-	attestationType := "nitro"
-	if t.enclaveManager.GetConfig().Platform.Platform == "gcp" {
-		attestationType = "gcp"
-	}
-
 	// Create structured report
 	attestationReport := &teeproto.AttestationReport{
-		Type:   attestationType,
+		Type:   "gcp",
 		Report: attestationDoc,
 	}
 
@@ -144,13 +138,8 @@ func (t *TEEK) generateAttestationForTEET() (*teeproto.AttestationReport, error)
 		return nil, fmt.Errorf("failed to generate attestation: %v", err)
 	}
 
-	attestationType := "nitro"
-	if t.enclaveManager.GetConfig().Platform.Platform == "gcp" {
-		attestationType = "gcp"
-	}
-
 	return &teeproto.AttestationReport{
-		Type:   attestationType,
+		Type:   "gcp",
 		Report: attestationDoc,
 	}, nil
 }

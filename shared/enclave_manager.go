@@ -19,7 +19,7 @@ import (
 // EnclaveManager provides production-ready enclave functionality for GCP
 type EnclaveManager struct {
 	config      *EnclaveConfig
-	certManager *VSockLegoManager
+	certManager *LegoManager
 	cache       *EnclaveCache
 	kmsProvider KMSProvider
 	logger      *Logger
@@ -108,7 +108,7 @@ func NewEnclaveManager(ctx context.Context, config *EnclaveConfig, kmsKeyID stri
 		logger = GetTEEKLogger() // Default fallback
 	}
 
-	certManager, err := NewVSockLegoManager(ctx, &LegoVSockConfig{
+	certManager, err := NewLegoManager(ctx, &LegoConfig{
 		Domain:      config.Domain,
 		Email:       "alex@reclaimprotocol.org",
 		CADirURL:    acmeURL,
@@ -183,7 +183,7 @@ func (em *EnclaveManager) BootstrapCertificates(ctx context.Context) error {
 
 	httpServer := &http.Server{
 		Addr:    fmt.Sprintf(":%d", em.config.HTTPPort),
-		Handler: em.certManager.CreateVSockHTTPHandler(nil),
+		Handler: em.certManager.CreateHTTPHandler(nil),
 	}
 
 	serverErrChan := make(chan error, 1)
@@ -307,7 +307,7 @@ func (em *EnclaveManager) startHTTPServerForRenewal(ctx context.Context) error {
 	// GCP: Standard HTTP server
 	server := &http.Server{
 		Addr:    fmt.Sprintf(":%d", em.config.HTTPPort),
-		Handler: em.certManager.CreateVSockHTTPHandler(nil),
+		Handler: em.certManager.CreateHTTPHandler(nil),
 	}
 
 	go func() {

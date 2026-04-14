@@ -14,7 +14,7 @@ const (
 )
 
 // CertificateFetcher is an interface for fetching certificates from URLs.
-// Implementations can use HTTP, VSOCK proxy, or any other transport mechanism.
+// Implementations can use HTTP or any other transport mechanism.
 //
 // For production use, wrap your fetcher with CachedCertificateFetcher to enable
 // automatic caching with 1 week TTL and LRU eviction:

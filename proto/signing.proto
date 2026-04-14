@@ -44,7 +44,7 @@ message TOutputPayload {
 
 // Attestation report with structured data
 message AttestationReport {
-  string type = 1; // "nitro" or "gcp"
+  string type = 1; // "gcp"
   bytes report = 2; // raw provider-specific attestation bytes
 }
 
