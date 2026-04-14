@@ -42,9 +42,17 @@ func (t *TEET) refreshAttestation() error {
 		return nil
 	}
 	ethAddress := t.signingKeyPair.GetEthAddress()
-	userData := fmt.Sprintf("tee_t_public_key:%s", ethAddress.Hex())
 
-	raw, err := t.enclaveManager.GenerateAttestation(context.Background(), userData)
+	tlsCert, err := t.enclaveManager.GetCertificateRaw()
+	if err != nil {
+		return fmt.Errorf("failed to get TLS certificate: %v", err)
+	}
+	certHash := sha256.Sum256(tlsCert)
+
+	publicKeyNonce := fmt.Sprintf("tee_t_public_key:%s", ethAddress.Hex())
+	certHashNonce := fmt.Sprintf("tee_t_cert_hash:%x", certHash[:])
+
+	raw, err := t.enclaveManager.GenerateAttestation(context.Background(), publicKeyNonce, certHashNonce)
 	if err != nil {
 		return fmt.Errorf("failed to generate attestation: %v", err)
 	}

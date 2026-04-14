@@ -2,12 +2,16 @@ package client
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"slices"
 	"sort"
+	"strings"
 
+	"github.com/gorilla/websocket"
 	"github.com/reclaimprotocol/reclaim-tee/minitls"
 	teeproto "github.com/reclaimprotocol/reclaim-tee/proto"
 	"github.com/reclaimprotocol/reclaim-tee/providers"
@@ -316,6 +320,143 @@ func stripUnsignedFields(msg *teeproto.SignedMessage) *teeproto.SignedMessage {
 	}
 }
 
+// extractCertHashFromAttestation extracts a cert hash nonce from a GCP attestation JWT.
+// The JWT's eat_nonce claim may be a string or array; this searches for a nonce matching
+// the given prefix (e.g. "tee_k_cert_hash:") and returns the hex hash value.
+// Returns "" if no cert hash nonce is found (e.g. older TEE without cert hash support).
+func extractCertHashFromAttestation(attestation *teeproto.AttestationReport, prefix string) string {
+	if attestation == nil || len(attestation.Report) == 0 {
+		return ""
+	}
+
+	// Parse JWT payload (second segment) without full validation --
+	// signature verification is the attestor's responsibility.
+	tokenStr := strings.TrimSpace(string(attestation.Report))
+	parts := strings.Split(tokenStr, ".")
+	if len(parts) != 3 {
+		return ""
+	}
+
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return ""
+	}
+
+	var claims map[string]any
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return ""
+	}
+
+	eatNonceRaw, ok := claims["eat_nonce"]
+	if !ok {
+		return ""
+	}
+
+	// Collect nonces from either string or array format
+	var nonces []string
+	switch v := eatNonceRaw.(type) {
+	case string:
+		nonces = []string{v}
+	case []any:
+		for _, item := range v {
+			if s, ok := item.(string); ok {
+				nonces = append(nonces, s)
+			}
+		}
+	}
+
+	for _, nonce := range nonces {
+		if strings.HasPrefix(nonce, prefix) {
+			return strings.TrimPrefix(nonce, prefix)
+		}
+	}
+
+	return ""
+}
+
+// peerCertHash extracts the SHA256 hash of the peer TLS certificate from a WebSocket connection.
+// Returns "", nil if the connection is not TLS (e.g. standalone ws://, or mobile native networking).
+func peerCertHash(conn *websocket.Conn) (string, error) {
+	if conn == nil {
+		return "", nil
+	}
+
+	tlsConn, ok := conn.NetConn().(*tls.Conn)
+	if !ok {
+		// Not a TLS connection (standalone mode or mobile native bridge)
+		return "", nil
+	}
+
+	state := tlsConn.ConnectionState()
+	if len(state.PeerCertificates) == 0 {
+		return "", fmt.Errorf("TLS connection has no peer certificates")
+	}
+
+	hash := sha256.Sum256(state.PeerCertificates[0].Raw)
+	return fmt.Sprintf("%x", hash[:]), nil
+}
+
+// verifyAttestationCertHashes checks that the TLS certificate hashes in each TEE's attestation
+// match the actual TLS certificates on the client's WebSocket connections.
+// Skipped when: no attestation reports (standalone mode), or no TLS state available (mobile).
+func (c *Client) verifyAttestationCertHashes() error {
+	// TEE_K cert hash verification
+	if err := c.verifyOneCertHash(
+		c.teekSignedMessage.GetAttestationReport(),
+		c.wsConn,
+		"tee_k_cert_hash:",
+		"TEE_K",
+	); err != nil {
+		return err
+	}
+
+	// TEE_T cert hash verification
+	if err := c.verifyOneCertHash(
+		c.teetSignedMessage.GetAttestationReport(),
+		c.teetConn,
+		"tee_t_cert_hash:",
+		"TEE_T",
+	); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// verifyOneCertHash verifies a single TEE's attestation cert hash against the connection's peer cert.
+func (c *Client) verifyOneCertHash(attestation *teeproto.AttestationReport, conn *websocket.Conn, noncePrefix string, teeName string) error {
+	// No attestation report means standalone mode -- skip
+	if attestation == nil {
+		c.logger.Debug("No attestation report, skipping cert hash check", zap.String("tee", teeName))
+		return nil
+	}
+
+	attestedHash := extractCertHashFromAttestation(attestation, noncePrefix)
+	if attestedHash == "" {
+		// Both TEEs should include cert hashes. If missing, the attestation may be from
+		// an older deployment or malformed -- log a warning but don't block the session.
+		c.logger.Warn("No cert hash in attestation", zap.String("tee", teeName))
+		return nil
+	}
+
+	connHash, err := peerCertHash(conn)
+	if err != nil {
+		return fmt.Errorf("%s cert hash verification failed: %v", teeName, err)
+	}
+	if connHash == "" {
+		// No TLS state available (mobile native networking or ws://) -- skip
+		c.logger.Debug("No TLS state available, skipping cert hash check", zap.String("tee", teeName))
+		return nil
+	}
+
+	if attestedHash != connHash {
+		return fmt.Errorf("%s certificate mismatch: attestation cert hash does not match TLS connection certificate", teeName)
+	}
+
+	c.logger.Info("Attestation cert hash verified", zap.String("tee", teeName))
+	return nil
+}
+
 // buildVerificationBundle creates the actual verification bundle
 // SECURITY: This function validates that required data is present before creating bundle
 func (c *Client) buildVerificationBundle() ([]byte, error) {
@@ -327,6 +468,13 @@ func (c *Client) buildVerificationBundle() ([]byte, error) {
 	}
 	if c.teetSignedMessage == nil {
 		return nil, fmt.Errorf("SECURITY ERROR: missing TEE_T signed message - protocol incomplete")
+	}
+
+	// SECURITY: Verify attestation cert hashes match the TLS certificates on our connections.
+	// This binds the attestation to the specific TLS channel, preventing certificate substitution.
+	// Skipped in standalone mode (no attestation reports) and on mobile (no access to TLS state).
+	if err := c.verifyAttestationCertHashes(); err != nil {
+		return nil, fmt.Errorf("SECURITY ERROR: %v", err)
 	}
 
 	// TEE_K signed message (K_OUTPUT) - strip unsigned metadata fields before sending to attestor
