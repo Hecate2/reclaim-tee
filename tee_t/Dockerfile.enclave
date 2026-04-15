@@ -42,9 +42,14 @@ ENV MPCLDIR=/mpcl
 # This is required for GCP Confidential Space
 ENV EXPECTED_TEEK_PCR0=""
 ENV ENCLAVE_DOMAIN=""
+ENV GOOGLE_PROJECT_ID=""
+ENV GOOGLE_KMS_LOCATION=""
+ENV GOOGLE_KMS_KEYRING=""
+ENV GOOGLE_KMS_KEY=""
+ENV GCP_PROJECT_ID=""
 
 # GCP Confidential Space launch policy: allow these env vars to be overridden
-LABEL "tee.launch_policy.allow_env_override"="EXPECTED_TEEK_PCR0,ENCLAVE_DOMAIN"
+LABEL "tee.launch_policy.allow_env_override"="EXPECTED_TEEK_PCR0,ENCLAVE_DOMAIN,GOOGLE_PROJECT_ID,GOOGLE_KMS_LOCATION,GOOGLE_KMS_KEYRING,GOOGLE_KMS_KEY,GCP_PROJECT_ID"
 
 # Expose ports
 EXPOSE 80 443
