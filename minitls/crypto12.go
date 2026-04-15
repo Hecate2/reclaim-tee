@@ -214,10 +214,9 @@ func (ctx *TLS12AEADContext) Decrypt(ciphertext []byte, recordHeader []byte) ([]
 		}
 		explicitIV := binary.BigEndian.Uint64(ciphertext[0:8])
 
-		// RFC 5288 Section 3: explicit nonce MUST be the sequence number
-		if explicitIV != ctx.readSeq {
-			return nil, fmt.Errorf("explicit IV mismatch: expected seq %d, got %d", ctx.readSeq, explicitIV)
-		}
+		// RFC 5288 Section 3: the explicit nonce SHOULD be the sequence number,
+		// but many servers use random values. AEAD authentication ensures integrity
+		// regardless of the explicit IV value, so we accept whatever the server sends.
 
 		// 12-byte nonce = implicit_iv(4) || explicit_nonce(8)
 		nonce = make([]byte, 12)
