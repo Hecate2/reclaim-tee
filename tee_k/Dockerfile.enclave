@@ -18,7 +18,7 @@ COPY --chown=0:0 go.sum /app/go.sum
 WORKDIR /app/tee_k
 
 # Build TEE_K enclave binary
-RUN go build -trimpath -buildvcs=false --ldflags '-s -w -buildid= -extldflags=-static' -tags 'enclave osusergo netgo static_build' -o tee_k_enclave .
+RUN go build -trimpath --ldflags '-s -w -buildid= -extldflags=-static' -tags 'enclave osusergo netgo static_build' -o tee_k_enclave .
 
 # Copy MPC pkg directory for runtime circuit compilation
 RUN mkdir -p /mpcl && cp -r $(go env GOMODCACHE)/github.com/markkurossi/mpc@*/pkg /mpcl/
