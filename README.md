@@ -392,4 +392,58 @@ go vet ./...
 **ZK circuit errors:**
 - Verify `circuits/` directory contains required proving key and R1CS files
 - Check that .pk and .r1cs files exist for configured algorithms
-- Ensure sufficient memory for proof generation 
+- Ensure sufficient memory for proof generation
+
+## Reproducible Builds & Image Verification
+
+TEE image digests serve as the enclave identity (PCR0 equivalent) in GCP Confidential Space. Clients validate claims against these digests. The build system produces identical image hashes from identical source code, allowing anyone to verify that deployed images match the public source.
+
+### Verifying Production Images
+
+Clone the repo and run:
+
+```bash
+./deploy/verify.sh
+```
+
+This rebuilds both `tee-k` and `tee-t` from source using the same pinned BuildKit, Go version, and `SOURCE_DATE_EPOCH` recorded in `deploy/image-history.json`, then compares the resulting digests. No GCP credentials required.
+
+**Requirements:**
+- Docker with buildx
+- Python 3
+
+### Current Production Digests
+
+See [`deploy/image-history.json`](deploy/image-history.json) for the current and historical image digests, including the source commit and epoch used for each build.
+
+### How It Works
+
+- **Pinned base image:** `golang:alpine` pinned by platform-specific digest in both Dockerfiles
+- **Deterministic Go build:** `-trimpath -buildvcs=false -buildid=` eliminates host-dependent artifacts
+- **Timestamp clamping:** `SOURCE_DATE_EPOCH` + BuildKit `rewrite-timestamp` ensures identical layer timestamps
+- **File mtime normalization:** All source files are touched to the epoch before building
+- **Pinned BuildKit:** Builder uses a digest-pinned `moby/buildkit` image with `native` snapshotter
+- **No network-dependent steps:** No `apk add` or package downloads in the final image stage
+- **`crane push`:** Preserves the exact OCI digest from the local build when pushing to the registry
+
+### Build & Deploy Workflow
+
+```bash
+# 1. Build (uses HEAD commit epoch by default)
+./deploy/build.sh v2
+
+# 2. Deploy
+./deploy/update-eu.sh all
+./deploy/update-prod.sh all
+
+# 3. Record digests
+./deploy/update-image-history.sh
+
+# 4. Commit image-history.json
+```
+
+To rebuild from a specific commit (e.g. after committing image-history.json):
+
+```bash
+./deploy/build.sh v2 <commit-hash>
+``` 
