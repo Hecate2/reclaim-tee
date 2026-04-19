@@ -4,21 +4,21 @@
     "tags": [
       "v2"
     ],
-    "version": "sha256:39c2621a44b846fba424b2819daa08ffa2d354b0c2ab9de5506b34cebf1374ef",
-    "createTime": "2026-04-19 14:47:18+05:00",
-    "updateTime": "2026-04-19 14:47:18+05:00",
-    "sourceCommit": "2d07455a138114d445fbca3b25ff349e735bff9d",
-    "sourceDateEpoch": 1776592038
+    "version": "sha256:3cb68444332a572d3dcc2bf65d49139af10a55005b4fde470ce6a064861d2ae9",
+    "createTime": "2026-04-19 15:04:40+05:00",
+    "updateTime": "2026-04-19 15:04:40+05:00",
+    "sourceCommit": "1b30da1c81e8cc7ff04fd284a41f5af0f04fcb83",
+    "sourceDateEpoch": 1776593080
   },
   {
     "package": "gcr.io/new-reclaim-architecture/tee-t",
     "tags": [
       "v2"
     ],
-    "version": "sha256:e77ee552ad8f758b9405b38e2450297509bd95841f6fc8cc5ab5280fbc59d3a8",
-    "createTime": "2026-04-19 14:47:18+05:00",
-    "updateTime": "2026-04-19 14:47:18+05:00",
-    "sourceCommit": "2d07455a138114d445fbca3b25ff349e735bff9d",
-    "sourceDateEpoch": 1776592038
+    "version": "sha256:78f72c444cbd3346cd75d1614796ef543698cdce5dc701d9874b66f8b63e6e4f",
+    "createTime": "2026-04-19 15:04:40+05:00",
+    "updateTime": "2026-04-19 15:04:40+05:00",
+    "sourceCommit": "1b30da1c81e8cc7ff04fd284a41f5af0f04fcb83",
+    "sourceDateEpoch": 1776593080
   }
 ]
