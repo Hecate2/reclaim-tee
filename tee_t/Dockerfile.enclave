@@ -2,7 +2,6 @@
 # Go 1.26.2 / Alpine 3.21 -- update digest when upgrading Go
 FROM golang:alpine@sha256:f85330846cde1e57ca9ec309382da3b8e6ae3ab943d2739500e08c86393a21b1 AS app-builder
 ENV CGO_ENABLED=0
-RUN apk add --no-cache --update ca-certificates
 WORKDIR /app
 
 # Copy shared dependencies first
