@@ -1,1 +1,24 @@
-[]
+[
+  {
+    "package": "gcr.io/new-reclaim-architecture/tee-k",
+    "tags": [
+      "v2"
+    ],
+    "version": "sha256:3754b3d250a7f3ccfbd7dc891e9c1978c01d2d84d7ea8815519da914be6602d0",
+    "createTime": "2026-04-19 13:48:25+05:00",
+    "updateTime": "2026-04-19 13:48:25+05:00",
+    "sourceCommit": "90c5262d2cefa0e33a035aa0f7b11300bb4d53c3",
+    "sourceDateEpoch": 1776588505
+  },
+  {
+    "package": "gcr.io/new-reclaim-architecture/tee-t",
+    "tags": [
+      "v2"
+    ],
+    "version": "sha256:c8ff8bbbbe802d0ffee9998b6654654ecb548ba6ae7d0ec760733930a3588b98",
+    "createTime": "2026-04-19 13:48:25+05:00",
+    "updateTime": "2026-04-19 13:48:25+05:00",
+    "sourceCommit": "90c5262d2cefa0e33a035aa0f7b11300bb4d53c3",
+    "sourceDateEpoch": 1776588505
+  }
+]
