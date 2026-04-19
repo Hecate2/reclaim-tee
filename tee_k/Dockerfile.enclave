@@ -1,24 +1,24 @@
 # check=skip=SecretsUsedInArgOrEnv
 # Go 1.26.2 / Alpine 3.21 -- update digest when upgrading Go
-FROM golang:alpine@sha256:f85330846cde1e57ca9ec309382da3b8e6ae3ab943d2739500e08c86393a21b1 AS app-builder
+FROM golang:alpine@sha256:80fbb8f9b2fa541a7d34378f1ad10f4f1c433817c4ed39ddb3e2f3ec3e961271 AS app-builder
 ENV CGO_ENABLED=0
 WORKDIR /app
 
 # Copy shared dependencies first
-COPY shared/ /app/shared/
-COPY minitls/ /app/minitls/
-COPY oprfmpc/ /app/oprfmpc/
-COPY proto/*.go /app/proto/
+COPY --chown=0:0 shared/ /app/shared/
+COPY --chown=0:0 minitls/ /app/minitls/
+COPY --chown=0:0 oprfmpc/ /app/oprfmpc/
+COPY --chown=0:0 proto/*.go /app/proto/
 
 # Copy TEE_K source files
-COPY tee_k/*.go /app/tee_k/
-COPY go.mod /app/go.mod
-COPY go.sum /app/go.sum
+COPY --chown=0:0 tee_k/*.go /app/tee_k/
+COPY --chown=0:0 go.mod /app/go.mod
+COPY --chown=0:0 go.sum /app/go.sum
 
 WORKDIR /app/tee_k
 
 # Build TEE_K enclave binary
-RUN go build -trimpath -buildvcs=false --ldflags '-s -w -extldflags=-static' -tags 'enclave osusergo netgo static_build' -o tee_k_enclave .
+RUN go build -trimpath -buildvcs=false --ldflags '-s -w -buildid= -extldflags=-static' -tags 'enclave osusergo netgo static_build' -o tee_k_enclave .
 
 # Copy MPC pkg directory for runtime circuit compilation
 RUN mkdir -p /mpcl && cp -r $(go env GOMODCACHE)/github.com/markkurossi/mpc@*/pkg /mpcl/
@@ -26,15 +26,15 @@ RUN mkdir -p /mpcl && cp -r $(go env GOMODCACHE)/github.com/markkurossi/mpc@*/pk
 FROM scratch
 
 # Copy CA certificates for HTTPS
-COPY --from=app-builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+COPY --chown=0:0 --from=app-builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 
 # Copy TEE_K enclave binary
-COPY --from=app-builder /app/tee_k/tee_k_enclave /tee_k_enclave
+COPY --chown=0:0 --from=app-builder /app/tee_k/tee_k_enclave /tee_k_enclave
 # Copy environment configuration
-COPY deploy/tee_k.env /.env
+COPY --chown=0:0 deploy/tee_k.env /.env
 
 # Copy MPC pkg directory for circuit compilation
-COPY --from=app-builder /mpcl/pkg /mpcl/pkg
+COPY --chown=0:0 --from=app-builder /mpcl/pkg /mpcl/pkg
 
 # Set MPCLDIR for MPC circuit compiler
 ENV MPCLDIR=/mpcl

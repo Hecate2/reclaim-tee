@@ -97,7 +97,9 @@ BUILDER_NAME="reclaim-repro"
 if ! docker buildx inspect "${BUILDER_NAME}" >/dev/null 2>&1; then
     log "Creating pinned builder: ${BUILDER_NAME}"
     docker buildx create --name "${BUILDER_NAME}" --driver docker-container \
-        --driver-opt image="${BUILDKIT_IMAGE}" --bootstrap
+        --driver-opt image="${BUILDKIT_IMAGE}" \
+        --driver-opt env.BUILDKITD_FLAGS="--oci-worker-snapshotter=native" \
+        --bootstrap
 fi
 BUILDER_FLAG="--builder=${BUILDER_NAME}"
 

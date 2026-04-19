@@ -10,6 +10,7 @@ js_sdk/dist/
 demo_standalone/
 docs/
 deploy/build.env
+deploy/image-history.json
 deploy/old/
 CLAUDE.md
 *.md
