@@ -25,6 +25,7 @@ go.work
 .DS_Store
 Thumbs.db
 /.env
+deploy/build.env
 
 # Proxy runtime configuration (use proxy-config.json.example as template)
 proxy-config.json

@@ -1,0 +1,15 @@
+.git/
+bin/
+.idea/
+.vscode/
+*.swp
+*.swo
+flutter/
+js_sdk/node_modules/
+js_sdk/dist/
+demo_standalone/
+docs/
+deploy/build.env
+deploy/old/
+CLAUDE.md
+*.md

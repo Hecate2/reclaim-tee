@@ -1,0 +1,145 @@
+#!/bin/bash
+set -e
+
+# =============================================================================
+# RECLAIM TEE BUILD SCRIPT - REPRODUCIBLE UNIFIED IMAGES
+# =============================================================================
+# Builds and pushes reproducible tee-k and tee-t images.
+# Same source code + same commit = same image digest, always.
+#
+# Flow: build OCI tarball (deterministic) -> push with crane (preserves digest)
+#
+# Requirements:
+#   - Docker Desktop with "Use containerd for pulling and storing images" enabled
+#   - BuildKit v0.13+ (for rewrite-timestamp support)
+#   - crane (go install github.com/google/go-containerregistry/cmd/crane@latest)
+#   - deploy/build.env with REGISTRY and PROJECT_ID
+#
+# Usage:
+#   ./build.sh [tag]          # default: v2
+#   ./build.sh v3             # explicit tag
+#   ./build.sh v3 --verify    # build + push + rebuild to verify reproducibility
+# =============================================================================
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(dirname "${SCRIPT_DIR}")"
+
+# Load config from build.env (not committed to git)
+BUILD_ENV="${SCRIPT_DIR}/build.env"
+if [[ ! -f "${BUILD_ENV}" ]]; then
+    echo "Missing ${BUILD_ENV}. Create it with:"
+    echo "  REGISTRY=gcr.io/your-project"
+    exit 1
+fi
+source "${BUILD_ENV}"
+
+# Validate required config
+: "${REGISTRY:?REGISTRY not set in build.env}"
+
+IMAGE_TAG="${1:-v2}"
+VERIFY="${2:-}"
+
+IMAGE_TK="${REGISTRY}/tee-k:${IMAGE_TAG}"
+IMAGE_TT="${REGISTRY}/tee-t:${IMAGE_TAG}"
+
+# Clamp all timestamps to the last git commit for reproducibility
+export SOURCE_DATE_EPOCH=$(git -C "${REPO_ROOT}" log -1 --pretty=%ct)
+
+TMPDIR=$(mktemp -d)
+trap "rm -rf ${TMPDIR}" EXIT
+
+log() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1"
+}
+
+error() {
+    echo "[ERROR] $1" >&2
+    exit 1
+}
+
+# Check crane is available
+command -v crane >/dev/null 2>&1 || error "crane not found. Install: go install github.com/google/go-containerregistry/cmd/crane@latest"
+
+log "Building reproducible images (tag: ${IMAGE_TAG}, SOURCE_DATE_EPOCH: ${SOURCE_DATE_EPOCH})"
+log "  TEE-K: ${IMAGE_TK}"
+log "  TEE-T: ${IMAGE_TT}"
+
+# Build as OCI tarballs (deterministic output)
+log "Building TEE-K..."
+docker buildx build --no-cache \
+    -f "${REPO_ROOT}/tee_k/Dockerfile.enclave" \
+    -o type=oci,dest="${TMPDIR}/tee-k.tar",rewrite-timestamp=true \
+    "${REPO_ROOT}"
+
+log "Building TEE-T..."
+docker buildx build --no-cache \
+    -f "${REPO_ROOT}/tee_t/Dockerfile.enclave" \
+    -o type=oci,dest="${TMPDIR}/tee-t.tar",rewrite-timestamp=true \
+    "${REPO_ROOT}"
+
+log "Both images built"
+
+# Extract OCI layouts for crane push
+mkdir -p "${TMPDIR}/tee-k-oci" "${TMPDIR}/tee-t-oci"
+tar -xf "${TMPDIR}/tee-k.tar" -C "${TMPDIR}/tee-k-oci"
+tar -xf "${TMPDIR}/tee-t.tar" -C "${TMPDIR}/tee-t-oci"
+
+# Push with crane (preserves exact digest from build)
+log "Pushing TEE-K..."
+crane push "${TMPDIR}/tee-k-oci" "${IMAGE_TK}"
+
+log "Pushing TEE-T..."
+crane push "${TMPDIR}/tee-t-oci" "${IMAGE_TT}"
+
+log "Images pushed"
+
+# Print digests
+DIGEST_TK=$(crane digest "${IMAGE_TK}")
+DIGEST_TT=$(crane digest "${IMAGE_TT}")
+
+echo ""
+echo "============================================="
+echo "Image Digests:"
+echo "  TEE-K: ${DIGEST_TK}"
+echo "  TEE-T: ${DIGEST_TT}"
+echo "============================================="
+
+# Optional: verify reproducibility by rebuilding locally
+if [[ "${VERIFY}" == "--verify" ]]; then
+    log "Verifying reproducibility (rebuilding from scratch)..."
+
+    log "Rebuilding TEE-K..."
+    docker buildx build --no-cache \
+        -f "${REPO_ROOT}/tee_k/Dockerfile.enclave" \
+        -o type=oci,dest="${TMPDIR}/verify-tk.tar",rewrite-timestamp=true \
+        "${REPO_ROOT}"
+
+    log "Rebuilding TEE-T..."
+    docker buildx build --no-cache \
+        -f "${REPO_ROOT}/tee_t/Dockerfile.enclave" \
+        -o type=oci,dest="${TMPDIR}/verify-tt.tar",rewrite-timestamp=true \
+        "${REPO_ROOT}"
+
+    echo ""
+    echo "Reproducibility Verification:"
+
+    HASH_TK_ORIG=$(sha256sum "${TMPDIR}/tee-k.tar" | cut -d' ' -f1)
+    HASH_TK_VERIFY=$(sha256sum "${TMPDIR}/verify-tk.tar" | cut -d' ' -f1)
+    echo "  TEE-K build 1: ${HASH_TK_ORIG}"
+    echo "  TEE-K build 2: ${HASH_TK_VERIFY}"
+    if [[ "${HASH_TK_ORIG}" == "${HASH_TK_VERIFY}" ]]; then
+        echo "  TEE-K: MATCH"
+    else
+        echo "  TEE-K: MISMATCH"
+    fi
+
+    HASH_TT_ORIG=$(sha256sum "${TMPDIR}/tee-t.tar" | cut -d' ' -f1)
+    HASH_TT_VERIFY=$(sha256sum "${TMPDIR}/verify-tt.tar" | cut -d' ' -f1)
+    echo "  TEE-T build 1: ${HASH_TT_ORIG}"
+    echo "  TEE-T build 2: ${HASH_TT_VERIFY}"
+    if [[ "${HASH_TT_ORIG}" == "${HASH_TT_VERIFY}" ]]; then
+        echo "  TEE-T: MATCH"
+    else
+        echo "  TEE-T: MISMATCH"
+    fi
+fi
