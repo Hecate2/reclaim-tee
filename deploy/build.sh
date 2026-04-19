@@ -60,19 +60,27 @@ error() {
 # Check crane is available
 command -v crane >/dev/null 2>&1 || error "crane not found. Install: go install github.com/google/go-containerregistry/cmd/crane@latest"
 
+# Use docker-container driver for consistent builds across environments
+BUILDER_NAME="reclaim-repro"
+if ! docker buildx inspect "${BUILDER_NAME}" >/dev/null 2>&1; then
+    log "Creating docker-container builder: ${BUILDER_NAME}"
+    docker buildx create --name "${BUILDER_NAME}" --driver docker-container --bootstrap
+fi
+BUILDER_FLAG="--builder=${BUILDER_NAME}"
+
 log "Building reproducible images (tag: ${IMAGE_TAG}, SOURCE_DATE_EPOCH: ${SOURCE_DATE_EPOCH})"
 log "  TEE-K: ${IMAGE_TK}"
 log "  TEE-T: ${IMAGE_TT}"
 
 # Build as OCI tarballs (deterministic output)
 log "Building TEE-K..."
-docker buildx build --no-cache \
+docker buildx build ${BUILDER_FLAG} --no-cache \
     -f "${REPO_ROOT}/tee_k/Dockerfile.enclave" \
     -o type=oci,dest="${TMPDIR}/tee-k.tar",rewrite-timestamp=true \
     "${REPO_ROOT}"
 
 log "Building TEE-T..."
-docker buildx build --no-cache \
+docker buildx build ${BUILDER_FLAG} --no-cache \
     -f "${REPO_ROOT}/tee_t/Dockerfile.enclave" \
     -o type=oci,dest="${TMPDIR}/tee-t.tar",rewrite-timestamp=true \
     "${REPO_ROOT}"

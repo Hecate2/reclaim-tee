@@ -93,20 +93,28 @@ if [[ -n "${BUILD_COMMIT}" ]]; then
     fi
 fi
 
+# Use docker-container driver for consistent builds across environments
+BUILDER_NAME="reclaim-repro"
+if ! docker buildx inspect "${BUILDER_NAME}" >/dev/null 2>&1; then
+    log "Creating docker-container builder: ${BUILDER_NAME}"
+    docker buildx create --name "${BUILDER_NAME}" --driver docker-container --bootstrap
+fi
+BUILDER_FLAG="--builder=${BUILDER_NAME}"
+
 log "Expected digests from image-history.json:"
 log "  TEE-K: ${EXPECTED_TK}"
 log "  TEE-T: ${EXPECTED_TT}"
 
 # Build TEE-K
 log "Building TEE-K from source..."
-docker buildx build --no-cache \
+docker buildx build ${BUILDER_FLAG} --no-cache \
     -f "${REPO_ROOT}/tee_k/Dockerfile.enclave" \
     -o type=oci,dest="${TMPDIR}/tee-k.tar",rewrite-timestamp=true \
     "${REPO_ROOT}"
 
 # Build TEE-T
 log "Building TEE-T from source..."
-docker buildx build --no-cache \
+docker buildx build ${BUILDER_FLAG} --no-cache \
     -f "${REPO_ROOT}/tee_t/Dockerfile.enclave" \
     -o type=oci,dest="${TMPDIR}/tee-t.tar",rewrite-timestamp=true \
     "${REPO_ROOT}"
