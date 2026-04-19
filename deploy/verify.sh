@@ -92,13 +92,19 @@ if [[ -n "${BUILD_COMMIT}" ]]; then
     fi
 fi
 
+# Normalize file mtimes to SOURCE_DATE_EPOCH for reproducibility.
+# Git checkout sets mtimes to checkout time, which varies between environments.
+# rewrite-timestamp only clamps timestamps NEWER than the epoch, so older mtimes
+# from different checkout times would produce different layers.
+find "${REPO_ROOT}" -not -path '*/.git/*' -exec touch -d "@${SOURCE_DATE_EPOCH}" {} + 2>/dev/null || true
+
 # Create/reuse pinned builder (same image as build.sh)
 BUILDER_NAME="reclaim-repro"
 if ! docker buildx inspect "${BUILDER_NAME}" >/dev/null 2>&1; then
     log "Creating pinned builder: ${BUILDER_NAME}"
     docker buildx create --name "${BUILDER_NAME}" --driver docker-container \
         --driver-opt image="${BUILDKIT_IMAGE}" \
-        --driver-opt env.BUILDKITD_FLAGS="--oci-worker-snapshotter=native" \
+        --buildkitd-flags "--oci-worker-snapshotter=native" \
         --bootstrap
 fi
 BUILDER_FLAG="--builder=${BUILDER_NAME}"
