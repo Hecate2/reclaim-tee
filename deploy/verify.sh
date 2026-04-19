@@ -169,5 +169,31 @@ if [[ "${PASS}" == "true" ]]; then
     exit 0
 else
     echo "VERIFICATION FAILED: Images do not match source code"
+
+    # Dump debug info: compare OCI manifests and layer hashes
+    echo ""
+    echo "=== DEBUG: TEE-K OCI manifest ==="
+    cat "${TMPDIR}/tee-k-oci/index.json" 2>/dev/null | python3 -m json.tool || true
+
+    echo ""
+    echo "=== DEBUG: TEE-K config ==="
+    MANIFEST_DIGEST=$(python3 -c "import json; print(json.load(open('${TMPDIR}/tee-k-oci/index.json'))['manifests'][0]['digest'].split(':')[1])" 2>/dev/null)
+    if [[ -n "${MANIFEST_DIGEST}" ]]; then
+        cat "${TMPDIR}/tee-k-oci/blobs/sha256/${MANIFEST_DIGEST}" 2>/dev/null | python3 -m json.tool || true
+    fi
+
+    echo ""
+    echo "=== DEBUG: TEE-K layer listing ==="
+    find "${TMPDIR}/tee-k-oci/blobs" -type f -exec sha256sum {} \; 2>/dev/null | sort || true
+
+    echo ""
+    echo "=== DEBUG: BuildKit worker info ==="
+    docker exec buildx_buildkit_reclaim-repro0 cat /proc/1/cmdline 2>/dev/null | tr '\0' ' ' || true
+    echo ""
+
+    # Save tarballs for artifact upload
+    mkdir -p /tmp/verify-debug
+    cp "${TMPDIR}"/tee-*.tar /tmp/verify-debug/ 2>/dev/null || true
+
     exit 1
 fi
