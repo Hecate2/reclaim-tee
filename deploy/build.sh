@@ -15,9 +15,12 @@ set -e
 #   - deploy/build.env with REGISTRY
 #
 # Usage:
-#   ./build.sh [tag]          # default: v2
-#   ./build.sh v3             # explicit tag
-#   ./build.sh v3 --verify    # build + push + rebuild to verify reproducibility
+#   ./build.sh [tag] [commit] [--verify]
+#   ./build.sh                     # tag=v2, commit=HEAD
+#   ./build.sh v3                  # explicit tag, commit=HEAD
+#   ./build.sh v3 abc123           # explicit tag + commit (for rebuilding)
+#   ./build.sh v3 --verify         # build + verify reproducibility
+#   ./build.sh v3 abc123 --verify  # rebuild from specific commit + verify
 # =============================================================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -39,18 +42,6 @@ source "${BUILD_ENV}"
 # Validate required config
 : "${REGISTRY:?REGISTRY not set in build.env}"
 
-IMAGE_TAG="${1:-v2}"
-VERIFY="${2:-}"
-
-IMAGE_TK="${REGISTRY}/tee-k:${IMAGE_TAG}"
-IMAGE_TT="${REGISTRY}/tee-t:${IMAGE_TAG}"
-
-# Clamp all timestamps to the last git commit for reproducibility
-export SOURCE_DATE_EPOCH=$(git -C "${REPO_ROOT}" log -1 --pretty=%ct)
-
-TMPDIR=$(mktemp -d)
-trap "rm -rf ${TMPDIR}" EXIT
-
 log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1"
 }
@@ -59,6 +50,32 @@ error() {
     echo "[ERROR] $1" >&2
     exit 1
 }
+
+IMAGE_TAG="${1:-v2}"
+COMMIT="${2:-}"
+VERIFY="${3:-}"
+
+# If no commit supplied, also accept --verify as second arg
+if [[ "${COMMIT}" == "--verify" ]]; then
+    VERIFY="--verify"
+    COMMIT=""
+fi
+
+IMAGE_TK="${REGISTRY}/tee-k:${IMAGE_TAG}"
+IMAGE_TT="${REGISTRY}/tee-t:${IMAGE_TAG}"
+
+# Use supplied commit or HEAD for SOURCE_DATE_EPOCH
+if [[ -n "${COMMIT}" ]]; then
+    export SOURCE_DATE_EPOCH=$(git -C "${REPO_ROOT}" log -1 --pretty=%ct "${COMMIT}")
+    log "Using SOURCE_DATE_EPOCH from commit ${COMMIT}: ${SOURCE_DATE_EPOCH}"
+else
+    COMMIT=$(git -C "${REPO_ROOT}" rev-parse HEAD)
+    export SOURCE_DATE_EPOCH=$(git -C "${REPO_ROOT}" log -1 --pretty=%ct)
+    log "Using SOURCE_DATE_EPOCH from HEAD (${COMMIT:0:12}): ${SOURCE_DATE_EPOCH}"
+fi
+
+TMPDIR=$(mktemp -d)
+trap "rm -rf ${TMPDIR}" EXIT
 
 # Check crane is available
 command -v crane >/dev/null 2>&1 || error "crane not found. Install: go install github.com/google/go-containerregistry/cmd/crane@latest"
