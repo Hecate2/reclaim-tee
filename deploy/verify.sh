@@ -7,20 +7,21 @@ set -e
 # Rebuilds TEE images from source and verifies the digests match the ones
 # recorded in deploy/image-history.json. No GCP credentials needed.
 #
-# The script checks out the exact commit that was used for the build and
-# uses the same SOURCE_DATE_EPOCH, ensuring bit-identical output.
+# Uses the same pinned BuildKit image as build.sh to ensure identical output.
 #
 # Requirements:
-#   - Docker with containerd image store enabled (or docker-container buildx driver)
-#   - BuildKit v0.13+ (for rewrite-timestamp)
+#   - Docker with buildx
 #
 # Usage:
-#   ./verify.sh              # verify both tee-k and tee-t
+#   ./verify.sh
 # =============================================================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(dirname "${SCRIPT_DIR}")"
 HISTORY="${SCRIPT_DIR}/image-history.json"
+
+# Same pinned BuildKit image as build.sh -- must match exactly
+BUILDKIT_IMAGE="moby/buildkit:buildx-stable-1@sha256:0039c1d47e8748b5afea56f4e85f14febaf34452bd99d9552d2daa82262b5cc5"
 
 TMPDIR=$(mktemp -d)
 trap "rm -rf ${TMPDIR}" EXIT
@@ -42,7 +43,6 @@ if [[ "${ENTRY_COUNT}" == "0" ]]; then
 fi
 
 # Extract expected digests and build metadata from image-history.json
-# Uses the last entries for each service (most recent deploy)
 read -r EXPECTED_TK SOURCE_COMMIT_TK SOURCE_EPOCH_TK < <(python3 -c "
 import json
 history = json.load(open('${HISTORY}'))
@@ -66,14 +66,13 @@ if [[ -z "${EXPECTED_TK}" || -z "${EXPECTED_TT}" ]]; then
     exit 1
 fi
 
-# Validate both services were built from the same commit/epoch
+# Validate both services were built with the same epoch
 if [[ -n "${SOURCE_EPOCH_TK}" && -n "${SOURCE_EPOCH_TT}" && "${SOURCE_EPOCH_TK}" != "${SOURCE_EPOCH_TT}" ]]; then
     log "ERROR: TEE-K and TEE-T were built with different SOURCE_DATE_EPOCH values"
-    log "  TEE-K: ${SOURCE_EPOCH_TK}, TEE-T: ${SOURCE_EPOCH_TT}"
     exit 1
 fi
 
-# Determine SOURCE_DATE_EPOCH: from history if available, else git log
+# Determine SOURCE_DATE_EPOCH from history
 EPOCH="${SOURCE_EPOCH_TK:-${SOURCE_EPOCH_TT}}"
 if [[ -n "${EPOCH}" ]]; then
     export SOURCE_DATE_EPOCH="${EPOCH}"
@@ -83,7 +82,7 @@ else
     log "WARNING: No sourceDateEpoch in history, using git HEAD: ${SOURCE_DATE_EPOCH}"
 fi
 
-# Check if we're on the right commit
+# Check commit
 BUILD_COMMIT="${SOURCE_COMMIT_TK:-${SOURCE_COMMIT_TT}}"
 if [[ -n "${BUILD_COMMIT}" ]]; then
     CURRENT_COMMIT=$(git -C "${REPO_ROOT}" rev-parse HEAD)
@@ -93,11 +92,12 @@ if [[ -n "${BUILD_COMMIT}" ]]; then
     fi
 fi
 
-# Use docker-container driver for consistent builds across environments
+# Create/reuse pinned builder (same image as build.sh)
 BUILDER_NAME="reclaim-repro"
 if ! docker buildx inspect "${BUILDER_NAME}" >/dev/null 2>&1; then
-    log "Creating docker-container builder: ${BUILDER_NAME}"
-    docker buildx create --name "${BUILDER_NAME}" --driver docker-container --bootstrap
+    log "Creating pinned builder: ${BUILDER_NAME}"
+    docker buildx create --name "${BUILDER_NAME}" --driver docker-container \
+        --driver-opt image="${BUILDKIT_IMAGE}" --bootstrap
 fi
 BUILDER_FLAG="--builder=${BUILDER_NAME}"
 
@@ -120,12 +120,16 @@ docker buildx build ${BUILDER_FLAG} --no-cache \
     "${REPO_ROOT}"
 
 # Extract digests
-mkdir -p "${TMPDIR}/tee-k-oci" "${TMPDIR}/tee-t-oci"
-tar -xf "${TMPDIR}/tee-k.tar" -C "${TMPDIR}/tee-k-oci"
-tar -xf "${TMPDIR}/tee-t.tar" -C "${TMPDIR}/tee-t-oci"
+extract_digest() {
+    local tarball="$1"
+    local dir="${tarball%.tar}-oci"
+    mkdir -p "${dir}"
+    tar -xf "${tarball}" -C "${dir}"
+    python3 -c "import json; print(json.load(open('${dir}/index.json'))['manifests'][0]['digest'])"
+}
 
-ACTUAL_TK=$(python3 -c "import json; print(json.load(open('${TMPDIR}/tee-k-oci/index.json'))['manifests'][0]['digest'])")
-ACTUAL_TT=$(python3 -c "import json; print(json.load(open('${TMPDIR}/tee-t-oci/index.json'))['manifests'][0]['digest'])")
+ACTUAL_TK=$(extract_digest "${TMPDIR}/tee-k.tar")
+ACTUAL_TT=$(extract_digest "${TMPDIR}/tee-t.tar")
 
 # Compare
 PASS=true

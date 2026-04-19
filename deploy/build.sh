@@ -10,10 +10,9 @@ set -e
 # Flow: build OCI tarball (deterministic) -> push with crane (preserves digest)
 #
 # Requirements:
-#   - Docker Desktop with "Use containerd for pulling and storing images" enabled
-#   - BuildKit v0.13+ (for rewrite-timestamp support)
+#   - Docker with buildx
 #   - crane (go install github.com/google/go-containerregistry/cmd/crane@latest)
-#   - deploy/build.env with REGISTRY and PROJECT_ID
+#   - deploy/build.env with REGISTRY
 #
 # Usage:
 #   ./build.sh [tag]          # default: v2
@@ -23,6 +22,10 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(dirname "${SCRIPT_DIR}")"
+
+# Pinned BuildKit image for reproducible builds across environments
+# Update this digest when upgrading BuildKit (run: docker pull moby/buildkit:buildx-stable-1)
+BUILDKIT_IMAGE="moby/buildkit:buildx-stable-1@sha256:0039c1d47e8748b5afea56f4e85f14febaf34452bd99d9552d2daa82262b5cc5"
 
 # Load config from build.env (not committed to git)
 BUILD_ENV="${SCRIPT_DIR}/build.env"
@@ -60,11 +63,12 @@ error() {
 # Check crane is available
 command -v crane >/dev/null 2>&1 || error "crane not found. Install: go install github.com/google/go-containerregistry/cmd/crane@latest"
 
-# Use docker-container driver for consistent builds across environments
+# Create/reuse pinned builder
 BUILDER_NAME="reclaim-repro"
 if ! docker buildx inspect "${BUILDER_NAME}" >/dev/null 2>&1; then
-    log "Creating docker-container builder: ${BUILDER_NAME}"
-    docker buildx create --name "${BUILDER_NAME}" --driver docker-container --bootstrap
+    log "Creating pinned builder: ${BUILDER_NAME}"
+    docker buildx create --name "${BUILDER_NAME}" --driver docker-container \
+        --driver-opt image="${BUILDKIT_IMAGE}" --bootstrap
 fi
 BUILDER_FLAG="--builder=${BUILDER_NAME}"
 
@@ -117,13 +121,13 @@ if [[ "${VERIFY}" == "--verify" ]]; then
     log "Verifying reproducibility (rebuilding from scratch)..."
 
     log "Rebuilding TEE-K..."
-    docker buildx build --no-cache \
+    docker buildx build ${BUILDER_FLAG} --no-cache \
         -f "${REPO_ROOT}/tee_k/Dockerfile.enclave" \
         -o type=oci,dest="${TMPDIR}/verify-tk.tar",rewrite-timestamp=true \
         "${REPO_ROOT}"
 
     log "Rebuilding TEE-T..."
-    docker buildx build --no-cache \
+    docker buildx build ${BUILDER_FLAG} --no-cache \
         -f "${REPO_ROOT}/tee_t/Dockerfile.enclave" \
         -o type=oci,dest="${TMPDIR}/verify-tt.tar",rewrite-timestamp=true \
         "${REPO_ROOT}"

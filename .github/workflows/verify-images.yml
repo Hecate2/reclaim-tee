@@ -12,10 +12,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # full history so we can verify against any commit
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+          fetch-depth: 0
 
       - name: Verify TEE images match image-history.json
         run: ./deploy/verify.sh
