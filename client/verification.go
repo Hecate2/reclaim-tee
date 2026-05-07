@@ -2,10 +2,11 @@ package client
 
 import (
 	"fmt"
-	"github.com/reclaimprotocol/reclaim-tee/minitls"
-	"github.com/reclaimprotocol/reclaim-tee/shared"
 	"slices"
 	"strings"
+
+	"github.com/reclaimprotocol/reclaim-tee/minitls"
+	"github.com/reclaimprotocol/reclaim-tee/shared"
 
 	"go.uber.org/zap"
 )
@@ -178,8 +179,10 @@ func (c *Client) reconstructHTTPResponseFromDecryptedData() error {
 				alertLevel := parsed.ActualContent[0]
 				alertDesc := parsed.ActualContent[1]
 
-				// close_notify (level=1, desc=0) or a warning is normal, everything else is an error
-				if alertLevel == 2 { // Fatal
+				// close_notify (desc=0) is a graceful shutdown regardless of level —
+				// per RFC 8446 §6.1 the level field is implicit in TLS 1.3 and many servers
+				// send close_notify with level=fatal. Treat any other fatal alert as an error.
+				if alertLevel == 2 && alertDesc != 0 {
 					alertName := minitls.AlertDescriptionString(alertDesc)
 					err := fmt.Errorf("TLS alert received: level=%d, desc=%d (%s)", alertLevel, alertDesc, alertName)
 					c.logger.Error("Server sent TLS alert instead of HTTP response",
@@ -238,10 +241,8 @@ func (c *Client) reconstructHTTPResponseFromDecryptedData() error {
 			}
 
 			// Display the raw HTTP response (redaction will be handled at TLS record level)
-			previewLen := min(len(actualHTTPResponse), HTTPResponsePreviewLength)
 			c.logger.Info("Raw HTTP response preview",
-				zap.Int("total_bytes", len(actualHTTPResponse)),
-				zap.String("preview", actualHTTPResponse[:previewLen]))
+				zap.Int("total_bytes", len(actualHTTPResponse)))
 
 			// Set success flags
 			c.logger.Info("Response processing successful", zap.Int("response_bytes", len(actualHTTPResponse)))
