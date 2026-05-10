@@ -1,6 +1,6 @@
 syntax = "proto3";
 package teeproto;
-
+import "signing.proto";
 option go_package = "tee-mpc/proto;teeproto";
 
 enum TranscriptMessageSenderType {
@@ -288,6 +288,11 @@ message ClaimTeeBundleResponse {
 		 * structure with empty "signatures" field
 		 */
 		bytes resultSignature = 3;
+
+		/**
+    * Attestor TEE attestation report
+    */
+		AttestationReport claimAttestation = 4;
 	}
 }
 

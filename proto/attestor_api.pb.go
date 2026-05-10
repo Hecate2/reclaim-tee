@@ -2939,9 +2939,10 @@ type ClaimTeeBundleResponse_Signature struct {
 	// *
 	// Signature of the complete ClaimTeeBundleResponse
 	// structure with empty "signatures" field
-	ResultSignature []byte `protobuf:"bytes,3,opt,name=resultSignature,proto3" json:"resultSignature,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	ResultSignature  []byte             `protobuf:"bytes,3,opt,name=resultSignature,proto3" json:"resultSignature,omitempty"`
+	ClaimAttestation *AttestationReport `protobuf:"bytes,4,opt,name=claimAttestation,proto3" json:"claimAttestation,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *ClaimTeeBundleResponse_Signature) Reset() {
@@ -2991,6 +2992,13 @@ func (x *ClaimTeeBundleResponse_Signature) GetClaimSignature() []byte {
 func (x *ClaimTeeBundleResponse_Signature) GetResultSignature() []byte {
 	if x != nil {
 		return x.ResultSignature
+	}
+	return nil
+}
+
+func (x *ClaimTeeBundleResponse_Signature) GetClaimAttestation() *AttestationReport {
+	if x != nil {
+		return x.ClaimAttestation
 	}
 	return nil
 }
@@ -3176,7 +3184,7 @@ var File_attestor_api_proto protoreflect.FileDescriptor
 
 const file_attestor_api_proto_rawDesc = "" +
 	"\n" +
-	"\x12attestor_api.proto\x12\bteeproto\"\xdd\x01\n" +
+	"\x12attestor_api.proto\x12\bteeproto\x1a\rsigning.proto\"\xdd\x01\n" +
 	"\fClaimContext\x12a\n" +
 	"\x13extractedParameters\x18\x01 \x03(\v2/.teeproto.ClaimContext.ExtractedParametersEntryR\x13extractedParameters\x12\"\n" +
 	"\fproviderHash\x18\x02 \x01(\tR\fproviderHash\x1aF\n" +
@@ -3257,18 +3265,19 @@ const file_attestor_api_proto_rawDesc = "" +
 	"\acontext\x18\x05 \x01(\tR\acontext\"w\n" +
 	"\x15ClaimTeeBundleRequest\x12.\n" +
 	"\x12verificationBundle\x18\x01 \x01(\fR\x12verificationBundle\x12.\n" +
-	"\x04data\x18\x02 \x01(\v2\x1a.teeproto.ClaimRequestDataR\x04data\"\x95\x03\n" +
+	"\x04data\x18\x02 \x01(\v2\x1a.teeproto.ClaimRequestDataR\x04data\"\xde\x03\n" +
 	"\x16ClaimTeeBundleResponse\x129\n" +
 	"\arequest\x18\x01 \x01(\v2\x1f.teeproto.ClaimTeeBundleRequestR\arequest\x123\n" +
 	"\x05claim\x18\x02 \x01(\v2\x1b.teeproto.ProviderClaimDataH\x00R\x05claim\x12+\n" +
 	"\x05error\x18\x03 \x01(\v2\x13.teeproto.ErrorDataH\x00R\x05error\x12J\n" +
 	"\n" +
 	"signatures\x18\x04 \x01(\v2*.teeproto.ClaimTeeBundleResponse.SignatureR\n" +
-	"signatures\x1a\x87\x01\n" +
+	"signatures\x1a\xd0\x01\n" +
 	"\tSignature\x12(\n" +
 	"\x0fattestorAddress\x18\x01 \x01(\tR\x0fattestorAddress\x12&\n" +
 	"\x0eclaimSignature\x18\x02 \x01(\fR\x0eclaimSignature\x12(\n" +
-	"\x0fresultSignature\x18\x03 \x01(\fR\x0fresultSignatureB\b\n" +
+	"\x0fresultSignature\x18\x03 \x01(\fR\x0fresultSignature\x12G\n" +
+	"\x10claimAttestation\x18\x04 \x01(\v2\x1b.teeproto.AttestationReportR\x10claimAttestationB\b\n" +
 	"\x06result\"\xf1\x04\n" +
 	"\x12ClaimTunnelRequest\x127\n" +
 	"\arequest\x18\x01 \x01(\v2\x1d.teeproto.CreateTunnelRequestR\arequest\x12.\n" +
@@ -3467,6 +3476,7 @@ var file_attestor_api_proto_goTypes = []any{
 	(*ClaimTunnelRequest_Signatures)(nil),        // 41: teeproto.ClaimTunnelRequest.Signatures
 	(*ClaimTunnelRequest_TranscriptMessage)(nil), // 42: teeproto.ClaimTunnelRequest.TranscriptMessage
 	(*ClaimTunnelResponse_Signatures)(nil),       // 43: teeproto.ClaimTunnelResponse.Signatures
+	(*AttestationReport)(nil),                    // 44: teeproto.AttestationReport
 }
 var file_attestor_api_proto_depIdxs = []int32{
 	36, // 0: teeproto.ClaimContext.extractedParameters:type_name -> teeproto.ClaimContext.ExtractedParametersEntry
@@ -3520,13 +3530,14 @@ var file_attestor_api_proto_depIdxs = []int32{
 	34, // 48: teeproto.RPCMessages.messages:type_name -> teeproto.RPCMessage
 	39, // 49: teeproto.MessageReveal.MessageRevealZk.proofs:type_name -> teeproto.MessageReveal.ZKProof
 	15, // 50: teeproto.MessageReveal.ZKProof.toprf:type_name -> teeproto.TOPRFPayload
-	0,  // 51: teeproto.ClaimTunnelRequest.TranscriptMessage.sender:type_name -> teeproto.TranscriptMessageSenderType
-	14, // 52: teeproto.ClaimTunnelRequest.TranscriptMessage.reveal:type_name -> teeproto.MessageReveal
-	53, // [53:53] is the sub-list for method output_type
-	53, // [53:53] is the sub-list for method input_type
-	53, // [53:53] is the sub-list for extension type_name
-	53, // [53:53] is the sub-list for extension extendee
-	0,  // [0:53] is the sub-list for field type_name
+	44, // 51: teeproto.ClaimTeeBundleResponse.Signature.claimAttestation:type_name -> teeproto.AttestationReport
+	0,  // 52: teeproto.ClaimTunnelRequest.TranscriptMessage.sender:type_name -> teeproto.TranscriptMessageSenderType
+	14, // 53: teeproto.ClaimTunnelRequest.TranscriptMessage.reveal:type_name -> teeproto.MessageReveal
+	54, // [54:54] is the sub-list for method output_type
+	54, // [54:54] is the sub-list for method input_type
+	54, // [54:54] is the sub-list for extension type_name
+	54, // [54:54] is the sub-list for extension extendee
+	0,  // [0:54] is the sub-list for field type_name
 }
 
 func init() { file_attestor_api_proto_init() }
@@ -3534,6 +3545,7 @@ func file_attestor_api_proto_init() {
 	if File_attestor_api_proto != nil {
 		return
 	}
+	file_signing_proto_init()
 	file_attestor_api_proto_msgTypes[9].OneofWrappers = []any{
 		(*MessageReveal_DirectReveal)(nil),
 		(*MessageReveal_ZkReveal)(nil),

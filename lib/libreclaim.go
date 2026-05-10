@@ -192,8 +192,9 @@ func reclaim_execute_protocol(request_json *C.char, config_json *C.char, claim_j
 
 	// Define response types
 	type Signature struct {
-		AttestorAddress string `json:"attestor_address"`
-		ClaimSignature  string `json:"claim_signature"`
+		AttestorAddress   string `json:"attestor_address"`
+		ClaimSignature    string `json:"claim_signature"`
+		AttestationReport []byte `json:"attestation_report,omitempty"`
 	}
 
 	type CompleteResponse struct {
@@ -228,8 +229,9 @@ func reclaim_execute_protocol(request_json *C.char, config_json *C.char, claim_j
 		Claim: claimData,
 		Signatures: []Signature{
 			{
-				AttestorAddress: result.Signature.AttestorAddress,
-				ClaimSignature:  "0x" + hex.EncodeToString(result.Signature.ClaimSignature),
+				AttestorAddress:   result.Signature.AttestorAddress,
+				ClaimSignature:    "0x" + hex.EncodeToString(result.Signature.ClaimSignature),
+				AttestationReport: result.Signature.ClaimAttestation.Report,
 			},
 		},
 	}
