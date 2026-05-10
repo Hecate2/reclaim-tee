@@ -194,7 +194,7 @@ func reclaim_execute_protocol(request_json *C.char, config_json *C.char, claim_j
 	type Signature struct {
 		AttestorAddress   string `json:"attestor_address"`
 		ClaimSignature    string `json:"claim_signature"`
-		AttestationReport []byte `json:"attestation_report,omitempty"`
+		AttestationReport string `json:"attestation_report,omitempty"`
 	}
 
 	type CompleteResponse struct {
@@ -225,13 +225,24 @@ func reclaim_execute_protocol(request_json *C.char, config_json *C.char, claim_j
 		Epoch:      result.Claim.Epoch,
 	}
 
+	// encode to binary if not GCP
+	attestationReport := ""
+	attestation := result.Signature.ClaimAttestation
+	if attestation != nil && attestation.Report != nil {
+		if attestation.Type == "gcp" {
+			attestationReport = string(attestation.Report)
+		} else {
+			attestationReport = base64.StdEncoding.EncodeToString(attestation.Report)
+		}
+	}
+
 	response := CompleteResponse{
 		Claim: claimData,
 		Signatures: []Signature{
 			{
 				AttestorAddress:   result.Signature.AttestorAddress,
 				ClaimSignature:    "0x" + hex.EncodeToString(result.Signature.ClaimSignature),
-				AttestationReport: result.Signature.ClaimAttestation.Report,
+				AttestationReport: attestationReport,
 			},
 		},
 	}
