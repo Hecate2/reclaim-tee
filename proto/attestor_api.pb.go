@@ -2939,7 +2939,9 @@ type ClaimTeeBundleResponse_Signature struct {
 	// *
 	// Signature of the complete ClaimTeeBundleResponse
 	// structure with empty "signatures" field
-	ResultSignature  []byte             `protobuf:"bytes,3,opt,name=resultSignature,proto3" json:"resultSignature,omitempty"`
+	ResultSignature []byte `protobuf:"bytes,3,opt,name=resultSignature,proto3" json:"resultSignature,omitempty"`
+	// *
+	// Attestor TEE attestation report
 	ClaimAttestation *AttestationReport `protobuf:"bytes,4,opt,name=claimAttestation,proto3" json:"claimAttestation,omitempty"`
 	unknownFields    protoimpl.UnknownFields
 	sizeCache        protoimpl.SizeCache

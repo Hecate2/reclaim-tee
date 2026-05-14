@@ -4,12 +4,13 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"github.com/reclaimprotocol/reclaim-tee/shared"
 	"maps"
 	"net"
 	"net/url"
 	"sort"
 	"strconv"
+
+	"github.com/reclaimprotocol/reclaim-tee/shared"
 
 	"go.uber.org/zap"
 )
@@ -100,9 +101,10 @@ func CreateRequest(secret *HTTPProviderSecretParams, params *HTTPProviderParams)
 	logger.Debug("Host header and public headers", zap.String("component", "HTTP"), zap.String("operation", "CreateRequest"), zap.String("level", "verbose"), zap.String("host_header", hostHeader), zap.Int("public_headers", len(pubHeadersList)))
 	lines := []string{
 		reqLine,
+		// `Connection: close` must be the first header after the request line.
+		"Connection: close",
 		fmt.Sprintf("Host: %s", hostHeader),
 		fmt.Sprintf("Content-Length: %d", contentLength),
-		"Connection: close",
 		"Accept-Encoding: identity",
 	}
 	lines = append(lines, pubHeadersList...)

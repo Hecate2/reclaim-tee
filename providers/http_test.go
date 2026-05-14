@@ -4,10 +4,11 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"github.com/reclaimprotocol/reclaim-tee/shared"
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/reclaimprotocol/reclaim-tee/shared"
 )
 
 func TestShouldParseXPathAndJSONPath(t *testing.T) {
@@ -757,6 +758,42 @@ func TestCreateRequest_ShouldPanicOnNonPresentSecretParam(t *testing.T) {
 		AuthorisationHeader: "test",
 	}
 	CreateRequest(&secret, &params)
+}
+
+// TestCreateRequest_ConnectionCloseIsFirstHeader pins the anti-smuggling
+// the literal bytes `Connection: close\r\n`
+// must appear immediately after the request line. The attestor enforces this
+// byte-strict; if this test breaks, the TEE client will fail validation.
+func TestCreateRequest_ConnectionCloseIsFirstHeader(t *testing.T) {
+	params := HTTPProviderParams{
+		URL:    "https://example.com/some/path?q=1",
+		Method: "GET",
+	}
+	secret := HTTPProviderSecretParams{
+		AuthorisationHeader: "Bearer token123",
+	}
+
+	res, err := CreateRequest(&secret, &params)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+
+	reqLineEnd := strings.Index(string(res.Data), "\r\n")
+	if reqLineEnd < 0 {
+		t.Fatalf("request line terminator not found in: %q", string(res.Data))
+	}
+
+	expected := "Connection: close\r\n"
+	firstHeaderStart := reqLineEnd + 2
+	firstHeaderEnd := firstHeaderStart + len(expected)
+	if firstHeaderEnd > len(res.Data) {
+		t.Fatalf("request too short to contain first header; got %d bytes", len(res.Data))
+	}
+	actual := string(res.Data[firstHeaderStart:firstHeaderEnd])
+	if actual != expected {
+		t.Errorf("first header after request line: expected %q, got %q\nfull request:\n%s",
+			expected, actual, string(res.Data))
+	}
 }
 
 // GetResponseRedactions Tests
