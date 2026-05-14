@@ -24,7 +24,14 @@ HISTORY="${SCRIPT_DIR}/image-history.json"
 BUILDKIT_IMAGE="moby/buildkit:buildx-stable-1@sha256:0039c1d47e8748b5afea56f4e85f14febaf34452bd99d9552d2daa82262b5cc5"
 
 TMPDIR=$(mktemp -d)
-trap "rm -rf ${TMPDIR}" EXIT
+WORKTREE_DIR=""
+cleanup() {
+    if [[ -n "${WORKTREE_DIR}" && -d "${WORKTREE_DIR}" ]]; then
+        git -C "${REPO_ROOT}" worktree remove --force "${WORKTREE_DIR}" 2>/dev/null || true
+    fi
+    rm -rf "${TMPDIR}"
+}
+trap cleanup EXIT
 
 log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1"
@@ -72,31 +79,45 @@ if [[ -n "${SOURCE_EPOCH_TK}" && -n "${SOURCE_EPOCH_TT}" && "${SOURCE_EPOCH_TK}"
     exit 1
 fi
 
-# Determine SOURCE_DATE_EPOCH from history
+# Require both services to reference the same source commit.
+if [[ -n "${SOURCE_COMMIT_TK}" && -n "${SOURCE_COMMIT_TT}" && "${SOURCE_COMMIT_TK}" != "${SOURCE_COMMIT_TT}" ]]; then
+    log "ERROR: TEE-K and TEE-T have different sourceCommit values"
+    exit 1
+fi
+
+BUILD_COMMIT="${SOURCE_COMMIT_TK:-${SOURCE_COMMIT_TT}}"
+if [[ -z "${BUILD_COMMIT}" ]]; then
+    log "ERROR: image-history.json entry has no sourceCommit -- cannot verify reproducibility"
+    exit 1
+fi
+
+if ! git -C "${REPO_ROOT}" rev-parse --verify "${BUILD_COMMIT}^{commit}" >/dev/null 2>&1; then
+    log "ERROR: sourceCommit ${BUILD_COMMIT} not found in repository"
+    exit 1
+fi
+
+# Determine SOURCE_DATE_EPOCH from history (preferred) or the recorded commit's time.
 EPOCH="${SOURCE_EPOCH_TK:-${SOURCE_EPOCH_TT}}"
 if [[ -n "${EPOCH}" ]]; then
     export SOURCE_DATE_EPOCH="${EPOCH}"
     log "Using SOURCE_DATE_EPOCH from image-history.json: ${SOURCE_DATE_EPOCH}"
 else
-    export SOURCE_DATE_EPOCH=$(git -C "${REPO_ROOT}" log -1 --pretty=%ct)
-    log "WARNING: No sourceDateEpoch in history, using git HEAD: ${SOURCE_DATE_EPOCH}"
+    export SOURCE_DATE_EPOCH=$(git -C "${REPO_ROOT}" log -1 --pretty=%ct "${BUILD_COMMIT}")
+    log "WARNING: No sourceDateEpoch in history, using commit time: ${SOURCE_DATE_EPOCH}"
 fi
 
-# Check commit
-BUILD_COMMIT="${SOURCE_COMMIT_TK:-${SOURCE_COMMIT_TT}}"
-if [[ -n "${BUILD_COMMIT}" ]]; then
-    CURRENT_COMMIT=$(git -C "${REPO_ROOT}" rev-parse HEAD)
-    if [[ "${CURRENT_COMMIT}" != "${BUILD_COMMIT}" ]]; then
-        log "WARNING: Current commit ${CURRENT_COMMIT:0:12} differs from build commit ${BUILD_COMMIT:0:12}"
-        log "Verification may fail if source code changed between commits"
-    fi
-fi
+log "Verifying recorded build commit: ${BUILD_COMMIT:0:12}"
 
-# Normalize file mtimes to SOURCE_DATE_EPOCH for reproducibility.
-# Git checkout sets mtimes to checkout time, which varies between environments.
-# rewrite-timestamp only clamps timestamps NEWER than the epoch, so older mtimes
-# from different checkout times would produce different layers.
-find "${REPO_ROOT}" -not -path '*/.git/*' -exec touch -d "@${SOURCE_DATE_EPOCH}" {} + 2>/dev/null || true
+# Verify against the commit the image was released from, not HEAD. The property
+# being checked is "the recorded image is reproducible from its recorded source
+# commit" -- which is independent of what's happening on the current branch.
+WORKTREE_DIR="${TMPDIR}/src"
+git -C "${REPO_ROOT}" worktree add --detach "${WORKTREE_DIR}" "${BUILD_COMMIT}" >/dev/null
+
+# Normalize file mtimes to SOURCE_DATE_EPOCH. rewrite-timestamp only clamps
+# timestamps NEWER than the epoch, so older mtimes from different checkouts
+# would otherwise produce different layers.
+find "${WORKTREE_DIR}" -not -path '*/.git/*' -exec touch -d "@${SOURCE_DATE_EPOCH}" {} + 2>/dev/null || true
 
 # Create/reuse pinned builder (same image as build.sh)
 BUILDER_NAME="reclaim-repro"
@@ -115,16 +136,16 @@ log "  TEE-T: ${EXPECTED_TT}"
 # Build TEE-K
 log "Building TEE-K from source..."
 docker buildx build ${BUILDER_FLAG} --no-cache \
-    -f "${REPO_ROOT}/tee_k/Dockerfile.enclave" \
+    -f "${WORKTREE_DIR}/tee_k/Dockerfile.enclave" \
     -o type=oci,dest="${TMPDIR}/tee-k.tar",rewrite-timestamp=true \
-    "${REPO_ROOT}"
+    "${WORKTREE_DIR}"
 
 # Build TEE-T
 log "Building TEE-T from source..."
 docker buildx build ${BUILDER_FLAG} --no-cache \
-    -f "${REPO_ROOT}/tee_t/Dockerfile.enclave" \
+    -f "${WORKTREE_DIR}/tee_t/Dockerfile.enclave" \
     -o type=oci,dest="${TMPDIR}/tee-t.tar",rewrite-timestamp=true \
-    "${REPO_ROOT}"
+    "${WORKTREE_DIR}"
 
 # Extract digests
 extract_digest() {
