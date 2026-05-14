@@ -101,9 +101,12 @@ func CreateRequest(secret *HTTPProviderSecretParams, params *HTTPProviderParams)
 	logger.Debug("Host header and public headers", zap.String("component", "HTTP"), zap.String("operation", "CreateRequest"), zap.String("level", "verbose"), zap.String("host_header", hostHeader), zap.Int("public_headers", len(pubHeadersList)))
 	lines := []string{
 		reqLine,
-		// `Connection: close` must be the first header after the request line.
-		"Connection: close",
+		// `Host` and `Connection: close` must be the first two headers after
+		// the request line, in this exact order. The attestor enforces this
+		// regex-strict to prevent HTTP request smuggling via pipelining
+		// (OVE-20260504-0001, attestor-core PR #79).
 		fmt.Sprintf("Host: %s", hostHeader),
+		"Connection: close",
 		fmt.Sprintf("Content-Length: %d", contentLength),
 		"Accept-Encoding: identity",
 	}

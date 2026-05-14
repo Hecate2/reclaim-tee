@@ -760,11 +760,16 @@ func TestCreateRequest_ShouldPanicOnNonPresentSecretParam(t *testing.T) {
 	CreateRequest(&secret, &params)
 }
 
-// TestCreateRequest_ConnectionCloseIsFirstHeader pins the anti-smuggling
-// the literal bytes `Connection: close\r\n`
-// must appear immediately after the request line. The attestor enforces this
-// byte-strict; if this test breaks, the TEE client will fail validation.
-func TestCreateRequest_ConnectionCloseIsFirstHeader(t *testing.T) {
+// TestCreateRequest_HostAndConnectionAreFirstTwoHeaders pins the
+// anti-smuggling invariant for OVE-20260504-0001 (attestor-core PR #79):
+// the attestor's assertNoSmuggle requires the request to match
+//
+//	^METHOD path HTTP/1.1\r\nHost: <host>\r\nConnection: close\r\n
+//
+// so `Host` and `Connection: close` must be the first two headers, in that
+// order. If this test breaks, the TEE client will fail validation against
+// any attestor on AttestorVersion >= 3.1.0.
+func TestCreateRequest_HostAndConnectionAreFirstTwoHeaders(t *testing.T) {
 	params := HTTPProviderParams{
 		URL:    "https://example.com/some/path?q=1",
 		Method: "GET",
@@ -778,21 +783,16 @@ func TestCreateRequest_ConnectionCloseIsFirstHeader(t *testing.T) {
 		t.Fatalf("unexpected err: %v", err)
 	}
 
-	reqLineEnd := strings.Index(string(res.Data), "\r\n")
-	if reqLineEnd < 0 {
-		t.Fatalf("request line terminator not found in: %q", string(res.Data))
-	}
-
-	expected := "Connection: close\r\n"
-	firstHeaderStart := reqLineEnd + 2
-	firstHeaderEnd := firstHeaderStart + len(expected)
-	if firstHeaderEnd > len(res.Data) {
-		t.Fatalf("request too short to contain first header; got %d bytes", len(res.Data))
-	}
-	actual := string(res.Data[firstHeaderStart:firstHeaderEnd])
-	if actual != expected {
-		t.Errorf("first header after request line: expected %q, got %q\nfull request:\n%s",
-			expected, actual, string(res.Data))
+	want := "GET /some/path?q=1 HTTP/1.1\r\n" +
+		"Host: example.com\r\n" +
+		"Connection: close\r\n"
+	if !strings.HasPrefix(string(res.Data), want) {
+		clip := len(want) + 50
+		if clip > len(res.Data) {
+			clip = len(res.Data)
+		}
+		t.Errorf("request did not start with required prefix.\nwant:\n%q\ngot:\n%q",
+			want, string(res.Data[:clip]))
 	}
 }
 

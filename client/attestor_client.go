@@ -5,12 +5,13 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"github.com/reclaimprotocol/reclaim-tee/providers"
 	"math/rand/v2"
 	"net/url"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/reclaimprotocol/reclaim-tee/providers"
 
 	teeproto "github.com/reclaimprotocol/reclaim-tee/proto"
 	"github.com/reclaimprotocol/reclaim-tee/shared"
@@ -103,7 +104,7 @@ func (ac *AttestorClient) initializeConnection() error {
 	// Create InitRequest
 	initRequest := &teeproto.RPCMessage_InitRequest{
 		InitRequest: &teeproto.InitRequest{
-			ClientVersion: teeproto.AttestorVersion_ATTESTOR_VERSION_3_0_0, // Latest version
+			ClientVersion: teeproto.AttestorVersion_ATTESTOR_VERSION_3_1_0, // Latest version
 			SignatureType: teeproto.ServiceSignatureType_SERVICE_SIGNATURE_TYPE_ETH,
 			Auth:          nil, // No authentication for now
 		},
