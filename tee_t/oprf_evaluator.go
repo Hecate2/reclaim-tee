@@ -30,8 +30,7 @@ func (t *TEET) handleOPRFRangesFromClient(sessionID string, msg *teeproto.OPRFRa
 		teetState.OPRFState.Store(int32(shared.OPRFStateNone))
 		t.logger.WithSession(sessionID).Debug("No OPRF ranges - skipping MPC OPRF")
 		// Check if we can finalize now
-		t.checkFinishedCondition(sessionID)
-		return nil
+		return t.checkFinishedCondition(sessionID)
 	}
 
 	// Validate ranges against consolidated ciphertext

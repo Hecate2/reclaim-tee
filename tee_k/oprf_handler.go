@@ -27,8 +27,7 @@ func (t *TEEK) handleOPRFRangesFromClient(sessionID string, msg *teeproto.OPRFRa
 		teekState.OPRFState.Store(int32(shared.OPRFStateNone))
 		t.logger.WithSession(sessionID).Debug("No OPRF ranges")
 		// Check if we can send signature now
-		t.checkAndSendSignatureIfReady(sessionID)
-		return nil
+		return t.checkAndSendSignatureIfReady(sessionID)
 	}
 
 	// Initialize OPRF state
