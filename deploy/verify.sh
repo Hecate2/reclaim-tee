@@ -21,7 +21,7 @@ REPO_ROOT="$(dirname "${SCRIPT_DIR}")"
 HISTORY="${SCRIPT_DIR}/image-history.json"
 
 # Same pinned BuildKit image as build.sh -- must match exactly
-BUILDKIT_IMAGE="moby/buildkit:buildx-stable-1@sha256:0039c1d47e8748b5afea56f4e85f14febaf34452bd99d9552d2daa82262b5cc5"
+BUILDKIT_IMAGE="moby/buildkit:buildx-stable-1@sha256:0168606be2315b7c807a03b3d8aa79beefdb31c98740cebdffdfeebf31190c9f"
 
 TMPDIR=$(mktemp -d)
 WORKTREE_DIR=""

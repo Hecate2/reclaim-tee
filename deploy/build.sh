@@ -28,7 +28,7 @@ REPO_ROOT="$(dirname "${SCRIPT_DIR}")"
 
 # Pinned BuildKit image for reproducible builds across environments
 # Update this digest when upgrading BuildKit (run: docker pull moby/buildkit:buildx-stable-1)
-BUILDKIT_IMAGE="moby/buildkit:buildx-stable-1@sha256:0039c1d47e8748b5afea56f4e85f14febaf34452bd99d9552d2daa82262b5cc5"
+BUILDKIT_IMAGE="moby/buildkit:buildx-stable-1@sha256:0168606be2315b7c807a03b3d8aa79beefdb31c98740cebdffdfeebf31190c9f"
 
 # Load config from build.env (not committed to git)
 BUILD_ENV="${SCRIPT_DIR}/build.env"

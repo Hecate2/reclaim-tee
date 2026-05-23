@@ -42,12 +42,15 @@ update_pins() {
     echo "=== Pulling Latest Versions ==="
     echo ""
 
-    # Get latest Go/Alpine amd64 digest
+    # Get latest Go/Alpine amd64 digest.
+    # Pull the tag for the local `docker inspect` GOLANG_VERSION lookup below,
+    # but read the multi-arch index directly from the registry — depending on
+    # Docker's image store, the local RepoDigests[0] may be a per-platform
+    # manifest digest, which makes `docker manifest inspect tag@digest` return
+    # nothing and crashes the JSON parser.
     echo "Pulling ${GOLANG_TAG}..."
     docker pull --quiet "${GOLANG_TAG}" >/dev/null
-    MULTI_DIGEST=$(docker inspect "${GOLANG_TAG}" --format='{{index .RepoDigests 0}}' | sed 's/.*@//')
-    # Get amd64-specific manifest
-    NEW_GO=$(docker manifest inspect "${GOLANG_TAG}@${MULTI_DIGEST}" 2>/dev/null | python3 -c "
+    NEW_GO=$(docker manifest inspect "${GOLANG_TAG}" | python3 -c "
 import json,sys
 data = json.load(sys.stdin)
 for m in data.get('manifests', []):
@@ -56,6 +59,10 @@ for m in data.get('manifests', []):
         print(m['digest'])
         break
 ")
+    if [[ -z "${NEW_GO}" ]]; then
+        echo "ERROR: failed to resolve amd64 digest from 'docker manifest inspect ${GOLANG_TAG}'" >&2
+        exit 1
+    fi
     GO_VER=$(docker inspect "${GOLANG_TAG}" --format='{{range .Config.Env}}{{println .}}{{end}}' | grep GOLANG_VERSION | cut -d= -f2)
     echo "  Go ${GO_VER}: ${NEW_GO}"
 

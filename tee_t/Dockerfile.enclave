@@ -1,6 +1,6 @@
 # check=skip=SecretsUsedInArgOrEnv
-# Go 1.26.2 / Alpine 3.21 -- update digest when upgrading Go
-FROM golang:alpine@sha256:80fbb8f9b2fa541a7d34378f1ad10f4f1c433817c4ed39ddb3e2f3ec3e961271 AS app-builder
+# Go 1.26.3 -- update digest when upgrading Go
+FROM golang:alpine@sha256:f44b851aa23dfa219d18db6eab743203245429d355cb619cf96a2ffe2a84ba7a AS app-builder
 ENV CGO_ENABLED=0
 WORKDIR /app
 
