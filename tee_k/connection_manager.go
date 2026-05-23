@@ -127,6 +127,11 @@ func (cm *TEETConnectionManager) EstablishControlConnection() error {
 
 		cm.logger.Info("Control connection to TEE_T established")
 
+		// Bidirectional ping/pong heartbeat. Sets the read deadline that the
+		// control read loop relies on, so a dead peer is detected even when no
+		// application messages are flowing.
+		wsConn.StartControlHeartbeat(cm.logger)
+
 		// Start control message handler FIRST - it needs to receive OT response
 		// Use a done channel to stop it if OT fails
 		handlerDone := make(chan struct{})
@@ -354,6 +359,17 @@ func (cm *TEETConnectionManager) WaitForSessionCreatedAck(sessionID string) erro
 	case <-ch:
 		return nil
 	case <-time.After(SessionCreatedAckTimeout):
+		// Treat ack timeout as evidence the control connection is dead from
+		// TEE_T's side (e.g., TEE_T tore it down but our writes still buffer).
+		// Closing it pops handleControlMessages' ReadMessage and triggers the
+		// existing reconnect path, instead of failing per-session forever.
+		cm.mu.RLock()
+		conn := cm.controlConn
+		cm.mu.RUnlock()
+		if conn != nil {
+			cm.logger.WithSession(sessionID).Warn("SessionCreatedAck timeout — closing control connection to force reconnect")
+			_ = conn.Close()
+		}
 		return fmt.Errorf("timeout waiting for SessionCreatedAck")
 	}
 }

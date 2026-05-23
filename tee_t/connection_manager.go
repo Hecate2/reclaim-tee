@@ -133,6 +133,11 @@ func (cm *TEEKConnectionManager) HandleControlConnection(conn *websocket.Conn) e
 	// Update TEET's connection state
 	cm.teet.setTEEKConnected(true)
 
+	// Bidirectional ping/pong heartbeat. Sets the read deadline that
+	// handleControlMessages relies on, so a dead peer is detected even when no
+	// application messages are flowing.
+	wsConn.StartControlHeartbeat(cm.logger)
+
 	// Handle control messages in a loop
 	cm.handleControlMessages(wsConn)
 
@@ -159,8 +164,9 @@ func (cm *TEEKConnectionManager) handleControlMessages(conn *shared.WSConnection
 
 	messageCount := 0
 	for {
-		// No read deadline on control connection - it should stay alive forever
-		// Dead connection detection relies on WebSocket ping/pong or TCP keepalive
+		// Read deadline is maintained by StartControlHeartbeat via the
+		// Ping/Pong handlers; a missing pong causes ReadMessage to return a
+		// timeout error and tear this loop down.
 		_, msgBytes, err := conn.ReadMessage()
 		messageCount++
 		if messageCount == 1 {

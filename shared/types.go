@@ -3,6 +3,7 @@ package shared
 import (
 	"context"
 	"fmt"
+	"net"
 	"reflect"
 	"sort"
 	"sync"
@@ -11,6 +12,16 @@ import (
 	teeproto "github.com/reclaimprotocol/reclaim-tee/proto"
 
 	"github.com/gorilla/websocket"
+	"go.uber.org/zap"
+)
+
+// Control connection liveness parameters. Both TEE_K and TEE_T use these to
+// detect a dead peer via bidirectional WebSocket ping/pong on the long-lived
+// control channel. ControlPingPeriod must be less than ControlPongWait.
+const (
+	ControlPongWait   = 30 * time.Second
+	ControlPingPeriod = (ControlPongWait * 9) / 10
+	ControlWriteWait  = 10 * time.Second
 )
 
 // Connection abstraction for WebSocket connections
@@ -59,6 +70,44 @@ func (w *WSConnection) ReadMessage() (messageType int, p []byte, err error) {
 // SetReadDeadline sets the read deadline on the underlying connection
 func (w *WSConnection) SetReadDeadline(t time.Time) error {
 	return w.conn.SetReadDeadline(t)
+}
+
+// StartControlHeartbeat wires bidirectional WebSocket ping/pong on a long-lived
+// control connection so each side can detect a dead peer. It sets an initial
+// read deadline, installs Ping/Pong handlers that refresh the deadline on every
+// inbound control frame, and launches a goroutine that emits a PingMessage every
+// ControlPingPeriod. The goroutine exits when WriteControl fails (e.g., when
+// the connection is closed), so it is safe to call once per established
+// connection without explicit teardown.
+func (w *WSConnection) StartControlHeartbeat(logger *Logger) {
+	conn := w.conn
+	_ = conn.SetReadDeadline(time.Now().Add(ControlPongWait))
+	conn.SetPongHandler(func(string) error {
+		return conn.SetReadDeadline(time.Now().Add(ControlPongWait))
+	})
+	conn.SetPingHandler(func(message string) error {
+		_ = conn.SetReadDeadline(time.Now().Add(ControlPongWait))
+		err := conn.WriteControl(websocket.PongMessage, []byte(message), time.Now().Add(ControlWriteWait))
+		if err == websocket.ErrCloseSent {
+			return nil
+		}
+		if ne, ok := err.(net.Error); ok && ne.Timeout() {
+			return nil
+		}
+		return err
+	})
+	go func() {
+		ticker := time.NewTicker(ControlPingPeriod)
+		defer ticker.Stop()
+		for range ticker.C {
+			if err := conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(ControlWriteWait)); err != nil {
+				if logger != nil {
+					logger.Debug("Control heartbeat ping failed, exiting", zap.Error(err))
+				}
+				return
+			}
+		}
+	}()
 }
 
 // Message types for websocket communication
