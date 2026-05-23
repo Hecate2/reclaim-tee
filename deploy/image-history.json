@@ -42,5 +42,27 @@
     "updateTime": "2026-04-19 17:26:11+05:00",
     "sourceCommit": "85812fb5ddb263fa30c114628536bfed2e059134",
     "sourceDateEpoch": 1776601571
+  },
+  {
+    "package": "gcr.io/new-reclaim-architecture/tee-k",
+    "tags": [
+      "v2"
+    ],
+    "version": "sha256:092a7774545f878f96e7dcee91352e74d926a104e44b87498540304fc2891eb2",
+    "createTime": "2026-05-23 10:49:07+05:00",
+    "updateTime": "2026-05-23 10:49:07+05:00",
+    "sourceCommit": "e619bcebb79847621cdf7e1c82cded6062a762f0",
+    "sourceDateEpoch": 1779515347
+  },
+  {
+    "package": "gcr.io/new-reclaim-architecture/tee-t",
+    "tags": [
+      "v2"
+    ],
+    "version": "sha256:00634cb95f15b363ce7cfc13d20fd59f666a404b4a9cc3099baa74ee2cbc0cf3",
+    "createTime": "2026-05-23 10:49:07+05:00",
+    "updateTime": "2026-05-23 10:49:07+05:00",
+    "sourceCommit": "e619bcebb79847621cdf7e1c82cded6062a762f0",
+    "sourceDateEpoch": 1779515347
   }
 ]
