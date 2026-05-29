@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"encoding/base64"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -160,21 +159,21 @@ func (c *Client) connectViaProxy(targetHost string, targetPort int) (net.Conn, e
 	c.logger.Debug("CONNECT request sent, waiting for response",
 		zap.Int("bytes_written", n))
 
-	// Read response
+	// Read response. Pass a synthetic CONNECT request so Go's HTTP parser
+	// treats the 2xx response body as empty (http.NoBody) instead of
+	// "read until connection close" — the tunnel never closes, so reading
+	// the body would block until the conn deadline fires.
 	br := bufio.NewReader(proxyConn)
-	resp, err := http.ReadResponse(br, nil)
+	resp, err := http.ReadResponse(br, &http.Request{Method: http.MethodConnect})
 	if err != nil {
 		proxyConn.Close()
 		return nil, fmt.Errorf("failed to read proxy response: %w", err)
 	}
+	resp.Body.Close()
 
 	c.logger.Debug("Received proxy response",
 		zap.Int("status_code", resp.StatusCode),
 		zap.String("status", resp.Status))
-
-	// Read and discard response body
-	io.Copy(io.Discard, resp.Body)
-	resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		proxyConn.Close()
