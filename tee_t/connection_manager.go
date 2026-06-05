@@ -19,6 +19,17 @@ const MaxConcurrentSessions = 100
 // SessionReadTimeout is the maximum time to wait for a message on a session connection
 const SessionReadTimeout = 1 * time.Minute
 
+// OTReadyWatchdogTimeout bounds how long the control connection may stay up
+// without TEE_K sending OtPrecomputeComplete. If the receiver pool isn't ready
+// within this window, the watchdog tears the connection down so TEE_K is
+// forced through a fresh attestation + IsInitial precompute on reconnect.
+//
+// Sized above TEE_K's own performOTPrecomputation timeout (60s) so that, on a
+// slow but otherwise healthy OT exchange, TEE_K's local timeout fires first
+// and self-recovers; the watchdog only kicks in for true wedges where TEE_K
+// believes everything is fine.
+const OTReadyWatchdogTimeout = 90 * time.Second
+
 // TEEKConnectionManager manages all connections from TEE_K
 // - One persistent control connection for attestation, OT precomputation, and session lifecycle
 // - One per-session connection for each active session's data flow
@@ -138,6 +149,18 @@ func (cm *TEEKConnectionManager) HandleControlConnection(conn *websocket.Conn) e
 	// application messages are flowing.
 	wsConn.StartControlHeartbeat(cm.logger)
 
+	// OT-ready watchdog: heartbeats prove the connection is alive, but they
+	// don't tell us whether TEE_K's OT precomputation flow completed. If
+	// OtPrecomputeComplete never arrives, every client connection is rejected
+	// with "OT receiver pool not ready" while the control conn looks healthy.
+	// The watchdog forces a reconnect (and thus a fresh IsInitial precompute)
+	// when the wedge persists, and logs ERROR so paging fires.
+	//
+	// defer close so the goroutine still stops if handleControlMessages panics.
+	watchdogStop := make(chan struct{})
+	defer close(watchdogStop)
+	go cm.runOTReadyWatchdog(wsConn, watchdogStop)
+
 	// Handle control messages in a loop
 	cm.handleControlMessages(wsConn)
 
@@ -156,6 +179,48 @@ func (cm *TEEKConnectionManager) HandleControlConnection(conn *websocket.Conn) e
 	cm.teet.clearOTReceiverPool()
 
 	return nil
+}
+
+// runOTReadyWatchdog monitors the receiver pool's ready flag while the control
+// connection is up. On the first tick where the pool has been not-ready for
+// longer than OTReadyWatchdogTimeout, it logs ERROR and closes wsConn — which
+// pops handleControlMessages' ReadMessage and runs the disconnect cleanup,
+// driving TEE_K through reattest + a fresh IsInitial precompute.
+//
+// Exits when handleControlMessages returns (stop channel closed) or wsConn
+// closes from any other cause.
+func (cm *TEEKConnectionManager) runOTReadyWatchdog(wsConn *shared.WSConnection, stop <-chan struct{}) {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	var notReadySince time.Time
+	fired := false
+
+	for {
+		select {
+		case <-stop:
+			return
+		case <-ticker.C:
+			if cm.teet.isOTReceiverPoolReady() {
+				notReadySince = time.Time{}
+				continue
+			}
+			if notReadySince.IsZero() {
+				notReadySince = time.Now()
+				continue
+			}
+			if fired {
+				continue
+			}
+			if time.Since(notReadySince) >= OTReadyWatchdogTimeout {
+				cm.logger.Error("OT receiver pool stuck not-ready while control connection is up; closing control conn to force re-precompute",
+					zap.Duration("not_ready_for", time.Since(notReadySince)))
+				fired = true
+				_ = wsConn.Close()
+				return
+			}
+		}
+	}
 }
 
 // handleControlMessages processes messages on the control connection

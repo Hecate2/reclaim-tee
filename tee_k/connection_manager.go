@@ -148,6 +148,12 @@ func (cm *TEETConnectionManager) EstablishControlConnection() error {
 			cm.mu.Lock()
 			cm.controlConn = nil
 			cm.mu.Unlock()
+			// Mirror the disconnect path: a failed OT exchange leaves state.ready
+			// potentially stale-true from a prior cycle. Without this, the next
+			// successful precompute would skip sendOTPrecomputeComplete (gated on
+			// pendingIsInitial post-fix, but historically gated on !state.ready)
+			// and TEE_T's receiver pool would never be marked ready.
+			cm.teek.clearOTPool()
 			time.Sleep(1 * time.Second)
 			continue
 		}

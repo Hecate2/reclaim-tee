@@ -23,7 +23,21 @@ func (t *TEET) handleClientWebSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !t.isOTReceiverPoolReady() {
-		t.logger.Warn("Rejecting client connection - OT receiver pool not ready")
+		// TEE_K connected + pool not ready is the wedged-state signature.
+		// Escalate to ERROR (rate-limited) so paging fires; this is what
+		// was missed during the 2026-06-05 outage when the rejection was a
+		// plain WARNING and no alerts triggered.
+		t.lastOTRejectLogMu.Lock()
+		shouldErrLog := time.Since(t.lastOTRejectLog) >= OTReadyRejectLogInterval
+		if shouldErrLog {
+			t.lastOTRejectLog = time.Now()
+		}
+		t.lastOTRejectLogMu.Unlock()
+		if shouldErrLog {
+			t.logger.Error("Rejecting client connection - OT receiver pool not ready (control conn appears healthy)")
+		} else {
+			t.logger.Warn("Rejecting client connection - OT receiver pool not ready")
+		}
 		http.Error(w, "Service temporarily unavailable - OT pool not ready", http.StatusServiceUnavailable)
 		return
 	}
