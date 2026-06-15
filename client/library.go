@@ -3,6 +3,7 @@ package client
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/joho/godotenv"
@@ -34,47 +35,62 @@ type ReclaimClient struct {
 	logger *shared.Logger
 }
 
-// NewReclaimClient creates a new ReclaimClient with the given configuration
-func NewReclaimClient(config ClientConfig) *ReclaimClient {
+// NewReclaimClient creates a new ReclaimClient. The constructor hits
+// /allocate to resolve the TEE pair and JWT. There is no direct-URL path;
+// V2 clients always go through the router. RouterURL defaults to
+// DefaultRouterURL when unset.
+//
+// Returns an error if /allocate fails.
+func NewReclaimClient(config ClientConfig) (*ReclaimClient, error) {
+	if config.RouterURL == "" {
+		config.RouterURL = DefaultRouterURL
+	}
+
 	// Apply defaults if not specified
 	if config.Timeout == 0 {
 		config.Timeout = 30 * time.Second
 	}
+
+	// Hit /allocate to learn this session's pair addresses + JWT.
+	nonce := config.RequestId
+	if nonce == "" {
+		nonce = fmt.Sprintf("client-%d", time.Now().UnixNano())
+	}
+	alloc, err := AllocatePair(config.RouterURL, nonce)
+	if err != nil {
+		return nil, fmt.Errorf("router allocate: %v", err)
+	}
+	scheme := "ws"
+	if strings.HasPrefix(config.RouterURL, "https://") {
+		scheme = "wss"
+	}
+	teekURL := fmt.Sprintf("%s://%s/ws", scheme, alloc.TEEKAddr)
+	teetURL := fmt.Sprintf("%s://%s/ws", scheme, alloc.TEETAddr)
+
 	if config.Mode == ModeAuto {
-		config.Mode = detectMode(config.TEEKURL, config.TEETURL)
+		config.Mode = detectMode(teekURL, teetURL)
 	}
 
-	// Create internal client with TEE_K URL
-	client := NewClient(config.TEEKURL)
+	client := NewClient(teekURL)
+	client.SetTEETURL(teetURL)
+	client.SetRouterJWT(alloc.JWT)
 
-	// Use provided logger if available and store requestId
 	if config.Logger != nil {
 		client.logger = config.Logger
 	}
-	// Store request ID for tracking
 	if config.RequestId != "" {
 		client.requestId = config.RequestId
 	}
 
-	// Configure TEE_T URL if provided
-	if config.TEETURL != "" {
-		client.SetTEETURL(config.TEETURL)
-	}
-
-	// Store attestor URL
 	client.attestorURL = config.AttestorURL
-
-	// Store config for later use
 	client.forceTLSVersion = config.ForceTLSVersion
 	client.forceCipherSuite = config.ForceCipherSuite
 	client.proxyURL = shared.GetHTTPSProxyURL()
 	client.SetMode(config.Mode)
 
-	// Set provider params for automatic response redactions
 	client.providerParams = config.ProviderParams
 	client.providerSecretParams = config.ProviderSecretParams
 
-	// Initialize logger with Flutter callback support
 	isEnclaveMode := client.clientMode == ModeEnclave
 	logger := GetLogger("client", isEnclaveMode)
 
@@ -82,22 +98,22 @@ func NewReclaimClient(config ClientConfig) *ReclaimClient {
 		Client: client,
 		config: config,
 		logger: logger,
-	}
+	}, nil
 }
 
-// ConfigJSON represents optional configuration for the client
+// ConfigJSON is the JSON shape accepted by NewReclaimClientFromJSON.
+// routerUrl defaults to DefaultRouterURL when omitted — the library always
+// resolves the TEE pair via /allocate. No direct TEE URLs.
 type ConfigJSON struct {
+	RouterURL   string `json:"routerUrl"`
 	AttestorURL string `json:"attestorUrl,omitempty"`
-	TEEKURL     string `json:"teekUrl,omitempty"`
-	TEETURL     string `json:"teetUrl,omitempty"`
 	RequestID   string `json:"requestId,omitempty"`
 }
 
 // Default URLs for TEE services
 const (
-	DefaultAttestorURL = "wss://eu.attestor.reclaimprotocol.org:444/ws"
-	DefaultTEEKURL     = "wss://eu.tk.reclaimprotocol.org/ws"
-	DefaultTEETURL     = "wss://eu.tt.reclaimprotocol.org/ws"
+	DefaultAttestorURL = "wss://attestor.reclaimprotocol.org:444/ws"
+	DefaultRouterURL   = "https://tee.reclaimprotocol.org"
 )
 
 // NewReclaimClientFromJSON creates a new ReclaimClient with JSON-encoded provider params and optional config
@@ -147,10 +163,9 @@ func NewReclaimClientFromJSON(providerParamsJSON string, configJSON string) (*Re
 		}
 	}
 
-	// Parse config with defaults
+	// Parse config — routerUrl defaults to DefaultRouterURL when unset.
 	attestorURL := DefaultAttestorURL
-	teekURL := DefaultTEEKURL
-	teetURL := DefaultTEETURL
+	routerURL := DefaultRouterURL
 	var requestID string
 
 	if configJSON != "" {
@@ -159,15 +174,11 @@ func NewReclaimClientFromJSON(providerParamsJSON string, configJSON string) (*Re
 			if cfg.AttestorURL != "" {
 				attestorURL = cfg.AttestorURL
 			}
-			if cfg.TEEKURL != "" {
-				teekURL = cfg.TEEKURL
-			}
-			if cfg.TEETURL != "" {
-				teetURL = cfg.TEETURL
-			}
 			requestID = cfg.RequestID
+			if cfg.RouterURL != "" {
+				routerURL = cfg.RouterURL
+			}
 		}
-		// Ignore parse errors - use defaults
 	}
 
 	// Initialize logger
@@ -181,10 +192,8 @@ func NewReclaimClientFromJSON(providerParamsJSON string, configJSON string) (*Re
 		}
 	}
 
-	// Create config with validated provider params
 	config := ClientConfig{
-		TEEKURL:              teekURL,
-		TEETURL:              teetURL,
+		RouterURL:            routerURL,
 		AttestorURL:          attestorURL,
 		Timeout:              30 * time.Second,
 		Mode:                 ModeAuto,
@@ -195,7 +204,7 @@ func NewReclaimClientFromJSON(providerParamsJSON string, configJSON string) (*Re
 		RequestId:            requestID,
 	}
 
-	return NewReclaimClient(config), nil
+	return NewReclaimClient(config)
 }
 
 // Connect establishes connections to both TEE_K and TEE_T

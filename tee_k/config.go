@@ -8,68 +8,55 @@ import (
 	"github.com/joho/godotenv"
 )
 
+// TEEKConfig holds the runtime configuration for TEE_K. Router mode is the
+// production path; standalone mode is local-dev only (no TLS, no attestation).
 type TEEKConfig struct {
-	// Standalone mode settings
 	Port    int    `json:"port"`
-	TEETURL string `json:"teet_url"`
+	TEETURL string `json:"teet_url"` // only consulted in standalone mode
 
-	// Enclave mode settings
-	EnclaveMode bool   `json:"enclave_mode"`
-	Domain      string `json:"domain"`
-	KMSKey      string `json:"kms_key"`
+	// TLS configuration applied to outbound TLS sessions to target servers
+	// (the actual workload — proving data from external HTTPS endpoints).
+	ForceTLSVersion  string `json:"force_tls_version"`  // "1.2", "1.3", or "" for auto
+	ForceCipherSuite string `json:"force_cipher_suite"` // hex ID (e.g. "0xc02f") or name, or "" for auto
 
-	// KMS provider (Google KMS)
-	KMSProvider     string `json:"kms_provider"`
-	GoogleProjectID string `json:"google_project_id,omitempty"`
-	GoogleLocation  string `json:"google_location,omitempty"`
-	GoogleKeyRing   string `json:"google_key_ring,omitempty"`
-	GoogleKeyName   string `json:"google_key_name,omitempty"`
+	// Router-mode settings (multi-pair architecture). Presence of RouterURL
+	// flips boot into router mode. The TEE mints SA identity tokens with
+	// RouterURL as the `aud` claim; the router validates against its own
+	// SA_TOKEN_AUDIENCE env var.
+	RouterURL               string `json:"router_url,omitempty"`
+	SelfAddr                string `json:"self_addr,omitempty"`
+	PeerAddr                string `json:"peer_addr,omitempty"`
+	ExpectedPeerImageDigest string `json:"expected_peer_image_digest,omitempty"`
+	JWTPublicKey            string `json:"jwt_public_key,omitempty"`
+	ExpectedJWTIssuer       string `json:"expected_jwt_issuer,omitempty"`
+	KMSEnclaveDomainKey     string `json:"kms_enclave_domain_key,omitempty"`
+}
 
-	// TLS configuration
-	ForceTLSVersion  string `json:"force_tls_version"`  // Force specific TLS version: "1.2", "1.3", or "" for auto
-	ForceCipherSuite string `json:"force_cipher_suite"` // Force specific cipher suite: hex ID (e.g. "0xc02f") or name, or "" for auto
+// RouterMode returns true when the router-mode boot path should be used.
+// Detection is by presence of ROUTER_URL.
+func (c *TEEKConfig) RouterMode() bool {
+	return c.RouterURL != ""
 }
 
 func LoadTEEKConfig() *TEEKConfig {
-	err := godotenv.Load()
-	if err != nil {
+	if err := godotenv.Load(); err != nil {
 		log.Printf("Warning: Error loading .env file: %v", err)
 	} else {
 		log.Printf("Successfully loaded .env file")
 	}
 
-	// GCP uses Google KMS
-	kmsProvider := "google"
-
-	log.Printf("Configuration loaded - KMSProvider: %s", kmsProvider)
-
-	enclaveMode := shared.GetEnvOrDefault("ENCLAVE_MODE", "false") == "true"
-
-	// Determine TEE_T URL
-	var teetURL string
-	if enclaveMode {
-		// GCP enclave mode - use production URL from env
-		teetURL = shared.GetEnvOrDefault("TEET_URL", "wss://eu.tt.reclaimprotocol.org/teek")
-	} else {
-		// Standalone mode
-		teetURL = shared.GetEnvOrDefault("TEET_URL", "ws://localhost:8081/teek")
-	}
-
-	// Determine TEE_K domain from env
-	domain := shared.GetEnvOrDefault("ENCLAVE_DOMAIN", "eu.tk.reclaimprotocol.org")
-
 	return &TEEKConfig{
 		Port:             shared.GetEnvIntOrDefault("PORT", 8080),
-		TEETURL:          teetURL,
-		EnclaveMode:      enclaveMode,
-		Domain:           domain,
-		KMSKey:           shared.GetEnvOrDefault("KMS_KEY", ""),
-		KMSProvider:      kmsProvider,
-		GoogleProjectID:  shared.GetEnvOrDefault("GOOGLE_PROJECT_ID", ""),
-		GoogleLocation:   shared.GetEnvOrDefault("GOOGLE_KMS_LOCATION", ""),
-		GoogleKeyRing:    shared.GetEnvOrDefault("GOOGLE_KMS_KEYRING", ""),
-		GoogleKeyName:    shared.GetEnvOrDefault("GOOGLE_KMS_KEY", ""),
+		TEETURL:          shared.GetEnvOrDefault("TEET_URL", "ws://localhost:8081/teek"),
 		ForceTLSVersion:  shared.GetEnvOrDefault("FORCE_TLS_VERSION", ""),
 		ForceCipherSuite: shared.GetEnvOrDefault("FORCE_CIPHER_SUITE", ""),
+
+		RouterURL:               shared.GetEnvOrDefault("ROUTER_URL", ""),
+		SelfAddr:                shared.GetEnvOrDefault("SELF_ADDR", ""),
+		PeerAddr:                shared.GetEnvOrDefault("PEER_ADDR", ""),
+		ExpectedPeerImageDigest: shared.GetEnvOrDefault("EXPECTED_PEER_IMAGE_DIGEST", ""),
+		JWTPublicKey:            shared.GetEnvOrDefault("JWT_PUBLIC_KEY", ""),
+		ExpectedJWTIssuer:       shared.GetEnvOrDefault("EXPECTED_JWT_ISSUER", ""),
+		KMSEnclaveDomainKey:     shared.GetEnvOrDefault("KMS_ENCLAVE_DOMAIN_KEY", ""),
 	}
 }

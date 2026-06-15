@@ -80,6 +80,9 @@ func (t *TEET) verifyTagForResponse(sessionID string, encryptedResp *shared.Encr
 	// Consolidate response ciphertext immediately after successful verification
 	if success {
 		if cipherInfo != nil && cipherInfo.IsTLS13 {
+			if len(encryptedResp.EncryptedData) < 1 {
+				return shared.ResponseTagVerificationData{Success: false, SeqNum: tagSecretsData.SeqNum, Message: "TLS 1.3 EncryptedData empty"}
+			}
 			teetState.AppendResponseCiphertext(encryptedResp.EncryptedData[:len(encryptedResp.EncryptedData)-1]) // strip content type byte
 		} else {
 			teetState.AppendResponseCiphertext(encryptedResp.EncryptedData)
@@ -106,8 +109,11 @@ func (t *TEET) verifyCommitmentsIfReady(sessionID string) error {
 	if session.RedactionState == nil {
 		return fmt.Errorf("critical security failure: no redaction state available for commitment verification in session %s", sessionID)
 	}
-	hasStreams := len(session.RedactionState.RedactionStreams) > 0 && len(session.RedactionState.CommitmentKeys) > 0
-	hasCommitments := len(session.RedactionState.ExpectedCommitments) > 0
+	// Both writers (client streams and TEE_K commitments) may still race;
+	// snapshot under lock so the two len() checks see a consistent state.
+	streams, keys, expected := session.RedactionState.SnapshotForCommitmentCheck()
+	hasStreams := len(streams) > 0 && len(keys) > 0
+	hasCommitments := len(expected) > 0
 
 	// If no streams yet, defer verification until they arrive from client
 	if !hasStreams {
@@ -124,12 +130,12 @@ func (t *TEET) verifyCommitmentsIfReady(sessionID string) error {
 	}
 
 	// SECURITY: Once both are present, commitment count must match stream count
-	if len(session.RedactionState.ExpectedCommitments) != len(session.RedactionState.RedactionStreams) {
+	if len(expected) != len(streams) {
 		return fmt.Errorf("SECURITY ERROR: commitment count (%d) does not match stream count (%d)",
-			len(session.RedactionState.ExpectedCommitments), len(session.RedactionState.RedactionStreams))
+			len(expected), len(streams))
 	}
 	t.logger.WithSession(sessionID).Debug("Verifying commitments")
-	if err := t.verifyCommitments(session.RedactionState.RedactionStreams, session.RedactionState.CommitmentKeys, session.RedactionState.ExpectedCommitments); err != nil {
+	if err := t.verifyCommitments(streams, keys, expected); err != nil {
 		return fmt.Errorf("commitment verification failed: %v", err)
 	}
 	t.logger.WithSession(sessionID).Debug("Commitment verification completed")
@@ -177,13 +183,20 @@ func (t *TEET) reconstructFullRequestWithStreams(encryptedRedacted []byte, range
 		if i >= len(redactionStreams) {
 			continue
 		}
+		// TEE_K validates ranges via validateRedactionPositions, but TEE_T
+		// must not trust that — a buggy/compromised K with r.Start<0 or
+		// r.Length<0 would panic (negative index, OOB) and kill the pair.
+		if r.Start < 0 || r.Length < 0 || r.Start > len(reconstructed) || r.Start+r.Length > len(reconstructed) {
+			return nil, fmt.Errorf("invalid redaction range %d: start=%d length=%d (data length %d)",
+				i, r.Start, r.Length, len(reconstructed))
+		}
 		stream := redactionStreams[i]
 		t.logger.Debug("Applying redaction stream to range",
 			zap.Int("stream_index", i),
 			zap.Int("range_start", r.Start),
 			zap.Int("range_end", r.Start+r.Length),
 			zap.Binary("stream_preview", stream[:min(16, len(stream))]))
-		for j := 0; j < r.Length && r.Start+j < len(reconstructed) && j < len(stream); j++ {
+		for j := 0; j < r.Length && j < len(stream); j++ {
 			reconstructed[r.Start+j] ^= stream[j]
 		}
 	}

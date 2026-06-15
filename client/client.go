@@ -130,15 +130,17 @@ type Client struct {
 
 	teekURL           string
 	teetURL           string
+	routerJWT         string // allocation JWT; sent as ClientAuth first envelope when non-empty
 	attestorURL       string
 	forceTLSVersion   string // Force specific TLS version: "1.2", "1.3", or "" for auto
 	forceCipherSuite  string // Force specific cipher suite: hex ID (e.g. "0xc02f") or name, or "" for auto
 	proxyURL          string // HTTPS proxy URL template from env var
 	targetHost        string
 	targetPort        int
-	isClosing         bool
-	capturedTraffic   [][]byte // Store all captured traffic for verification
-	handshakeComplete bool     // Track if TLS handshake is complete
+	isClosing         atomic.Bool
+	capturedTraffic   [][]byte     // Append guarded by capturedTrafficMu (three writer goroutines).
+	capturedTrafficMu sync.Mutex
+	handshakeComplete atomic.Bool // Routing boundary for captured records; Store after responseSeqNum write.
 
 	// Attestor client (created lazily when needed)
 	attestorClient *AttestorClient
@@ -164,7 +166,7 @@ type Client struct {
 	protocolStateMutex     sync.RWMutex  // Protect simple state
 
 	// Track HTTP request/response lifecycle
-	httpRequestSent       bool                        // Track if HTTP request has been sent
+	httpRequestSent       atomic.Bool                 // Set after final fragment written to TCP; read by TCP reader goroutine.
 	httpResponseExpected  bool                        // Track if we should expect HTTP response
 	parsedResponseBySeq   map[uint64]*TLSResponseData // Store parsed TLS response data by sequence
 	responseContentMutex  sync.Mutex                  // For all response maps
@@ -249,7 +251,6 @@ func NewClient(teekURL string) *Client {
 		teeKTranscriptReceived: false,
 		teeTTranscriptReceived: false,
 		protocolStateMutex:     sync.RWMutex{},
-		httpRequestSent:        false,
 		httpResponseExpected:   false,
 		responseContentMutex:   sync.Mutex{},
 		parsedResponseBySeq:    make(map[uint64]*TLSResponseData),
@@ -280,6 +281,13 @@ func NewClient(teekURL string) *Client {
 // SetTEETURL sets the TEE_T connection URL
 func (c *Client) SetTEETURL(url string) {
 	c.teetURL = url
+}
+
+// SetRouterJWT installs the allocation JWT the client received from the
+// router. When set, ConnectToTEEK / ConnectToTEET send a ClientAuth
+// envelope as the first message before any other protocol traffic.
+func (c *Client) SetRouterJWT(jwt string) {
+	c.routerJWT = jwt
 }
 
 // SetMode sets the client operational mode

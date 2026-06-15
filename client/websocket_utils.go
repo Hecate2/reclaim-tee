@@ -7,13 +7,6 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// createEnclaveWebSocketDialer creates a custom WebSocket dialer for enclave mode
-func createEnclaveWebSocketDialer() *websocket.Dialer {
-	return &websocket.Dialer{
-		HandshakeTimeout: DefaultWSHandshakeTimeout,
-	}
-}
-
 // createNativeNetworkDialer creates a WebSocket dialer that uses native networking
 // for iOS VPN compatibility. The dialer uses a custom NetDialTLSContext that
 // delegates connection establishment to the native iOS/Flutter layer.

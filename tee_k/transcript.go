@@ -148,8 +148,8 @@ func (t *TEEK) generateComprehensiveSignatureAndSendTranscript(sessionID string)
 	var attestationReport *teeproto.AttestationReport
 	var publicKeyForStandalone []byte
 
-	if t.enclaveManager != nil {
-		// Enclave mode: include attestation report
+	if t.ratls != nil {
+		// Router mode: include attestation report
 		var err error
 		attestationReport, err = t.generateAttestationReport(sessionID)
 		if err != nil {

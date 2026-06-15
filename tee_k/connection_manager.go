@@ -1,9 +1,11 @@
 package main
 
 import (
+	"crypto/tls"
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/reclaimprotocol/reclaim-tee/oprfmpc"
@@ -106,83 +108,242 @@ func deriveEndpointURL(baseURL, endpoint string) string {
 	return scheme + hostPort + endpoint
 }
 
-// EstablishControlConnection establishes the persistent control connection to TEE_T
-// This blocks until the connection is established, attestation is verified, and OT precomputation is complete
+// EstablishControlConnection brings up the persistent control connection
+// to TEE_T and keeps it up. Blocks until the FIRST connect succeeds
+// (attestation verified, OT precomputation done), then returns nil while
+// a supervisor goroutine reconnects forever on disconnect.
+//
+// Splitting first-connect from reconnect lets callers (router_boot,
+// standalone main) wait for "ready to serve clients" without owning the
+// reconnect loop themselves.
 func (cm *TEETConnectionManager) EstablishControlConnection() error {
 	cm.logger.Debug("Establishing control connection to TEE_T", zap.String("url", cm.controlURL))
 
-	for {
-		conn, err := cm.attemptControlConnection()
-		if err != nil {
-			cm.logger.Error("Failed to establish control connection, retrying", zap.Error(err))
-			time.Sleep(1 * time.Second)
-			continue
-		}
+	ready := make(chan struct{})
+	var readyOnce sync.Once
+	signalReady := func() { readyOnce.Do(func() { close(ready) }) }
 
-		wsConn := shared.NewWSConnection(conn)
-
-		cm.mu.Lock()
-		cm.controlConn = wsConn
-		cm.mu.Unlock()
-
-		cm.logger.Info("Control connection to TEE_T established")
-
-		// Bidirectional ping/pong heartbeat. Sets the read deadline that the
-		// control read loop relies on, so a dead peer is detected even when no
-		// application messages are flowing.
-		wsConn.StartControlHeartbeat(cm.logger)
-
-		// Start control message handler FIRST - it needs to receive OT response
-		// Use a done channel to stop it if OT fails
-		handlerDone := make(chan struct{})
-		go func() {
-			cm.handleControlMessages()
-			close(handlerDone)
-		}()
-
-		// Perform OT precomputation
-		if err := cm.teek.performOTPrecomputation(oprfmpc.OTPoolInitialSize, true); err != nil {
-			cm.logger.Error("Failed to perform OT precomputation", zap.Error(err))
-			wsConn.Close() // This will cause handleControlMessages to exit
-			<-handlerDone  // Wait for handler to exit before retrying
-			cm.mu.Lock()
-			cm.controlConn = nil
-			cm.mu.Unlock()
-			// Mirror the disconnect path: a failed OT exchange leaves state.ready
-			// potentially stale-true from a prior cycle. Without this, the next
-			// successful precompute would skip sendOTPrecomputeComplete (gated on
-			// pendingIsInitial post-fix, but historically gated on !state.ready)
-			// and TEE_T's receiver pool would never be marked ready.
-			cm.teek.clearOTPool()
-			time.Sleep(1 * time.Second)
-			continue
-		}
-
-		cm.logger.Info("OT precomputation complete on control connection")
-		return nil
+	// Until we've successfully connected at least once, dial failures are
+	// almost always the boot race (TEE_T's listener not up yet). Log
+	// those at WARN so they don't trigger alert metrics keyed on ERROR.
+	// After the first successful session, any future failure is a real
+	// disconnect and gets ERROR.
+	var everConnected atomic.Bool
+	onReady := func() {
+		signalReady()
+		everConnected.Store(true)
 	}
+
+	go func() {
+		defer shared.RecoverAndCrash(cm.logger, "tee_k.control_supervisor")
+		for {
+			if err := cm.connectAndServe(onReady); err != nil {
+				if everConnected.Load() {
+					cm.logger.Error("control session ended with error, retrying", zap.Error(err))
+				} else {
+					cm.logger.Warn("control session attempt failed during bootstrap, retrying", zap.Error(err))
+				}
+			} else {
+				cm.logger.Info("control session ended, reconnecting")
+			}
+			time.Sleep(1 * time.Second)
+		}
+	}()
+
+	<-ready
+	return nil
+}
+
+// connectAndServe runs one full control-connection lifecycle: dial,
+// mutual attestation, OT precomputation, then read-loop until disconnect.
+// On clean disconnect returns nil; on any pre-serve failure returns the
+// error so the supervisor can log + retry. onReady is invoked exactly
+// once after OT precomp succeeds (use sync.Once at the call site for
+// the cross-iteration idempotence).
+func (cm *TEETConnectionManager) connectAndServe(onReady func()) error {
+	conn, err := cm.attemptControlConnection()
+	if err != nil {
+		return fmt.Errorf("attempt: %w", err)
+	}
+
+	wsConn := shared.NewWSConnection(conn)
+	cm.mu.Lock()
+	cm.controlConn = wsConn
+	cm.mu.Unlock()
+	cm.logger.Info("Control connection to TEE_T established")
+
+	// Bidirectional ping/pong heartbeat. Sets the read deadline that the
+	// control read loop relies on, so a dead peer is detected even when
+	// no application messages are flowing.
+	wsConn.StartControlHeartbeat(cm.logger)
+
+	// Start control message handler before OT precomp — it needs to
+	// receive the OT response messages. handleControlMessages now returns
+	// on disconnect rather than chaining a reconnect.
+	handlerDone := make(chan struct{})
+	go func() {
+		defer shared.RecoverAndCrash(cm.logger, "tee_k.handleControlMessages")
+		cm.handleControlMessages()
+		close(handlerDone)
+	}()
+
+	// If we retained a ready pool across a transient disconnect, try to resume
+	// it (epoch handshake) instead of paying a full re-precompute. TEE_T denies
+	// if it restarted / lost its half, in which case we fall through to a fresh
+	// initial precompute. First connect has no pool, so hasResumablePool is false.
+	resumed := false
+	if cm.teek.hasResumablePool() {
+		accepted, err := cm.teek.tryResumeOTPool()
+		if err != nil {
+			cm.logger.Warn("OT resume attempt failed; will re-precompute", zap.Error(err))
+		} else if accepted {
+			resumed = true
+			cm.logger.Info("Resumed retained OT pool across reconnect (no precompute)")
+		} else {
+			cm.logger.Info("TEE_T declined OT resume; re-precomputing")
+		}
+	}
+	if !resumed {
+		if err := cm.teek.performOTPrecomputation(oprfmpc.OTPoolInitialSize, true); err != nil {
+			wsConn.Close()
+			<-handlerDone
+			cm.tearDownControl()
+			return fmt.Errorf("OT precompute: %w", err)
+		}
+	}
+
+	// Flip both flags together — Audit #7. The router selector treats
+	// (control_healthy ∧ ot_ready) as the readiness signal; flipping them
+	// in lockstep avoids the brief window where one is true and the other
+	// isn't.
+	cm.teek.controlHealthy.Store(true)
+	cm.teek.otReady.Store(true)
+	cm.logger.Info("OT precomputation complete on control connection")
+	onReady()
+
+	// Block until the read loop returns (disconnect or read error).
+	<-handlerDone
+	cm.tearDownControl()
+	return nil
+}
+
+// tearDownControl resets the connection-scoped state shared with TEEK:
+// controlHealthy, OT pool, and cm.controlConn. Called from connectAndServe
+// on any exit path (OT failure, normal disconnect).
+//
+// Also purges all per-session WS connections — they're orphaned without
+// a live control link and would otherwise occupy MaxConcurrentSessions
+// slots until their 60s read deadline fires. New sessions queue up
+// during reconnect and get rejected with "max concurrent sessions
+// reached" even though no real work is happening.
+func (cm *TEETConnectionManager) tearDownControl() {
+	cm.attestationMutex.Lock()
+	cm.attestationVerified = false
+	cm.attestationMutex.Unlock()
+
+	cm.teek.teetAttestationMutex.Lock()
+	cm.teek.teetAttestationVerified = false
+	cm.teek.teetAttestationMutex.Unlock()
+
+	cm.teek.controlHealthy.Store(false)
+	// Retain a ready pool so the next connection can resume it; clears only if
+	// it was mid-precompute (nothing to resume).
+	cm.teek.suspendOTPoolForReconnect()
+
+	cm.mu.Lock()
+	cm.controlConn = nil
+	// Snapshot + reset sessionConns under the lock, then close them
+	// outside the lock (close can block briefly on socket teardown).
+	orphans := make([]*SessionTEETConnection, 0, len(cm.sessionConns))
+	for _, c := range cm.sessionConns {
+		orphans = append(orphans, c)
+	}
+	cm.sessionConns = make(map[string]*SessionTEETConnection)
+	cm.mu.Unlock()
+
+	if len(orphans) > 0 {
+		cm.logger.Info("Purging orphaned per-session connections after control disconnect",
+			zap.Int("count", len(orphans)))
+	}
+	for _, c := range orphans {
+		c.mu.Lock()
+		if !c.closed {
+			c.closed = true
+			c.conn.Close()
+		}
+		c.mu.Unlock()
+	}
+}
+
+// dialer returns the WebSocket dialer to use for the given URL.
+// In router mode (cm.teek.ratls != nil) wss:// dials go through an
+// RA-TLS-verified mTLS handshake: server is verified by attestation
+// extension, client presents its own RA-TLS cert. In standalone mode
+// wss:// uses the existing shared TLS config; ws:// uses the default dialer.
+func (cm *TEETConnectionManager) dialer(wsURL string) *websocket.Dialer {
+	if cm.teek.ratls != nil && strings.HasPrefix(wsURL, "wss://") {
+		return &websocket.Dialer{
+			TLSClientConfig: &tls.Config{
+				GetClientCertificate: cm.teek.ratls.GetClientCertificate,
+				// RA-TLS uses self-signed certs; standard chain verification
+				// is replaced by the attestation check in VerifyPeerCertificate.
+				InsecureSkipVerify: true,
+				VerifyPeerCertificate: shared.VerifyRATLSPeer(shared.RATLSVerifyOptions{
+					PeerRole:            "tee_t",
+					ExpectedImageDigest: cm.teek.expectedPeerImageDigest,
+					Logger:              cm.logger,
+				}),
+				// TLS 1.3 only on the TEE↔TEE peer link. Independent of
+				// minitls's separate target-server handshake which keeps 1.2.
+				MinVersion: tls.VersionTLS13,
+				MaxVersion: tls.VersionTLS13,
+			},
+		}
+	}
+	if strings.HasPrefix(wsURL, "wss://") {
+		return createTLSWebSocketDialer()
+	}
+	return websocket.DefaultDialer
+}
+
+// sendPairAssignment writes the router-mode pair_id handshake envelope onto a
+// freshly-dialed control connection. It is the very first message TEE_T sees
+// on the wire — its existing TEEKAttestation handshake comes next.
+func (cm *TEETConnectionManager) sendPairAssignment(conn *websocket.Conn) error {
+	env := &teeproto.Envelope{
+		SessionId:   "control",
+		TimestampMs: time.Now().UnixMilli(),
+		Payload: &teeproto.Envelope_TeekPairAssignment{
+			TeekPairAssignment: &teeproto.TEEKPairAssignment{PairId: cm.teek.pairID},
+		},
+	}
+	data, err := proto.Marshal(env)
+	if err != nil {
+		return fmt.Errorf("marshal: %w", err)
+	}
+	return shared.WriteWSBinary(conn, data)
 }
 
 // attemptControlConnection performs a single connection attempt with attestation
 func (cm *TEETConnectionManager) attemptControlConnection() (*websocket.Conn, error) {
 	cm.logger.Debug("Starting control connection attempt")
 
-	// Dial WebSocket
-	var conn *websocket.Conn
-	var err error
-
-	if strings.HasPrefix(cm.controlURL, "wss://") {
-		dialer := createTLSWebSocketDialer()
-		conn, _, err = dialer.Dial(cm.controlURL, nil)
-	} else {
-		conn, _, err = websocket.DefaultDialer.Dial(cm.controlURL, nil)
-	}
-
+	conn, _, err := cm.dialer(cm.controlURL).Dial(cm.controlURL, nil)
 	if err != nil {
 		return nil, err
 	}
 
 	cm.logger.Info("Control WebSocket connected, starting attestation exchange")
+
+	// Router mode: announce the pair_id as the very first envelope so TEE_T
+	// can register with the router under the same ID. Standalone mode skips
+	// this entirely.
+	if cm.teek.pairID != "" {
+		if err := cm.sendPairAssignment(conn); err != nil {
+			conn.Close()
+			return nil, fmt.Errorf("send pair assignment: %w", err)
+		}
+	}
 
 	// Generate and send TEE_K attestation
 	attestation, err := cm.teek.generateAttestationForTEET()
@@ -211,7 +372,7 @@ func (cm *TEETConnectionManager) attemptControlConnection() (*websocket.Conn, er
 		zap.String("type", "TeekAttestation"),
 		zap.Int("bytes", len(data)))
 
-	if err := conn.WriteMessage(websocket.BinaryMessage, data); err != nil {
+	if err := shared.WriteWSBinary(conn, data); err != nil {
 		conn.Close()
 		return nil, fmt.Errorf("failed to send attestation: %v", err)
 	}
@@ -242,12 +403,13 @@ func (cm *TEETConnectionManager) attemptControlConnection() (*websocket.Conn, er
 		return nil, fmt.Errorf("attestation verification failed: %v", err)
 	}
 
-	// Mark attestation as verified
+	// Mark attestation as verified. controlHealthy / otReady are flipped
+	// later in connectAndServe — only AFTER OT precomp completes — so
+	// router heartbeat never reports a half-ready state.
 	cm.attestationMutex.Lock()
 	cm.attestationVerified = true
 	cm.attestationMutex.Unlock()
 
-	// Also update TEEK's attestation flag for backward compatibility
 	cm.teek.teetAttestationMutex.Lock()
 	cm.teek.teetAttestationVerified = true
 	cm.teek.teetAttestationMutex.Unlock()
@@ -257,12 +419,14 @@ func (cm *TEETConnectionManager) attemptControlConnection() (*websocket.Conn, er
 	return conn, nil
 }
 
-// handleControlMessages handles incoming messages on the control connection
+// handleControlMessages reads from the control connection until disconnect,
+// then returns. Connection teardown and reconnect are owned by the
+// supervisor goroutine in EstablishControlConnection — this function
+// just translates wire bytes into handler calls.
 func (cm *TEETConnectionManager) handleControlMessages() {
 	cm.mu.RLock()
 	conn := cm.controlConn
 	cm.mu.RUnlock()
-
 	if conn == nil {
 		return
 	}
@@ -277,30 +441,8 @@ func (cm *TEETConnectionManager) handleControlMessages() {
 			} else {
 				cm.logger.Error("Control connection lost", zap.Error(err))
 			}
-
-			// Clear attestation flag
-			cm.attestationMutex.Lock()
-			cm.attestationVerified = false
-			cm.attestationMutex.Unlock()
-
-			cm.teek.teetAttestationMutex.Lock()
-			cm.teek.teetAttestationVerified = false
-			cm.teek.teetAttestationMutex.Unlock()
-
-			// Clear OT pool
-			cm.teek.clearOTPool()
-
-			// Clear the broken connection
-			cm.mu.Lock()
-			cm.controlConn = nil
-			cm.mu.Unlock()
-
-			// Reconnect
-			cm.EstablishControlConnection()
 			return
 		}
-
-		// Parse and handle control message
 		cm.handleControlMessage(msgBytes)
 	}
 }
@@ -317,6 +459,11 @@ func (cm *TEETConnectionManager) handleControlMessage(msgBytes []byte) {
 	case *teeproto.Envelope_OtPrecomputeResponse:
 		if err := cm.teek.handleOTPrecomputeResponse(p.OtPrecomputeResponse); err != nil {
 			cm.logger.Error("OT precompute response failed", zap.Error(err))
+		}
+
+	case *teeproto.Envelope_OtResumeResponse:
+		if err := cm.teek.handleOTResumeResponse(p.OtResumeResponse); err != nil {
+			cm.logger.Error("OT resume response failed", zap.Error(err))
 		}
 
 	case *teeproto.Envelope_SessionCreatedAck:
@@ -402,17 +549,10 @@ func (cm *TEETConnectionManager) EstablishSessionConnection(sessionID string) er
 		return fmt.Errorf("cannot establish session connection: control attestation not verified")
 	}
 
-	// Dial session WebSocket
-	var conn *websocket.Conn
-	var err error
-
-	if strings.HasPrefix(cm.sessionURL, "wss://") {
-		dialer := createTLSWebSocketDialer()
-		conn, _, err = dialer.Dial(cm.sessionURL, nil)
-	} else {
-		conn, _, err = websocket.DefaultDialer.Dial(cm.sessionURL, nil)
-	}
-
+	// Dial session WebSocket — same dialer policy as the control link.
+	// Per-session dials skip the pair-assignment handshake; that runs only
+	// once on control.
+	conn, _, err := cm.dialer(cm.sessionURL).Dial(cm.sessionURL, nil)
 	if err != nil {
 		return fmt.Errorf("failed to dial session connection: %v", err)
 	}
@@ -437,7 +577,7 @@ func (cm *TEETConnectionManager) EstablishSessionConnection(sessionID string) er
 		return fmt.Errorf("failed to marshal SessionConnectionInit: %v", err)
 	}
 
-	if err := conn.WriteMessage(websocket.BinaryMessage, data); err != nil {
+	if err := shared.WriteWSBinary(conn, data); err != nil {
 		conn.Close()
 		return fmt.Errorf("failed to send SessionConnectionInit: %v", err)
 	}
@@ -490,7 +630,10 @@ func (cm *TEETConnectionManager) EstablishSessionConnection(sessionID string) er
 	cm.logger.WithSession(sessionID).Debug("Per-session connection established")
 
 	// Start session message handler in background
-	go cm.handleSessionMessages(sessionID)
+	go func() {
+		defer shared.RecoverAndCrash(cm.logger, "tee_k.handleSessionMessages")
+		cm.handleSessionMessages(sessionID)
+	}()
 
 	return nil
 }
@@ -709,6 +852,8 @@ func isControlMessage(env *teeproto.Envelope) bool {
 		*teeproto.Envelope_OtPrecomputeRequest,
 		*teeproto.Envelope_OtPrecomputeResponse,
 		*teeproto.Envelope_OtPrecomputeComplete,
+		*teeproto.Envelope_OtResumeRequest,
+		*teeproto.Envelope_OtResumeResponse,
 		*teeproto.Envelope_SessionCreated,
 		*teeproto.Envelope_SessionClosed,
 		*teeproto.Envelope_Error: // Errors go on control - session may be dead

@@ -26,20 +26,18 @@ func (c *Client) handleHandshakeComplete(msg *shared.Message) {
 				zap.Bool("tls13", cs.IsTLS13))
 		}
 
-		// Store cipher suite for consolidated verification (replaces handshakeDisclosure)
 		c.cipherSuite = completeData.CipherSuite
 
-		// Move essential logic from handleHandshakeKeyDisclosure here
-		// Mark handshake as complete for response handling
-		c.handshakeComplete = true
-
-		c.advanceToPhase(PhaseCollectingResponses)
-
+		// Set responseSeqNum BEFORE the atomic Store so the TCP reader sees
+		// both consistently when it observes handshakeComplete=true.
 		if minitls.IsTLS13CipherSuite(completeData.CipherSuite) {
 			c.responseSeqNum = 0
 		} else {
 			c.responseSeqNum = 1
 		}
+		c.handshakeComplete.Store(true)
+
+		c.advanceToPhase(PhaseCollectingResponses)
 
 		// Phase 3: Redaction System - Send redacted HTTP request to TEE_K for encryption
 		c.sendRedactedRequest()
@@ -173,7 +171,7 @@ func (c *Client) processTLSRecord(record []byte) {
 	if len(encryptedPayload) < 16 {
 		c.logger.Error("CRITICAL: Invalid TLS record - payload too short", zap.Int("payload_length", len(encryptedPayload)))
 		// This is a protocol violation - should terminate the session
-		c.isClosing = true
+		c.isClosing.Store(true)
 		return
 	}
 
@@ -193,7 +191,7 @@ func (c *Client) processTLSRecord(record []byte) {
 		if len(encryptedPayload) < 8+tagSize {
 			c.logger.Error("CRITICAL: Invalid TLS 1.2 AES-GCM record - payload too short for explicit IV", zap.Int("payload_length", len(encryptedPayload)))
 			// This is a protocol violation - should terminate the session
-			c.isClosing = true
+			c.isClosing.Store(true)
 			return
 		}
 
@@ -211,7 +209,7 @@ func (c *Client) processTLSRecord(record []byte) {
 		// 	len(encryptedData), len(tag))
 	}
 
-	if c.isClosing {
+	if c.isClosing.Load() {
 		c.logger.Info("System is shutting down")
 		return
 	}

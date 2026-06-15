@@ -41,6 +41,10 @@ type SessionManager struct {
 	cleanupDone    chan bool
 	sessionTimeout time.Duration
 	logger         *Logger
+
+	// Fired once per session removed by the expiry ticker. Invoked
+	// outside the mutex; receives the just-removed *Session pointer.
+	onSessionExpired func(session *Session)
 }
 
 // Verify that SessionManager implements SessionManagerInterface
@@ -59,6 +63,10 @@ func NewSessionManager() *SessionManager {
 // SetLogger sets the logger for session status reporting
 func (sm *SessionManager) SetLogger(logger *Logger) {
 	sm.logger = logger
+}
+
+func (sm *SessionManager) SetOnSessionExpired(fn func(session *Session)) {
+	sm.onSessionExpired = fn
 }
 
 // CreateSession creates a new session with secure UUID
@@ -235,12 +243,12 @@ func (sm *SessionManager) Stop() {
 // cleanupExpiredSessions removes expired sessions
 func (sm *SessionManager) cleanupExpiredSessions() {
 	sm.mutex.Lock()
-	defer sm.mutex.Unlock()
 
 	now := time.Now()
 	const pendingSessionTimeout = 2 * time.Minute // Short timeout for registered-but-not-activated sessions
 
-	var cleanedUp int
+	// Capture pointers; callbacks fire outside the lock.
+	var expired []*Session
 	var pending, active int
 
 	for sessionID, session := range sm.sessions {
@@ -256,7 +264,7 @@ func (sm *SessionManager) cleanupExpiredSessions() {
 		}
 
 		if shouldCleanup {
-			cleanedUp++
+			expired = append(expired, session)
 			session.IsClosed = true
 			if session.Cancel != nil {
 				session.Cancel()
@@ -277,12 +285,22 @@ func (sm *SessionManager) cleanupExpiredSessions() {
 	}
 
 	total := len(sm.sessions)
-	if sm.logger != nil {
-		sm.logger.Info("Session status",
+	logger := sm.logger
+	callback := sm.onSessionExpired
+	sm.mutex.Unlock()
+
+	if callback != nil {
+		for _, s := range expired {
+			callback(s)
+		}
+	}
+
+	if logger != nil {
+		logger.Info("Session status",
 			zap.Int("total", total),
 			zap.Int("active", active),
 			zap.Int("pending", pending),
-			zap.Int("cleaned_up", cleanedUp))
+			zap.Int("cleaned_up", len(expired)))
 	}
 }
 

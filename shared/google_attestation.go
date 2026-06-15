@@ -75,7 +75,10 @@ func (g *GoogleAttestor) Validate(raw []byte, logger *Logger) error {
 	}
 
 	tokenStr := strings.TrimSpace(string(raw))
-	parser := jwt.NewParser()
+	parser := jwt.NewParser(
+		jwt.WithExpirationRequired(),
+		jwt.WithValidMethods([]string{"RS256"}),
+	)
 
 	// Custom keyfunc that extracts the leaf certificate from x5c header and verifies chain
 	keyfunc := func(t *jwt.Token) (any, error) {

@@ -27,6 +27,16 @@ Thumbs.db
 /.env
 deploy/build.env
 
+# Operator-local secrets + build artifacts for deploy/*.sh.
+# Real values go in deploy/.env (gitignored); deploy/.env.example is
+# committed as the placeholder template.
+deploy/.env
+deploy/v2-digests.env
+
+# Stability driver logs from deploy/stability-run.sh.
+stability-*.log
+/stability.out
+
 # Proxy runtime configuration (use proxy-config.json.example as template)
 proxy-config.json
 kms_cache.json

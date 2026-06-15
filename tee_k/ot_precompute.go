@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/markkurossi/mpc/ot"
 	"github.com/reclaimprotocol/reclaim-tee/oprfmpc"
 	teeproto "github.com/reclaimprotocol/reclaim-tee/proto"
@@ -22,7 +23,9 @@ type OTPrecomputeState struct {
 	pool         *oprfmpc.OTPool
 	ready        bool
 	curve        elliptic.Curve
+	epoch        string     // Pool identity (UUID); minted on each initial precompute, retained for resume
 	responseChan chan error // Signals when OT response is received
+	resumeChan   chan bool  // Signals OTResumeResponse.accepted from TEE_T
 
 	// Pending setups awaiting confirmation (two-phase commit)
 	// Setups are stored here after generation, only added to pool when receiver points arrive
@@ -38,6 +41,7 @@ func NewOTPrecomputeState() *OTPrecomputeState {
 		ready:        false,
 		curve:        elliptic.P256(),
 		responseChan: make(chan error, 1),
+		resumeChan:   make(chan bool, 1),
 	}
 }
 
@@ -57,6 +61,14 @@ func (t *TEEK) performOTPrecomputation(count int, isInitial bool) error {
 	}
 
 	state := t.otPrecomputeState
+
+	// A fresh pool gets a fresh identity so TEE_T can later distinguish a
+	// resumable pool from a stale one across reconnects.
+	if isInitial {
+		state.mu.Lock()
+		state.epoch = uuid.NewString()
+		state.mu.Unlock()
+	}
 
 	// For extend, check preconditions
 	if !isInitial {
@@ -119,6 +131,7 @@ func (t *TEEK) performOTPrecomputation(count int, isInitial bool) error {
 				Count:         uint32(count),
 				OtSenderSetup: serializedSetups,
 				IsInitial:     isInitial,
+				Epoch:         state.epoch,
 			},
 		},
 	}
@@ -410,8 +423,105 @@ func (t *TEEK) clearOTPool() {
 		t.otPrecomputeState.pendingIsInitial = false
 		t.otPrecomputeState.ready = false
 		t.otPrecomputeState.mu.Unlock()
+		t.otReady.Store(false)
 		t.logger.Info("Cleared OT pool due to disconnect")
 	}
+}
+
+// suspendOTPoolForReconnect is called on control disconnect. If the pool is
+// ready it is RETAINED (so the next control connection can resume it via the
+// epoch handshake instead of a full re-precompute); only the in-flight extend
+// bookkeeping is reset. A not-ready pool (disconnect mid-precompute) has
+// nothing to resume and is cleared.
+func (t *TEEK) suspendOTPoolForReconnect() {
+	if t.otPrecomputeState == nil {
+		return
+	}
+	t.otPrecomputeState.mu.Lock()
+	ready := t.otPrecomputeState.ready
+	if ready {
+		t.otPrecomputeState.pendingSetups = nil
+		t.otPrecomputeState.pendingIsInitial = false
+		t.otPrecomputeState.pool.SetExtendPending(false)
+		t.otPrecomputeState.mu.Unlock()
+		t.logger.Info("Retained OT pool across disconnect for resume",
+			zap.String("epoch", t.otPrecomputeState.epoch))
+		return
+	}
+	t.otPrecomputeState.mu.Unlock()
+	t.clearOTPool()
+}
+
+// hasResumablePool reports whether TEE_K holds a ready, non-exhausted pool it
+// can ask TEE_T to resume rather than re-precomputing from scratch.
+func (t *TEEK) hasResumablePool() bool {
+	if t.otPrecomputeState == nil {
+		return false
+	}
+	t.otPrecomputeState.mu.Lock()
+	defer t.otPrecomputeState.mu.Unlock()
+	return t.otPrecomputeState.ready && t.otPrecomputeState.epoch != "" &&
+		t.otPrecomputeState.pool.Available() > 0
+}
+
+// tryResumeOTPool asks TEE_T to keep using the retained pool. Returns true if
+// TEE_T still holds the matching pool; false means the caller must run a fresh
+// initial precompute. The send mirrors performOTPrecomputation's control path.
+func (t *TEEK) tryResumeOTPool() (bool, error) {
+	if t.connManager == nil {
+		return false, fmt.Errorf("connection manager not initialized")
+	}
+	conn := t.connManager.GetControlConnection()
+	if conn == nil {
+		return false, fmt.Errorf("no TEE_T control connection available")
+	}
+
+	t.otPrecomputeState.mu.Lock()
+	epoch := t.otPrecomputeState.epoch
+	t.otPrecomputeState.mu.Unlock()
+	nextIndex := t.otPrecomputeState.pool.NextIndex()
+
+	select {
+	case <-t.otPrecomputeState.resumeChan:
+	default:
+	}
+
+	env := &teeproto.Envelope{
+		SessionId:   "ot_precompute",
+		TimestampMs: time.Now().UnixMilli(),
+		Payload: &teeproto.Envelope_OtResumeRequest{
+			OtResumeRequest: &teeproto.OTResumeRequest{
+				Epoch:     epoch,
+				NextIndex: uint32(nextIndex),
+			},
+		},
+	}
+	data, err := proto.Marshal(env)
+	if err != nil {
+		return false, fmt.Errorf("marshal OT resume request: %w", err)
+	}
+	if err := conn.WriteMessage(websocket.BinaryMessage, data); err != nil {
+		return false, fmt.Errorf("send OT resume request: %w", err)
+	}
+
+	select {
+	case accepted := <-t.otPrecomputeState.resumeChan:
+		return accepted, nil
+	case <-time.After(10 * time.Second):
+		return false, fmt.Errorf("OT resume timed out")
+	}
+}
+
+// handleOTResumeResponse delivers TEE_T's accept/deny to the waiting tryResumeOTPool.
+func (t *TEEK) handleOTResumeResponse(msg *teeproto.OTResumeResponse) error {
+	if t.otPrecomputeState == nil {
+		return fmt.Errorf("OT pool not initialized")
+	}
+	select {
+	case t.otPrecomputeState.resumeChan <- msg.GetAccepted():
+	default:
+	}
+	return nil
 }
 
 // clearPendingSetups discards pending setups on extend failure.

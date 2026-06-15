@@ -92,9 +92,12 @@ func (c *Client) handleSendTCPData(msg *shared.Message) {
 	// Don't parse into individual TLS records - capture the raw TCP chunk
 	rawTCPData := make([]byte, len(tcpData.Data))
 	copy(rawTCPData, tcpData.Data)
+	c.capturedTrafficMu.Lock()
 	c.capturedTraffic = append(c.capturedTraffic, rawTCPData)
+	count := len(c.capturedTraffic)
+	c.capturedTrafficMu.Unlock()
 	c.logger.Info("Captured outgoing raw TCP chunk", zap.Int("bytes", len(rawTCPData)))
-	c.logger.Info("Total captured chunks now", zap.Int("count", len(c.capturedTraffic)))
+	c.logger.Info("Total captured chunks now", zap.Int("count", count))
 
 	// Forward TLS data from TEE_K to website via our TCP connection
 	conn := c.tcpConn
@@ -115,22 +118,40 @@ func (c *Client) handleSendTCPData(msg *shared.Message) {
 // tcpToWebsocket reads from TCP connection and processes data
 func (c *Client) tcpToWebsocket() {
 	defer func() {
-		if c.isClosing && c.tcpConn != nil {
+		if c.isClosing.Load() && c.tcpConn != nil {
 			c.tcpConn.Close()
-			c.tcpConn = nil
 		}
 	}()
 
 	buffer := make([]byte, TCPBufferSize)
 	var pending []byte // Buffer for incomplete TLS packets
+	// Idle-after-request-sent: 5 consecutive 1s read timeouts after we've
+	// forwarded the HTTP request, with no pending mid-record bytes. See
+	// [[tcp-idle-flush-2026-06-10]].
+	const idleFlushAfter = 5
+	idleStreak := 0
+	var requestSentObserved bool
+
+	// Handshake-stall guard: before the HTTP request is sent we're still
+	// relaying the TLS handshake. A proxy tunnel can stay open but silent when
+	// the target is unreachable, so the loop would otherwise spin forever. Abort
+	// after this many consecutive 1s read timeouts with no handshake byte.
+	const handshakeStallAfter = 15
+	handshakeIdleStreak := 0
 
 	for {
-		if c.isClosing {
+		if c.isClosing.Load() {
 			break
 		}
 
 		if c.tcpConn != nil {
 			c.tcpConn.SetReadDeadline(time.Now().Add(DefaultTCPReadTimeout))
+		}
+
+		// Reset idle clock first time we observe request-sent.
+		if !requestSentObserved && c.httpRequestSent.Load() {
+			requestSentObserved = true
+			idleStreak = 0
 		}
 
 		n, err := c.tcpConn.Read(buffer)
@@ -144,7 +165,35 @@ func (c *Client) tcpToWebsocket() {
 			} else {
 				var netErr net.Error
 				if errors.As(err, &netErr) && netErr.Timeout() {
-					continue
+					// Only treat idle as "done" when we're cleanly between
+					// records (no incomplete bytes pending), past the
+					// handshake, and have captured ≥1 record. Multi-second
+					// gap is the safe threshold — sub-second inter-record
+					// gaps shouldn't trigger this.
+					if c.httpRequestSent.Load() && pending == nil {
+						idleStreak++
+						if idleStreak >= idleFlushAfter {
+							c.logger.Info("Server idle after response — flushing to TEE_T",
+								zap.Duration("idle_for", time.Duration(idleStreak)*DefaultTCPReadTimeout))
+							eofReceived = true
+						} else {
+							continue
+						}
+					} else if !c.httpRequestSent.Load() {
+						// Handshake phase: bound the wait so a silent proxy tunnel
+						// (target unreachable) fails fast instead of hanging.
+						handshakeIdleStreak++
+						if handshakeIdleStreak >= handshakeStallAfter {
+							c.terminateConnectionWithError(
+								"target server unresponsive during TLS handshake",
+								fmt.Errorf("no handshake data after %ds (proxy tunnel idle)", handshakeStallAfter))
+							return
+						}
+						continue
+					} else {
+						// Request sent but mid-record: wait for the rest of the record.
+						continue
+					}
 				} else if !isClientNetworkShutdownError(err) {
 					c.logger.Error("TCP read error", zap.Error(err))
 
@@ -153,6 +202,10 @@ func (c *Client) tcpToWebsocket() {
 					break
 				}
 			}
+		} else if n > 0 {
+			// Any byte from the server resets the idle clocks.
+			idleStreak = 0
+			handshakeIdleStreak = 0
 		}
 
 		// If we got data (n > 0), process it even if EOF was also received
@@ -183,7 +236,9 @@ func (c *Client) tcpToWebsocket() {
 				// Extract the complete TLS packet
 				packet := make([]byte, fullLength)
 				copy(packet, data[offset:offset+fullLength])
+				c.capturedTrafficMu.Lock()
 				c.capturedTraffic = append(c.capturedTraffic, packet)
+				c.capturedTrafficMu.Unlock()
 
 				c.logger.Info("Captured incoming raw TCP chunk", zap.Int("bytes", len(packet)))
 
@@ -209,7 +264,7 @@ func (c *Client) tcpToWebsocket() {
 					zap.String("record_type_name", recordTypeStr),
 					zap.Uint16("tls_version", recordVersion))
 
-				if !c.handshakeComplete {
+				if !c.handshakeComplete.Load() {
 					// During handshake: Forward to TEE_K
 					env := &teeproto.Envelope{
 						TimestampMs: time.Now().UnixMilli(),
@@ -235,11 +290,20 @@ func (c *Client) tcpToWebsocket() {
 
 		// After processing any final data, break if EOF was received
 		if eofReceived {
+			// Fast-fail: empty batch means the target sent zero response
+			// records (idle-flush fired on no data). Downstream protocol
+			// has nothing to verify; aborting early beats waiting 55s for
+			// the 60s wall.
+			if len(c.batchedResponses) == 0 {
+				err := fmt.Errorf("target server returned no response data")
+				c.logger.Error("No response captured before idle/EOF — aborting session", zap.Error(err))
+				c.terminateConnectionWithError("Target server returned no response data", err)
+				return
+			}
 			c.logger.Info("Sending responses to TEE_T")
-
-			// Send batched responses if any were collected
 			if err := c.sendBatchedResponses(); err != nil {
-				c.logger.Error("Failed to send batched responses on EOF", zap.Error(err))
+				c.terminateConnectionWithError("Failed to send batched responses", err)
+				return
 			}
 			break
 		}

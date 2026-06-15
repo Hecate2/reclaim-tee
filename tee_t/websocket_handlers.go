@@ -16,29 +16,15 @@ import (
 
 // handleClientWebSocket handles WebSocket connections from clients
 func (t *TEET) handleClientWebSocket(w http.ResponseWriter, r *http.Request) {
-	// Reject connections if system not ready (prevents wasted client work)
+	defer shared.RecoverAndCrash(t.logger, "tee_t.handleClientWebSocket")
+	// The control link is required for every session (it's the inter-TEE
+	// channel). The OT pool is NOT gated here: only OPRF proofs use it, so we
+	// admit optimistically and let handleOPRFOnlineFull fail the rare proof
+	// that needs a cold pool. The OT-ready watchdog still detects a wedged pool
+	// directly (isOTReceiverPoolReady), so lifting this gate doesn't blind paging.
 	if !t.isTEEKConnected() {
 		t.logger.Warn("Rejecting client connection - TEE_K not connected")
 		http.Error(w, "Service temporarily unavailable - TEE connection not established", http.StatusServiceUnavailable)
-		return
-	}
-	if !t.isOTReceiverPoolReady() {
-		// TEE_K connected + pool not ready is the wedged-state signature.
-		// Escalate to ERROR (rate-limited) so paging fires; this is what
-		// was missed during the 2026-06-05 outage when the rejection was a
-		// plain WARNING and no alerts triggered.
-		t.lastOTRejectLogMu.Lock()
-		shouldErrLog := time.Since(t.lastOTRejectLog) >= OTReadyRejectLogInterval
-		if shouldErrLog {
-			t.lastOTRejectLog = time.Now()
-		}
-		t.lastOTRejectLogMu.Unlock()
-		if shouldErrLog {
-			t.logger.Error("Rejecting client connection - OT receiver pool not ready (control conn appears healthy)")
-		} else {
-			t.logger.Warn("Rejecting client connection - OT receiver pool not ready")
-		}
-		http.Error(w, "Service temporarily unavailable - OT pool not ready", http.StatusServiceUnavailable)
 		return
 	}
 
@@ -51,6 +37,27 @@ func (t *TEET) handleClientWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	// Set read limit to prevent DoS via large messages
 	conn.SetReadLimit(MaxWebSocketMessageSize)
+
+	// Router mode: require a valid allocation JWT as the very first envelope.
+	// jwtPubKey is nil in standalone (local-dev) mode, where the JWT step
+	// is skipped and the loop below reads the legacy first envelope directly.
+	if t.jwtPubKey != nil {
+		pidPtr := t.pairID.Load()
+		if pidPtr == nil {
+			t.logger.Warn("Rejecting client: pair_id not yet known (peer link not up)")
+			_ = conn.WriteControl(websocket.CloseMessage,
+				websocket.FormatCloseMessage(1013, "not ready"),
+				time.Now().Add(time.Second))
+			return
+		}
+		if _, err := shared.ReadAndVerifyClientAuth(conn, t.jwtPubKey, t.expectedJWTIssuer, *pidPtr, t.jtiTracker); err != nil {
+			t.logger.Warn("Rejecting client: ClientAuth invalid", zap.Error(err))
+			_ = conn.WriteControl(websocket.CloseMessage,
+				websocket.FormatCloseMessage(4001, "unauthorized"),
+				time.Now().Add(time.Second))
+			return
+		}
+	}
 
 	t.logger.Debug("Client WebSocket connection established")
 
@@ -95,11 +102,13 @@ func (t *TEET) handleClientWebSocket(w http.ResponseWriter, r *http.Request) {
 				arr = append(arr, shared.EncryptedResponseData{EncryptedData: r.GetEncryptedData(), Tag: r.GetTag(), RecordHeader: r.GetRecordHeader(), SeqNum: r.GetSeqNum(), ExplicitIV: r.GetExplicitIv()})
 			}
 			msg = &shared.Message{SessionID: env.GetSessionId(), Type: shared.MsgBatchedEncryptedResponses, Data: shared.BatchedEncryptedResponseData{Responses: arr, SessionID: p.BatchedEncryptedResponses.GetSessionId(), TotalCount: int(p.BatchedEncryptedResponses.GetTotalCount())}}
-		case *teeproto.Envelope_OprfRangesSubmission:
-			// Create a message to go through session validation first
-			msg = &shared.Message{SessionID: env.GetSessionId(), Type: shared.MsgOPRFRanges, Data: p.OprfRangesSubmission}
 		default:
+			// `continue` so a nil msg never reaches msg.Type below.
+			t.logger.Warn("Unknown envelope payload from client; ignoring",
+				zap.String("session_id", env.GetSessionId()),
+				zap.String("payload_type", fmt.Sprintf("%T", env.Payload)))
 			t.sendErrorToClient(sessionID, "Unknown message type")
+			continue
 		}
 
 		t.logger.Debug("Received client message", zap.String("type", string(msg.Type)))
@@ -119,18 +128,16 @@ func (t *TEET) handleClientWebSocket(w http.ResponseWriter, r *http.Request) {
 						},
 					}
 					if data, marshalErr := proto.Marshal(errEnv); marshalErr == nil {
-						conn.WriteMessage(websocket.BinaryMessage, data)
+						shared.WriteWSBinary(conn, data)
 					}
 					break
 				}
 
-				teetState, err := t.sessionManager.GetTEETSessionState(sessionID)
-				if err != nil {
+				if _, err := t.sessionManager.GetTEETSessionState(sessionID); err != nil {
 					t.logger.WithSession(sessionID).Error("TEETSessionState not found - session not registered via control connection", zap.Error(err))
 					t.terminateSessionWithError(sessionID, shared.ReasonSessionNotFound, err, "Session state not initialized")
 					break
 				}
-				teetState.TEETClientConn = conn
 				t.logger.Info("Session activated", zap.String("sid", shared.TruncateSessionID(sessionID)))
 			} else if msg.SessionID != sessionID {
 				err := fmt.Errorf("expected %s, got %s", sessionID, msg.SessionID)
@@ -150,16 +157,6 @@ func (t *TEET) handleClientWebSocket(w http.ResponseWriter, r *http.Request) {
 		case shared.MsgBatchedEncryptedResponses:
 			t.logger.WithSession(sessionID).Debug("Handling batched encrypted responses")
 			handlerErr = t.handleBatchedEncryptedResponses(sessionID, msg)
-		case shared.MsgOPRFRanges:
-			// Handle OPRF ranges from client (after session validation)
-			// ZERO ERROR POLICY: Any error terminates the session immediately
-			t.logger.WithSession(sessionID).Debug("Handling OPRF ranges")
-			oprfRanges, ok := msg.Data.(*teeproto.OPRFRangesSubmission)
-			if !ok {
-				handlerErr = fmt.Errorf("invalid OPRF ranges data type")
-			} else {
-				handlerErr = t.handleOPRFRangesFromClient(sessionID, oprfRanges)
-			}
 		default:
 			err := fmt.Errorf("unknown message type: %s", string(msg.Type))
 			t.terminateSessionWithError(sessionID, shared.ReasonUnknownMessageType, err, "Unknown message type")
@@ -174,14 +171,7 @@ func (t *TEET) handleClientWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	if sessionID != "" {
 		t.logger.Info("Session finished", zap.String("sid", shared.TruncateSessionID(sessionID)))
-		t.sessionManager.CloseSession(sessionID)
-		t.sessionTerminator.CleanupSession(sessionID)
-
-		// Close per-session connection to TEE_K
-		// This prevents TEE_K from timing out waiting for messages
-		if t.connManager != nil {
-			t.connManager.CloseSessionConnection(sessionID)
-		}
+		t.cleanupSession(sessionID)
 	}
 }
 
@@ -239,7 +229,7 @@ func (t *TEET) sendErrorAndClose(conn *websocket.Conn, sessionID string, errMsg 
 	}
 
 	if data, err := proto.Marshal(env); err == nil {
-		conn.WriteMessage(websocket.BinaryMessage, data)
+		shared.WriteWSBinary(conn, data)
 	}
 
 	time.Sleep(100 * time.Millisecond)
@@ -249,6 +239,7 @@ func (t *TEET) sendErrorAndClose(conn *websocket.Conn, sessionID string, errMsg 
 // handleControlWebSocket handles control connections from TEE_K
 // Control connection is used for: attestation, OT precomputation, session lifecycle
 func (t *TEET) handleControlWebSocket(w http.ResponseWriter, r *http.Request) {
+	defer shared.RecoverAndCrash(t.logger, "tee_t.handleControlWebSocket")
 	conn, err := teetUpgrader.Upgrade(w, r, nil)
 	if err != nil {
 		t.logger.Error("Failed to upgrade control websocket", zap.Error(err))
@@ -273,6 +264,7 @@ func (t *TEET) handleControlWebSocket(w http.ResponseWriter, r *http.Request) {
 // handleSessionWebSocket handles per-session connections from TEE_K
 // Session connections carry all session-specific data: encrypted requests, keystream, OPRF
 func (t *TEET) handleSessionWebSocket(w http.ResponseWriter, r *http.Request) {
+	defer shared.RecoverAndCrash(t.logger, "tee_t.handleSessionWebSocket")
 	conn, err := teetUpgrader.Upgrade(w, r, nil)
 	if err != nil {
 		t.logger.Error("Failed to upgrade session websocket", zap.Error(err))

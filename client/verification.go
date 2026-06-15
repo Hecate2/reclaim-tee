@@ -36,6 +36,16 @@ func (c *Client) handleBatchedDecryptionStreams(msg *shared.Message) {
 
 		// Decrypt and parse plaintext
 		if ciphertext, exists := c.ciphertextBySeq[streamData.SeqNum]; exists {
+			// A buggy/compromised TEE_K could send a short stream; without
+			// the length check this panics (OOB) and the Go runtime tears
+			// down the whole client process (no recover() in /client).
+			if len(streamData.DecryptionStream) < len(ciphertext) {
+				c.logger.Error("DecryptionStream shorter than ciphertext — TEE_K bug or compromise",
+					zap.Uint64("seq", streamData.SeqNum),
+					zap.Int("stream_len", len(streamData.DecryptionStream)),
+					zap.Int("ciphertext_len", len(ciphertext)))
+				continue
+			}
 			plaintext := make([]byte, len(ciphertext))
 			for j := range ciphertext {
 				plaintext[j] = ciphertext[j] ^ streamData.DecryptionStream[j]

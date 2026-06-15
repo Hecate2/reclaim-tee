@@ -93,6 +93,9 @@ func (c *Client) buildTEEValidationDetails(source string, data [][]byte) Transcr
 	if data == nil {
 		return TranscriptDataValidation{DataReceived: 0, DataMatched: 0, ValidationPassed: false, DataDetails: []DataValidationDetail{}}
 	}
+	c.capturedTrafficMu.Lock()
+	captured := append([][]byte(nil), c.capturedTraffic...)
+	c.capturedTrafficMu.Unlock()
 	var details []DataValidationDetail
 	dataMatched := 0
 	for i, dataEntry := range data {
@@ -104,7 +107,7 @@ func (c *Client) buildTEEValidationDetails(source string, data [][]byte) Transcr
 		}
 		matchedCapture := false
 		captureIndex := -1
-		for j, capturedChunk := range c.capturedTraffic {
+		for j, capturedChunk := range captured {
 			if len(dataEntry) == len(capturedChunk) && bytes.Equal(dataEntry, capturedChunk) {
 				matchedCapture = true
 				captureIndex = j

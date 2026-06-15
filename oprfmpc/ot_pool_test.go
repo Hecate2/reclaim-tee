@@ -263,6 +263,83 @@ func TestOTReceiverPool_Consume(t *testing.T) {
 	}
 }
 
+// TestOTReceiverPool_OutOfOrderConsume locks in the concurrent-session
+// semantics. Under load TEE_K reserves successive index ranges for
+// different sessions and those sessions' OPRF online messages reach
+// TEE_T over independent per-session WS connections, so they arrive at
+// TEE_T in arbitrary order. The pool MUST consume a later index range
+// first and still let an earlier range succeed afterward. The earlier
+// implementation rejected this with "OT index behind (possible replay)".
+func TestOTReceiverPool_OutOfOrderConsume(t *testing.T) {
+	pool := NewOTReceiverPool(100)
+	curve := elliptic.P256()
+
+	entries := make([]*OTReceiverEntry, 64)
+	for i := range entries {
+		setup, err := ot.GenerateCOSenderSetup(rand.Reader, curve)
+		if err != nil {
+			t.Fatalf("setup: %v", err)
+		}
+		bundle, _, err := ot.BuildCOChoices(rand.Reader, curve, setup.Ax, setup.Ay, []bool{i%2 == 0})
+		if err != nil {
+			t.Fatalf("choice: %v", err)
+		}
+		entries[i] = &OTReceiverEntry{ReceiverBundle: bundle, Index: i, Used: false}
+	}
+	pool.AddEntries(entries)
+
+	// Session B's range [32, 64] arrives first.
+	if _, err := pool.Consume(32, 32); err != nil {
+		t.Fatalf("Consume(32, 32) (later range first): %v", err)
+	}
+	// Session A's range [0, 32] arrives second — must still succeed.
+	if _, err := pool.Consume(0, 32); err != nil {
+		t.Fatalf("Consume(0, 32) (earlier range second): %v — out-of-order regression", err)
+	}
+	// Either range consumed again must fail with replay.
+	if _, err := pool.Consume(0, 32); err == nil {
+		t.Error("expected replay error on re-consume of [0,32]")
+	}
+	if _, err := pool.Consume(32, 32); err == nil {
+		t.Error("expected replay error on re-consume of [32,64]")
+	}
+}
+
+// TestOTReceiverPool_PartialOverlapAtomic checks that a Consume which
+// would mutate some entries before hitting an already-used one fails
+// without partially consuming. Otherwise a retry could see a torn pool.
+func TestOTReceiverPool_PartialOverlapAtomic(t *testing.T) {
+	pool := NewOTReceiverPool(20)
+	curve := elliptic.P256()
+
+	entries := make([]*OTReceiverEntry, 10)
+	for i := range entries {
+		setup, _ := ot.GenerateCOSenderSetup(rand.Reader, curve)
+		bundle, _, _ := ot.BuildCOChoices(rand.Reader, curve, setup.Ax, setup.Ay, []bool{true})
+		entries[i] = &OTReceiverEntry{ReceiverBundle: bundle, Index: i, Used: false}
+	}
+	pool.AddEntries(entries)
+
+	// Consume entry 5 only.
+	if _, err := pool.Consume(5, 1); err != nil {
+		t.Fatalf("Consume(5,1): %v", err)
+	}
+	// Try a range [3..6] that includes the already-used 5. Must fail
+	// without marking 3 or 4 as used.
+	if _, err := pool.Consume(3, 4); err == nil {
+		t.Fatal("expected error for range overlapping a used entry")
+	}
+	for i := 3; i <= 4; i++ {
+		if pool.entries[i].Used {
+			t.Errorf("entry %d should NOT be used (atomicity violated)", i)
+		}
+	}
+	// And the unrelated [3..5) should still succeed.
+	if _, err := pool.Consume(3, 2); err != nil {
+		t.Fatalf("Consume(3,2) after rejected partial: %v", err)
+	}
+}
+
 func TestDualMaskSerialization(t *testing.T) {
 	// Create labels using proper Label type
 	masks := []DualMask{

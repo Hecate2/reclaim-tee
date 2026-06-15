@@ -35,14 +35,17 @@ func (c *Client) ConnectToTEEK() error {
 			c.logger.Error("Native WebSocket dial failed for TEE_K", zap.String("url", c.teekURL), zap.Error(err))
 			return fmt.Errorf("native WebSocket connect failed: %w", err)
 		}
-	} else if strings.HasPrefix(c.teekURL, "wss://") && strings.Contains(c.teekURL, "reclaimprotocol.org") {
-		// Enclave mode: use custom dialer with TLS config
-		c.logger.Info("Enclave mode detected for TEE_K - using custom dialer")
-		dialer := createEnclaveWebSocketDialer()
+	} else if strings.HasPrefix(c.teekURL, "wss://") {
+		// Router-allocated wss:// — TEE serves an RA-TLS cert; the dialer
+		// verifies the embedded attestation but doesn't inspect what's
+		// inside it (the TEE's signed bundles carry the full attestation
+		// downstream).
+		c.logger.Info("Using RA-TLS dialer for TEE_K")
+		dialer := newRATLSWebSocketDialer("tee_k", c.logger)
 		conn, _, err = dialer.Dial(u.String(), nil)
 	} else {
-		// Standalone mode: use default dialer
-		c.logger.Info("Standalone mode detected for TEE_K - using default dialer")
+		// Local-dev router-standalone over plain ws://.
+		c.logger.Info("Using default dialer for TEE_K (local dev)")
 		conn, _, err = websocket.DefaultDialer.Dial(u.String(), nil)
 	}
 
@@ -54,10 +57,40 @@ func (c *Client) ConnectToTEEK() error {
 	c.wsConn = conn
 	c.logger.Info("WebSocket connection to TEE_K established successfully")
 
+	// Router mode: TEE_K's handleWebSocket requires ClientAuth as the very
+	// first envelope. Send it now, before the message-handling goroutine
+	// starts, so the response read (SessionReady) lands cleanly on its
+	// dedicated loop. In direct-URL standalone mode this is a no-op.
+	if c.routerJWT != "" {
+		if err := sendClientAuth(conn, c.routerJWT); err != nil {
+			c.logger.Error("Failed to send ClientAuth to TEE_K", zap.Error(err))
+			conn.Close()
+			c.wsConn = nil
+			return fmt.Errorf("send ClientAuth to TEE_K: %w", err)
+		}
+	}
+
 	// Start message handling goroutine
 	go c.handleMessages()
 
 	return nil
+}
+
+// sendClientAuth writes the ClientAuth(jwt) envelope as the very first
+// frame on a TEE-bound WebSocket. Used in router mode so the TEE can
+// validate the JWT before allocating any session resources.
+func sendClientAuth(conn *websocket.Conn, jwt string) error {
+	env := &teeproto.Envelope{
+		TimestampMs: time.Now().UnixMilli(),
+		Payload: &teeproto.Envelope_ClientAuth{
+			ClientAuth: &teeproto.ClientAuth{Jwt: jwt},
+		},
+	}
+	data, err := proto.Marshal(env)
+	if err != nil {
+		return fmt.Errorf("marshal ClientAuth: %w", err)
+	}
+	return shared.WriteWSBinary(conn, data)
 }
 
 // ConnectToTEET establishes WebSocket connection to TEE_T
@@ -81,14 +114,16 @@ func (c *Client) ConnectToTEET() error {
 			c.logger.Error("Native WebSocket dial failed for TEE_T", zap.String("url", c.teetURL), zap.Error(err))
 			return fmt.Errorf("native WebSocket connect failed: %w", err)
 		}
-	} else if strings.HasPrefix(c.teetURL, "wss://") && strings.Contains(c.teetURL, "reclaimprotocol.org") {
-		// Enclave mode: use custom dialer with TLS config
-		c.logger.Info("Enclave mode detected for TEE_T - using custom dialer")
-		dialer := createEnclaveWebSocketDialer()
+	} else if strings.HasPrefix(c.teetURL, "wss://") {
+		// Router-allocated wss:// — RA-TLS verification only; the TEE's
+		// signed bundles carry the attestation contents for downstream
+		// verification.
+		c.logger.Info("Using RA-TLS dialer for TEE_T")
+		dialer := newRATLSWebSocketDialer("tee_t", c.logger)
 		conn, _, err = dialer.Dial(u.String(), nil)
 	} else {
-		// Standalone mode: use default dialer
-		c.logger.Info("Standalone mode detected for TEE_T - using default dialer")
+		// Local-dev router-standalone over plain ws://.
+		c.logger.Info("Using default dialer for TEE_T (local dev)")
 		conn, _, err = websocket.DefaultDialer.Dial(u.String(), nil)
 	}
 
@@ -100,6 +135,17 @@ func (c *Client) ConnectToTEET() error {
 	c.teetConn = conn
 	c.logger.Info("WebSocket connection to TEE_T established successfully")
 
+	// Router mode: TEE_T's client handler requires ClientAuth as the first
+	// envelope, same as TEE_K. Send it before starting the read loop.
+	if c.routerJWT != "" {
+		if err := sendClientAuth(conn, c.routerJWT); err != nil {
+			c.logger.Error("Failed to send ClientAuth to TEE_T", zap.Error(err))
+			conn.Close()
+			c.teetConn = nil
+			return fmt.Errorf("send ClientAuth to TEE_T: %w", err)
+		}
+	}
+
 	// Start message handling goroutine for TEE_T
 	go c.handleTEETMessages()
 
@@ -110,7 +156,7 @@ func (c *Client) ConnectToTEET() error {
 func (c *Client) handleMessages() {
 	for {
 		conn := c.wsConn
-		closing := c.isClosing
+		closing := c.isClosing.Load()
 
 		if conn == nil {
 			break
@@ -195,7 +241,7 @@ func (c *Client) handleMessages() {
 func (c *Client) handleTEETMessages() {
 	for {
 		conn := c.teetConn
-		closing := c.isClosing
+		closing := c.isClosing.Load()
 
 		if conn == nil {
 			break
@@ -324,7 +370,7 @@ func (c *Client) sendMessage(msg *shared.Message) error {
 	if err != nil {
 		return err
 	}
-	return conn.WriteMessage(websocket.BinaryMessage, data)
+	return shared.WriteWSBinary(conn, data)
 }
 
 // sendEnvelope sends a protobuf envelope directly to TEE_K
@@ -350,7 +396,7 @@ func (c *Client) sendEnvelope(env *teeproto.Envelope) error {
 	if err != nil {
 		return err
 	}
-	return conn.WriteMessage(websocket.BinaryMessage, data)
+	return shared.WriteWSBinary(conn, data)
 }
 
 // isEnclaveMode checks if the client is running in enclave mode
@@ -381,7 +427,7 @@ func (c *Client) sendEnvelopeToTEET(env *teeproto.Envelope) error {
 	if err != nil {
 		return err
 	}
-	if err := conn.WriteMessage(websocket.BinaryMessage, data); err != nil {
+	if err := shared.WriteWSBinary(conn, data); err != nil {
 		return err
 	}
 	return nil
@@ -473,7 +519,9 @@ func (c *Client) handleBatchedEncryptedRequest(sessionID string, batchData *teep
 			zap.Uint64("seq_num", seqNum),
 			zap.Int("bytes", len(tlsRecord)))
 
+		c.capturedTrafficMu.Lock()
 		c.capturedTraffic = append(c.capturedTraffic, tlsRecord)
+		c.capturedTrafficMu.Unlock()
 
 		if c.tcpConn != nil {
 			n, err := c.tcpConn.Write(tlsRecord)
@@ -491,7 +539,7 @@ func (c *Client) handleBatchedEncryptedRequest(sessionID string, batchData *teep
 	}
 
 	// Mark request as sent after all fragments are sent
-	c.httpRequestSent = true
+	c.httpRequestSent.Store(true)
 	c.httpResponseExpected = true
 	c.logger.Info("HTTP request sent (all fragments)", zap.Int("total_fragments", len(fragments)))
 }
@@ -500,12 +548,12 @@ func (c *Client) handleBatchedEncryptedRequest(sessionID string, batchData *teep
 
 // Close closes all WebSocket connections
 func (c *Client) Close() {
-	c.isClosing = true
+	c.isClosing.Store(true)
 
-	// This mimics standard HTTP client behavior - close the underlying connection first
+	// Close the underlying TCP conn; let the closed-conn error propagate
+	// to the TCP-reader. Don't nil the pointer — readers may be mid-deref.
 	if c.tcpConn != nil {
 		c.tcpConn.Close()
-		c.tcpConn = nil
 	}
 
 	// Close TEE_K connection (with mutex protection)
@@ -547,15 +595,13 @@ func (c *Client) terminateConnectionWithError(reason string, err error) {
 	})
 }
 
-// sendOPRFRangesToBothTEEs sends MPC OPRF ranges to both TEE_K and TEE_T
-// IMPORTANT: Both connections must be valid before sending to ensure atomicity
-func (c *Client) sendOPRFRangesToBothTEEs(ranges []*teeproto.OPRFRangeSpec) error {
-	// Preflight: verify both connections are available before sending
+// sendOPRFRangesToTEEK sends MPC OPRF ranges to TEE_K only. TEE_K relays them
+// to TEE_T (with TotalRanges) over the mutually-attested inter-TEE connection,
+// so TEE_T learns ranges from a single ordered source rather than racing a
+// separate client message.
+func (c *Client) sendOPRFRangesToTEEK(ranges []*teeproto.OPRFRangeSpec) error {
 	if c.wsConn == nil {
 		return fmt.Errorf("TEE_K connection not available")
-	}
-	if c.teetConn == nil {
-		return fmt.Errorf("TEE_T connection not available")
 	}
 
 	env := &teeproto.Envelope{
@@ -574,22 +620,11 @@ func (c *Client) sendOPRFRangesToBothTEEs(ranges []*teeproto.OPRFRangeSpec) erro
 		return fmt.Errorf("failed to marshal OPRF ranges envelope: %w", err)
 	}
 
-	// Send to TEE_K via wsConn
 	c.wsWriteMutex.Lock()
-	err = c.wsConn.WriteMessage(websocket.BinaryMessage, data)
+	err = shared.WriteWSBinary(c.wsConn, data)
 	c.wsWriteMutex.Unlock()
 	if err != nil {
 		return fmt.Errorf("send to TEE_K: %w", err)
-	}
-
-	// Send to TEE_T via teetConn
-	// NOTE: If this fails, TEE_K has already received the ranges. The session should
-	// be terminated as the TEEs will be in inconsistent state. The caller handles this.
-	c.teetWriteMutex.Lock()
-	err = c.teetConn.WriteMessage(websocket.BinaryMessage, data)
-	c.teetWriteMutex.Unlock()
-	if err != nil {
-		return fmt.Errorf("send to TEE_T failed (TEE_K already received, session must be terminated): %w", err)
 	}
 
 	c.oprfMpcRangesSent = true

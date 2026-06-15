@@ -1,9 +1,7 @@
 package main
 
 import (
-	"bytes"
 	"context"
-	"crypto/sha256"
 	"fmt"
 	"time"
 
@@ -13,46 +11,38 @@ import (
 	"go.uber.org/zap"
 )
 
-func (t *TEET) startAttestationRefresh(ctx context.Context) {
-	t.logger.Debug("Starting background attestation refresh (4-minute interval)")
-	if err := t.refreshAttestation(); err != nil {
-		t.logger.Error("Failed to pre-generate initial attestation", zap.Error(err))
-	} else {
-		t.logger.Debug("Successfully pre-generated initial attestation")
+// getCurrentCertRaw returns the bytes of the RA-TLS certificate currently
+// being served on this TEE_T's TLS endpoint (rotated by RATLSManager.Refresh).
+// Returns an error in standalone mode (no RA-TLS).
+func (t *TEET) getCurrentCertRaw() ([]byte, error) {
+	raw := t.ratls.CertificateRaw()
+	if raw == nil {
+		return nil, fmt.Errorf("RA-TLS cert not yet available")
 	}
-	ticker := time.NewTicker(4 * time.Minute)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			t.logger.Debug("Stopping attestation refresh due to context cancellation")
-			return
-		case <-ticker.C:
-			if err := t.refreshAttestation(); err != nil {
-				t.logger.Error("Failed to refresh attestation", zap.Error(err))
-			} else {
-				t.logger.Debug("Successfully refreshed attestation")
-			}
-		}
-	}
+	return raw, nil
+}
+
+// generateAttestationDoc produces a fresh GCP attestation token bound to
+// the supplied nonces, against the launcher socket on the host.
+func (t *TEET) generateAttestationDoc(ctx context.Context, nonces ...string) ([]byte, error) {
+	return shared.GenerateGCPAttestation(ctx, nonces...)
 }
 
 func (t *TEET) refreshAttestation() error {
-	if t.enclaveManager == nil {
+	if t.ratls == nil {
 		return nil
 	}
 	ethAddress := t.signingKeyPair.GetEthAddress()
 
-	tlsCert, err := t.enclaveManager.GetCertificateRaw()
-	if err != nil {
-		return fmt.Errorf("failed to get TLS certificate: %v", err)
-	}
-	certHash := sha256.Sum256(tlsCert)
+	// Bind to SPKI (stable across cert refreshes), not cert DER (changes
+	// every 4 min). See tee_k/attestation.go's refreshAttestation for the
+	// full rationale.
+	spkiHash := t.ratls.SPKIHash()
 
 	publicKeyNonce := fmt.Sprintf("tee_t_public_key:%s", ethAddress.Hex())
-	certHashNonce := fmt.Sprintf("tee_t_cert_hash:%x", certHash[:])
+	spkiHashNonce := shared.SPKINoncePrefix("tee_t") + fmt.Sprintf("%x", spkiHash[:])
 
-	raw, err := t.enclaveManager.GenerateAttestation(context.Background(), publicKeyNonce, certHashNonce)
+	raw, err := t.generateAttestationDoc(context.Background(), publicKeyNonce, spkiHashNonce)
 	if err != nil {
 		return fmt.Errorf("failed to generate attestation: %v", err)
 	}
@@ -69,8 +59,12 @@ func (t *TEET) refreshAttestation() error {
 	return nil
 }
 
+// getCachedAttestation returns the cached attestation if valid, otherwise
+// generates a new one. Concurrent cache-miss callers are coalesced via
+// singleflight so only ONE launcher-socket call fires; all waiters share
+// the result.
 func (t *TEET) getCachedAttestation(sessionID string) (*teeproto.AttestationReport, error) {
-	if t.enclaveManager == nil {
+	if t.ratls == nil {
 		return nil, nil
 	}
 	t.attestationMutex.RLock()
@@ -83,15 +77,31 @@ func (t *TEET) getCachedAttestation(sessionID string) (*teeproto.AttestationRepo
 			zap.String("type", cached.Type))
 		return cached, nil
 	}
-	t.logger.WarnIf("Cached attestation expired or missing, generating new one",
+
+	t.logger.WarnIf("Cached attestation expired or missing, coalescing refresh",
 		zap.String("session_id", sessionID))
-	if err := t.refreshAttestation(); err != nil {
-		return nil, fmt.Errorf("failed to generate fallback attestation: %v", err)
+	val, err, _ := t.attestationSF.Do("refresh", func() (any, error) {
+		// Re-check inside the singleflight in case another caller just
+		// finished refreshing while we were waiting at the door.
+		t.attestationMutex.RLock()
+		cached := t.cachedAttestation
+		expiry := t.attestationExpiry
+		t.attestationMutex.RUnlock()
+		if cached != nil && time.Now().Before(expiry) {
+			return cached, nil
+		}
+		if err := t.refreshAttestation(); err != nil {
+			return nil, fmt.Errorf("failed to generate fallback attestation: %v", err)
+		}
+		t.attestationMutex.RLock()
+		result := t.cachedAttestation
+		t.attestationMutex.RUnlock()
+		return result, nil
+	})
+	if err != nil {
+		return nil, err
 	}
-	t.attestationMutex.RLock()
-	result := t.cachedAttestation
-	t.attestationMutex.RUnlock()
-	return result, nil
+	return val.(*teeproto.AttestationReport), nil
 }
 
 func (t *TEET) generateAttestationReport(sessionID string) (*teeproto.AttestationReport, error) {
@@ -100,32 +110,21 @@ func (t *TEET) generateAttestationReport(sessionID string) (*teeproto.Attestatio
 
 // generateAttestationForTEEK generates attestation with cert hash for mutual auth
 func (t *TEET) generateAttestationForTEEK() (*teeproto.AttestationReport, error) {
-	// Standalone mode: return "standalone" string
-	if t.enclaveManager == nil {
+	// Standalone (local-dev) mode: peer won't run a real attestation verifier.
+	if t.ratls == nil {
 		return &teeproto.AttestationReport{
 			Type:   "standalone",
 			Report: []byte("standalone"),
 		}, nil
 	}
 
-	// Enclave mode: generate attestation with cert hash in userData
-	// Always fetch the current certificate from enclave manager to ensure it matches
-	// what's being served via TLS (handles certificate renewals correctly).
-	tlsCert, err := t.enclaveManager.GetCertificateRaw()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get current TLS certificate: %v", err)
-	}
-	if len(tlsCert) == 0 {
-		return nil, fmt.Errorf("TLS certificate not loaded")
-	}
+	// SPKI binding — see refreshAttestation comment for rationale.
+	spkiHash := t.ratls.SPKIHash()
+	userData := shared.SPKINoncePrefix("tee_t") + fmt.Sprintf("%x", spkiHash[:])
 
-	certHash := sha256.Sum256(tlsCert)
-	userData := fmt.Sprintf("tee_t_cert_hash:%x", certHash[:])
+	t.logger.Debug("Generating attestation for TEE_K (SPKI-bound)")
 
-	t.logger.Debug("Generating attestation for TEE_K",
-		zap.Int("cert_bytes", len(tlsCert)))
-
-	attestationDoc, err := t.enclaveManager.GenerateAttestation(context.Background(), userData)
+	attestationDoc, err := t.generateAttestationDoc(context.Background(), userData)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate attestation: %v", err)
 	}
@@ -142,51 +141,64 @@ func (t *TEET) generateAttestationForTEEK() (*teeproto.AttestationReport, error)
 	}, nil
 }
 
-// verifyTEEKAttestation verifies TEE_K's attestation request
-func (t *TEET) verifyTEEKAttestation(req *teeproto.TEEKAttestationRequest) error {
+// verifyTEEKAttestation verifies TEE_K's attestation request. Symmetric to
+// TEE_K's verifyTEETAttestation: validates the JWT signature, then confirms
+// the eat_nonce array carries a `tee_k_cert_hash:<sha256(peer cert)>` entry
+// — binding the inner attestation to the TLS cert TEE_K presented during
+// the mTLS handshake.
+//
+// TEE_K's attestation carries TWO nonces (tee_k_public_key:<eth-addr> and
+// tee_k_cert_hash:<hash>), so we look up by prefix rather than reading
+// nonce[0].
+//
+// peerCert is the raw DER of TEE_K's client cert (PeerCertificates[0] of
+// the TLS connection underlying this control WebSocket). Pass nil in
+// standalone mode; the function will branch into the standalone path.
+func (t *TEET) verifyTEEKAttestation(req *teeproto.TEEKAttestationRequest, peerCert []byte) error {
 	attestation := req.AttestationReport
 
-	// Standalone mode
+	// Standalone (local-dev) mode
 	if attestation.Type == "standalone" {
-		if t.enclaveManager == nil && string(attestation.Report) == "standalone" {
+		if t.ratls == nil && string(attestation.Report) == "standalone" {
 			t.logger.Debug("Standalone mode attestation accepted")
 			return nil
 		}
-		return fmt.Errorf("mode mismatch: received standalone attestation")
+		return fmt.Errorf("mode mismatch: received standalone but in router mode")
 	}
 
-	// Enclave mode
-	if t.enclaveManager == nil {
-		return fmt.Errorf("mode mismatch: not in enclave mode")
+	// Router mode
+	if t.ratls == nil {
+		return fmt.Errorf("mode mismatch: received GCP attestation but in standalone mode")
 	}
 
-	// Verify PCR0
-	if t.expectedTEEKPCR0 == "" {
-		return fmt.Errorf("EXPECTED_TEEK_PCR0 not configured")
+	if len(peerCert) == 0 {
+		return fmt.Errorf("no peer TLS certificate available for SPKI binding")
 	}
 
-	pcr0, err := shared.ExtractPCR0FromAttestation(attestation, t.logger)
+	// RA-TLS already verified peer image_digest at the TLS handshake.
+	// Bind the attestation to TEE_K's TLS keypair via the SPKI nonce —
+	// stable across cert refreshes, unlike a full cert-DER hash.
+	attestor, err := shared.NewGoogleAttestor()
 	if err != nil {
-		return fmt.Errorf("failed to extract PCR0: %v", err)
+		return fmt.Errorf("build attestor: %w", err)
+	}
+	if err := attestor.Validate(attestation.Report, t.logger); err != nil {
+		return fmt.Errorf("validate TEE_K attestation JWT: %w", err)
 	}
 
-	if pcr0 != t.expectedTEEKPCR0 {
-		return fmt.Errorf("PCR0 mismatch: expected %s, got %s",
-			t.expectedTEEKPCR0, pcr0)
-	}
-
-	t.logger.Debug("TEE_K PCR0 verified")
-
-	// Verify attestation contains TEE_K public key identifier
-	// For GCP, the public key is in the eat_nonce claim of the JWT
-	userData, err := shared.ExtractUserDataFromGCPAttestation(attestation.Report, t.logger)
+	expectedSPKI, err := shared.SPKIHashFromCertDER(peerCert)
 	if err != nil {
-		t.logger.Warn("Failed to extract user data from TEE_K attestation", zap.Error(err))
-	} else if bytes.Contains([]byte(userData), []byte("tee_k_public_key:")) {
-		t.logger.Debug("TEE_K attestation contains valid public key identifier")
-	} else {
-		t.logger.Warn("TEE_K attestation missing public key identifier")
+		return fmt.Errorf("compute TEE_K SPKI hash: %w", err)
+	}
+	expectedHex := fmt.Sprintf("%x", expectedSPKI[:])
+	gotHex, err := shared.FindNonceValue(attestation.Report, shared.SPKINoncePrefix("tee_k"))
+	if err != nil {
+		return fmt.Errorf("find tee_k_spki_hash nonce: %w", err)
+	}
+	if gotHex != expectedHex {
+		return fmt.Errorf("TEE_K SPKI mismatch: attestation says %q, peer cert SPKI hashes to %q", gotHex, expectedHex)
 	}
 
+	t.logger.Debug("TEE_K SPKI hash verified")
 	return nil
 }

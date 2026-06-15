@@ -44,6 +44,9 @@ type Client struct {
 	pendingHandshakeData []byte // Buffer for leftover handshake data from coalesced TLS 1.2 records
 	cipherSuite          uint16 // Negotiated cipher suite
 
+	// Count of TLS-1.3 App records this lib decrypted as handshake (EE/Cert/CertVerify/Finished).
+	handshakeAppRecordsConsumed uint32
+
 	// Certificate info storage
 	certificateInfo    *teeproto.CertificateInfo // Store structured certificate data
 	serverCertificates []*x509.Certificate       // Store actual certificate chain for signature verification
@@ -218,6 +221,7 @@ func (c *Client) processEncryptedHandshakeMessages() error {
 		if err != nil {
 			return fmt.Errorf("decryption failed during handshake: %v", err)
 		}
+		c.handshakeAppRecordsConsumed++
 
 		// The decrypted plaintext contains one or more handshake messages (or fragments).
 		// We must find the content type byte to extract the actual handshake data.
@@ -1065,6 +1069,10 @@ func (c *Client) extractServerRandomTLS12(serverHello []byte) error {
 
 				c.logger.Debug("Found extension", zap.Uint16("type", extType), zap.Uint16("type_hex", extType), zap.Int("length", extLen))
 
+				if extOffset+extLen > len(extensionsData) {
+					return fmt.Errorf("extension %d length %d exceeds buffer", extType, extLen)
+				}
+
 				if extType == extensionExtendedMasterSecret {
 					c.extendedMasterSecret = true
 					c.logger.Debug("Server supports Extended Master Secret (RFC 7627)")
@@ -1515,6 +1523,12 @@ func (c *Client) GetCipherSuite() uint16 {
 // GetClientApplicationAEAD returns the client application AEAD for split AEAD operations
 func (c *Client) GetClientApplicationAEAD() *AEAD {
 	return c.clientAEAD
+}
+
+// HandshakeAppRecordsConsumed is the count of TLS-1.3 App records this lib
+// decrypted during handshake. Always 0 for TLS 1.2.
+func (c *Client) HandshakeAppRecordsConsumed() uint32 {
+	return c.handshakeAppRecordsConsumed
 }
 
 // GetServerApplicationAEAD returns the server application AEAD for response decryption

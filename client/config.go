@@ -6,10 +6,12 @@ import (
 	"time"
 )
 
-// ClientConfig contains all configuration options for the ReclaimClient
+// ClientConfig contains all configuration options for the ReclaimClient.
+// Direct TEE addresses are intentionally absent — V2 clients always go
+// through the router. Set RouterURL and the constructor will resolve
+// the pair via /allocate.
 type ClientConfig struct {
-	TEEKURL              string                              // TEE_K WebSocket URL
-	TEETURL              string                              // TEE_T WebSocket URL
+	RouterURL            string                              // Router base URL; defaults to DefaultRouterURL (https://tee.reclaimprotocol.org) when empty
 	AttestorURL          string                              // Attestor WebSocket URL
 	Timeout              time.Duration                       // Connection timeout
 	Mode                 ClientMode                          // Client operational mode

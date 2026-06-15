@@ -22,13 +22,21 @@ func main() {
 	logger := shared.GetTEETLogger()
 	defer logger.Sync()
 
-	if config.EnclaveMode {
-		logger.Info("Starting TEE_T in enclave mode")
-		startEnclaveMode(config, logger)
-	} else {
-		logger.Info("Starting TEE_T in standalone mode")
-		startStandaloneMode(config, logger)
+	// Diagnostic safety net.
+	defer shared.RecoverAndCrash(logger, "tee_t.main")
+	shared.InstallSignalCrashHandler(logger)
+	go shared.RunRuntimeStatsLogger(context.Background(), logger)
+	go shared.RunDeadlockWatchdog(context.Background(), logger)
+
+	// Router mode is the production path (multi-pair, RA-TLS, router-mediated).
+	// Standalone mode remains for local dev only — no TLS, no attestation.
+	if config.RouterMode() {
+		startRouterMode(context.Background(), config, logger)
+		return
 	}
+
+	logger.Info("Starting TEE_T in standalone mode")
+	startStandaloneMode(config, logger)
 }
 
 func startStandaloneMode(config *TEETConfig, logger *shared.Logger) {

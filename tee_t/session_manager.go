@@ -6,14 +6,10 @@ import (
 	"sync"
 	"sync/atomic"
 
-	teeproto "github.com/reclaimprotocol/reclaim-tee/proto"
 	"github.com/reclaimprotocol/reclaim-tee/shared"
-
-	"github.com/gorilla/websocket"
 )
 
 type TEETSessionState struct {
-	TEETClientConn                 *websocket.Conn
 	KeyShare                       []byte
 	CipherSuite                    uint16
 	PendingEncryptedRequest        *shared.EncryptedRequestData            // Legacy: single request
@@ -22,17 +18,22 @@ type TEETSessionState struct {
 	RequestProofStreams            [][]byte                                // Store R_SP streams for cryptographic signing
 	ConsolidatedResponseCiphertext []byte                                  // Response ciphertext consolidation
 
-	// MPC OPRF state (2-round protocol - no session tracking needed)
-	OPRFKeyShare         []byte                     // 16-byte key share for MPC OPRF
-	ClientOPRFRanges     []*teeproto.OPRFRangeSpec  // Client-provided OPRF ranges
-	ClientRangesReceived bool                       // Whether client has sent ranges
-	OPRFResults          map[int]*shared.OPRFResult // Completed OPRF results by range index
-	OPRFState            atomic.Int32               // Current OPRF processing state (shared.OPRFSessionState values)
-	OPRFExpectedCount    int                        // Number of OPRF results expected
-	TLSSessionHash       []byte                     // Cached TLS session hash for replay protection
+	// Counter-at-join: each handler increments once; whichever bumps it
+	// to 2 dispatches. Replaces a racy "if other half present" pattern.
+	RequestPartsArrived atomic.Int32
 
-	// Per-session mutex for thread-safe access to OPRF state
-	// Must be held when accessing OPRFResults or ClientOPRFRanges
+
+	// MPC OPRF state. TEE_K is the authoritative source of ranges: it relays
+	// the client's ranges via OPRFOnlineFull (with TotalRanges), so TEE_T
+	// derives everything from that single TCP-ordered stream. handleOPRFOnlineFull
+	// initializes these on the first message (OPRFResults == nil guards init).
+	OPRFKeyShare      []byte                     // 16-byte key share for MPC OPRF
+	OPRFResults       map[int]*shared.OPRFResult // Completed OPRF results by range index
+	OPRFState         atomic.Int32               // Current OPRF processing state (shared.OPRFSessionState values)
+	OPRFExpectedCount int                        // Number of OPRF results expected
+	TLSSessionHash    []byte                     // Cached TLS session hash for replay protection
+
+	// Per-session mutex for thread-safe access to OPRFResults.
 	oprfMu sync.Mutex
 }
 

@@ -137,7 +137,7 @@ func (t *TEET) checkFinishedCondition(sessionID string) error {
 			zap.Int("signature_bytes", len(signature)))
 		var attestationReport *teeproto.AttestationReport
 		var publicKeyForStandalone []byte
-		if t.enclaveManager != nil {
+		if t.ratls != nil {
 			var err error
 			attestationReport, err = t.generateAttestationReport(sessionID)
 			if err != nil {

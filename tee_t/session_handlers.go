@@ -46,64 +46,89 @@ func (t *TEET) handleRedactionStreams(sessionID string, msg *shared.Message) err
 		session.RedactionState = &shared.RedactionSessionState{}
 	}
 
-	session.RedactionState.RedactionStreams = streamsData.Streams
-	session.RedactionState.CommitmentKeys = streamsData.CommitmentKeys
+	session.RedactionState.SetStreamsAndKeys(streamsData.Streams, streamsData.CommitmentKeys)
 
 	t.logger.Debug("Redaction streams stored for session", zap.String("session_id", sessionID))
-
-	// Capture R_SP (sensitive_proof) streams for cryptographic signing by TEE_T
-	teetState, teetErr := t.getTEETSessionState(sessionID)
-	if teetErr != nil {
-		t.terminateSessionWithError(sessionID, shared.ReasonSessionStateCorrupted, teetErr, "Failed to get TEE_T session state for R_SP capture")
-		return teetErr
-	}
-
-	teetState.RequestProofStreams = [][]byte{} // Reset proof streams
-
-	// Extract R_SP streams based on redaction ranges (if available)
-	if len(streamsData.Ranges) > 0 {
-		for i, r := range streamsData.Ranges {
-			if r.Type == "sensitive_proof" && i < len(streamsData.Streams) {
-				teetState.RequestProofStreams = append(teetState.RequestProofStreams, streamsData.Streams[i])
-				t.logger.Debug("Captured R_SP stream for TEE_T signing",
-					zap.String("session_id", sessionID),
-					zap.Int("stream_index", i),
-					zap.Int("stream_length", len(streamsData.Streams[i])))
-			}
-		}
-	}
-
-	t.logger.Debug("R_SP stream capture completed",
-		zap.String("session_id", sessionID),
-		zap.Int("proof_streams_count", len(teetState.RequestProofStreams)))
 
 	if err := t.verifyCommitmentsIfReady(sessionID); err != nil {
 		t.terminateSessionWithError(sessionID, shared.ReasonCryptoCommitmentFailed, err, "Commitment verification failed")
 		return err
 	}
 
-	teetState2, err := t.getTEETSessionState(sessionID)
-	if err == nil && (teetState2.PendingEncryptedRequest != nil || len(teetState2.PendingEncryptedFragments) > 0) {
-		t.logger.Debug("Processing pending encrypted request(s) with newly received streams", zap.String("session_id", sessionID))
-
-		// Process fragments if available, otherwise process single request
-		if len(teetState2.PendingEncryptedFragments) > 0 {
-			if procErr := t.processEncryptedFragmentsWithStreams(sessionID); procErr != nil {
-				return procErr
-			}
-			teetState2.PendingEncryptedFragments = make(map[uint64]*shared.EncryptedRequestData)
-		} else if teetState2.PendingEncryptedRequest != nil {
-			if procErr := t.processEncryptedRequestWithStreams(sessionID, teetState2.PendingEncryptedRequest); procErr != nil {
-				return procErr
-			}
-			teetState2.PendingEncryptedRequest = nil
-		}
+	if procErr := t.processIfBothPartsArrived(sessionID); procErr != nil {
+		return procErr
 	}
 
 	t.logger.Debug("handleRedactionStreams completed for session",
 		zap.String("session_id", sessionID))
 
 	return nil
+}
+
+// Counter-at-join: caller that bumps RequestPartsArrived to 2 dispatches.
+func (t *TEET) processIfBothPartsArrived(sessionID string) error {
+	teetState, err := t.sessionManager.GetTEETSessionState(sessionID)
+	if err != nil {
+		// Session might already be gone (e.g., terminated). Don't escalate.
+		t.logger.Debug("processIfBothPartsArrived: session state missing", zap.String("session_id", sessionID))
+		return nil
+	}
+	count := teetState.RequestPartsArrived.Add(1)
+	if count != 2 {
+		t.logger.Debug("Request parts arrival incomplete, waiting",
+			zap.String("session_id", sessionID),
+			zap.Int32("arrived", count))
+		return nil
+	}
+
+	t.logger.Debug("Both request parts arrived, processing", zap.String("session_id", sessionID))
+
+	// R_SP capture (signed in TEE_T's transcript). Both halves are now
+	// present, so ranges (from TEE_K) and streams (from client) are
+	// visible via the counter-at-join happens-before edge. We pull
+	// ranges from session.RedactionState — the authoritative copy
+	// TEE_K validated — rather than re-trusting the client.
+	session, err := t.sessionManager.GetSession(sessionID)
+	if err != nil {
+		t.terminateSessionWithError(sessionID, shared.ReasonSessionNotFound, err, "Failed to get session for R_SP capture")
+		return err
+	}
+	if session.RedactionState != nil {
+		teetState.RequestProofStreams = teetState.RequestProofStreams[:0]
+		ranges := session.RedactionState.Ranges
+		streams := session.RedactionState.RedactionStreams
+		for i, r := range ranges {
+			if r.Type == shared.RedactionTypeSensitiveProof && i < len(streams) {
+				teetState.RequestProofStreams = append(teetState.RequestProofStreams, streams[i])
+			}
+		}
+		t.logger.Debug("R_SP stream capture completed",
+			zap.String("session_id", sessionID),
+			zap.Int("proof_streams_count", len(teetState.RequestProofStreams)))
+	}
+
+	// Prefer fragments path; fall back to legacy single-request path.
+	if len(teetState.PendingEncryptedFragments) > 0 {
+		if procErr := t.processEncryptedFragmentsWithStreams(sessionID); procErr != nil {
+			return procErr
+		}
+		teetState.PendingEncryptedFragments = make(map[uint64]*shared.EncryptedRequestData)
+		return nil
+	}
+	if teetState.PendingEncryptedRequest != nil {
+		if procErr := t.processEncryptedRequestWithStreams(sessionID, teetState.PendingEncryptedRequest); procErr != nil {
+			return procErr
+		}
+		teetState.PendingEncryptedRequest = nil
+		return nil
+	}
+
+	// Counter hit 2 but no data — programmer error.
+	err = fmt.Errorf("both parts marked arrived but no encrypted request data present")
+	t.logger.Error("processIfBothPartsArrived: invariant violated",
+		zap.String("session_id", sessionID))
+	t.terminateSessionWithError(sessionID, shared.ReasonSessionStateCorrupted, err, "Counter-join invariant violated")
+	return err
 }
 
 // handleBatchedEncryptedResponses handles batched encrypted responses from client
@@ -224,7 +249,8 @@ func (t *TEET) handleSessionCreation(msg *shared.Message) error {
 		t.terminateSessionWithError(sessionID, shared.ReasonSessionManagerFailure, err, "Failed to register session")
 		return err
 	}
-	teetState := &TEETSessionState{TEETClientConn: nil}
+	t.activeSessions.Add(1)
+	teetState := &TEETSessionState{}
 	t.sessionManager.SetTEETSessionState(sessionID, teetState)
 	t.logger.Info("Session registered", zap.String("sid", shared.TruncateSessionID(sessionID)))
 	return nil
@@ -331,8 +357,10 @@ func (t *TEET) handleBatchedEncryptedRequest(msg *shared.Message) error {
 
 	// Store commitments and redaction ranges from the first fragment
 	if len(batchedReq.Fragments) > 0 {
-		session.RedactionState.Ranges = batchedReq.Fragments[0].RedactionRanges
-		session.RedactionState.ExpectedCommitments = batchedReq.Commitments
+		session.RedactionState.SetRangesAndCommitments(
+			batchedReq.Fragments[0].RedactionRanges,
+			batchedReq.Commitments,
+		)
 
 		t.logger.Debug("Stored expected commitments from batched request",
 			zap.String("session_id", sessionID),
@@ -374,14 +402,7 @@ func (t *TEET) handleBatchedEncryptedRequest(msg *shared.Message) error {
 		zap.String("session_id", sessionID),
 		zap.Int("total_fragments", len(batchedReq.Fragments)))
 
-	// If redaction streams are available, process immediately
-	if len(session.RedactionState.RedactionStreams) > 0 {
-		return t.processEncryptedFragmentsWithStreams(sessionID)
-	}
-
-	t.logger.Debug("Waiting for redaction streams to process batched fragments",
-		zap.String("session_id", sessionID))
-	return nil
+	return t.processIfBothPartsArrived(sessionID)
 }
 
 // handleBatchedTagSecrets handles batched tag secrets from TEE_K

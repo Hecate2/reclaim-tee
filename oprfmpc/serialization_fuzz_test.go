@@ -174,13 +174,9 @@ func TestSerializationRoundtrip_BulkCOSenderSetup(t *testing.T) {
 		t.Fatalf("count mismatch: got %d, want %d", len(parsed), len(setups))
 	}
 
-	// Verify fields
 	for i := range setups {
 		if parsed[i].CurveName != setups[i].CurveName {
 			t.Errorf("setup %d: curve name mismatch", i)
-		}
-		if parsed[i].Scalar.Cmp(setups[i].Scalar) != 0 {
-			t.Errorf("setup %d: scalar mismatch", i)
 		}
 		if parsed[i].Ax.Cmp(setups[i].Ax) != 0 {
 			t.Errorf("setup %d: Ax mismatch", i)
@@ -285,9 +281,6 @@ func TestSerializationRoundtrip_OnlinePayload(t *testing.T) {
 	}
 	if len(parsed.OutputHints) != len(payload.OutputHints) {
 		t.Error("OutputHints length mismatch")
-	}
-	if len(parsed.DualMasks) != len(payload.DualMasks) {
-		t.Error("DualMasks length mismatch")
 	}
 }
 

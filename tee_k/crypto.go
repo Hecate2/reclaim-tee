@@ -519,6 +519,9 @@ func (t *TEEK) generateAndSendRedactedDecryptionStream(sessionID string, spec sh
 		origCopy := make([]byte, len(originalStream))
 		copy(origCopy, originalStream)
 		if minitls.IsTLS13CipherSuite(tlsState.CipherSuite) {
+			if length < 1 {
+				return fmt.Errorf("invalid TLS 1.3 response length %d for seq %d", length, seqNum)
+			}
 			origCopy = origCopy[:length-1] // remove content type byte to match redacted stream length
 		}
 		originalStreams = append(originalStreams, originalStreamData{stream: origCopy, seqNum: seqNum})
@@ -537,6 +540,7 @@ func (t *TEEK) generateAndSendRedactedDecryptionStream(sessionID string, spec sh
 		}
 
 		if minitls.IsTLS13CipherSuite(tlsState.CipherSuite) {
+			// length already validated above for the same seq
 			redactedStream = redactedStream[:length-1] // !!! remove content type byte from redacted stream
 		}
 		// Store redacted stream in session for master signature generation
@@ -583,7 +587,7 @@ func (t *TEEK) generateAndSendRedactedDecryptionStream(sessionID string, spec sh
 		teekState.ConsolidatedKeystream = consolidatedOriginalKeystream // Use ORIGINAL for OPRF
 		teekState.UnlockOPRF()
 		// Process any queued OPRF ranges now that keystream is available
-		if teekState.ClientRangesReceived && len(teekState.OPRFRanges) > 0 {
+		if teekState.ClientRangesReceived.Load() && len(teekState.OPRFRanges) > 0 {
 			if err := t.processQueuedOPRFRanges(sessionID, teekState); err != nil {
 				return fmt.Errorf("failed to process queued OPRF ranges: %w", err)
 			}

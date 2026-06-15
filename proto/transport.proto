@@ -75,11 +75,24 @@ message Envelope {
     OTPrecomputeComplete ot_precompute_complete = 66;   // TEE_K -> TEE_T (after initial setup only)
     OPRFOnlineFull oprf_online_full = 67;               // TEE_K -> TEE_T (2-round online phase)
 
+    // OT pool resume across a transient control reconnect (both enclaves
+    // retained their pool halves). TEE_K sends epoch+counter instead of a
+    // full re-precompute; TEE_T accepts iff it still holds that pool.
+    OTResumeRequest ot_resume_request = 68;             // TEE_K -> TEE_T
+    OTResumeResponse ot_resume_response = 69;           // TEE_T -> TEE_K
+
     // Per-session connection management (TEE_K <-> TEE_T)
     SessionConnectionInit session_connection_init = 80;   // TEE_K -> TEE_T (on per-session WS)
     SessionConnectionAck session_connection_ack = 81;     // TEE_T -> TEE_K (on per-session WS)
     SessionClosed session_closed = 82;                    // TEE_K -> TEE_T (on control WS)
     SessionCreatedAck session_created_ack = 83;           // TEE_T -> TEE_K (on control WS)
+
+    // Router-mode pair assignment (multi-pair architecture, Phase 3+)
+    TEEKPairAssignment teek_pair_assignment = 84;         // TEE_K -> TEE_T (first message on /ws/peer)
+
+    // Router-mode client authentication. The first envelope a client sends
+    // on /ws to either TEE; carries the allocation JWT minted by /allocate.
+    ClientAuth client_auth = 85;                          // Client -> TEE_K/TEE_T
   }
 }
 
@@ -273,6 +286,18 @@ message OTPrecomputeRequest {
   uint32 count = 1;           // Number of OTs to precompute
   bytes ot_sender_setup = 2;  // Serialized bulk COSenderSetup for all OTs
   bool is_initial = 3;        // True for initial setup, false for extension
+  string epoch = 4;           // Pool identity (UUID); set on initial setup so TEE_T can later resume it
+}
+
+// OT pool resume: TEE_K still holds a ready pool after a transient control
+// reconnect and asks TEE_T to keep using it instead of re-precomputing.
+message OTResumeRequest {
+  string epoch = 1;           // Pool identity TEE_K is resuming
+  uint32 next_index = 2;      // TEE_K's next unreserved pool index (consistency check)
+}
+
+message OTResumeResponse {
+  bool accepted = 1;          // True if TEE_T still holds the matching pool; false -> TEE_K full re-precompute
 }
 
 message OTPrecomputeResponse {
@@ -301,15 +326,19 @@ message OPRFOnlineFull {
   // Derandomized OT data
   uint32 ot_start_index = 10;    // Starting index in precomputed OT pool
   bytes dual_masks = 11;         // M0||M1 pairs for all 640 input bits
+
+  int32 total_ranges = 12;       // Total OPRF ranges this session; TEE_T's authoritative expected count
 }
 
-// OPRF result with MANDATORY output labels for garbler verification
+// OPRF result with MANDATORY output labels for garbler verification.
+// CMAC and HashOutput are intentionally NOT on the wire — TEE_K derives both
+// from the verified output labels so a compromised TEE_T can't substitute them.
 message OPRFMPCResult {
   string session_id = 1;
   uint64 oprf_session_id = 2;
   int32 range_index = 3;
-  bytes cmac_output = 4;         // 16 bytes
-  bytes hash_output = 5;         // 32 bytes (SHA-256 of CMAC)
+  reserved 4, 5;
+  reserved "cmac_output", "hash_output";
   bytes output_labels = 6;       // MANDATORY: actual output wire labels for garbler verification
 }
 
@@ -327,5 +356,22 @@ message SessionConnectionAck {
 message SessionClosed {
   string session_id = 1;
   string reason = 2;             // Reason for closure (normal, error, timeout, etc.)
+}
+
+// TEEKPairAssignment is the first envelope TEE_K sends to TEE_T over the
+// RA-TLS peer connection in router mode. It carries the pair_id TEE_K
+// generated at boot; TEE_T uses it to register itself with the router
+// under the same id so both /register calls land on the same record.
+message TEEKPairAssignment {
+  string pair_id = 1;
+}
+
+// ClientAuth is the first envelope a client sends on its WebSocket
+// connection to TEE_K or TEE_T in router mode. The jwt field is the
+// ES256 token the router minted at /allocate; the TEE verifies signature,
+// expiry, and that the `aud` claim matches its own pair_id before
+// accepting any further messages from the client.
+message ClientAuth {
+  string jwt = 1;
 }
 

@@ -212,7 +212,7 @@ func main() {
 	providerData := map[string]interface{}{
 		"name": "http",
 		"params": map[string]interface{}{
-			"url":    "https://vpic.nhtsa.dot.gov/",
+			"url":    "https://example.com/",
 			"method": "GET",
 			"responseMatches": []map[string]interface{}{
 				{
@@ -222,13 +222,13 @@ func main() {
 			},
 			"responseRedactions": []map[string]interface{}{
 				{
-					"xPath": "/html/body/footer/div[2]/div/div[1]/ul[3]/li[2]/a",
-					"regex": "href=\"https://(?<addr>www.trafficsafetymarketing.gov)/\"",
+					"xPath": "/html/body/div/p[2]/a",
+					"regex": "href=\"https://(?<addr>iana.org)/.*?\"",
 					"hash":  "oprf-mpc",
 				},
 			},
 			"paramValues": map[string]string{
-				"addr": "www.trafficsafetymarketing.gov",
+				"addr": "iana.org",
 			},
 		},
 		"secretParams": map[string]interface{}{
@@ -240,15 +240,11 @@ func main() {
 		"context": "{\"purpose\":\"demo\",\"version\":\"1.0\"}",
 	}
 
-	// Create config separately with optional TEE URLs
-	// All URLs are optional - if not provided, defaults will be used:
-	// - teekUrl: wss://tee-k.reclaimprotocol.org/ws (enclave mode)
-	// - teetUrl: wss://tee-t.reclaimprotocol.org/ws (enclave mode)
-	// - attestorUrl: ws://localhost:8001/ws
+	// routerUrl is required — the library hits /allocate to resolve the
+	// TEE pair and JWT. attestorUrl is optional.
 	configData := map[string]interface{}{
-		"attestorUrl": "wss://attestor.reclaimprotocol.org:444/ws", // Attestor WebSocket URL
-		"teekUrl":     "wss://eu.tk.reclaimprotocol.org/ws",
-		"teetUrl":     "wss://eu.tt.reclaimprotocol.org/ws",
+		//"routerUrl":   "https://tee.reclaimprotocol.org",
+		"attestorUrl": "ws://localhost:8001/ws",
 	}
 
 	providerJSON, err := json.Marshal(providerData)

@@ -116,10 +116,14 @@ type Envelope struct {
 	//	*Envelope_OtPrecomputeResponse
 	//	*Envelope_OtPrecomputeComplete
 	//	*Envelope_OprfOnlineFull
+	//	*Envelope_OtResumeRequest
+	//	*Envelope_OtResumeResponse
 	//	*Envelope_SessionConnectionInit
 	//	*Envelope_SessionConnectionAck
 	//	*Envelope_SessionClosed
 	//	*Envelope_SessionCreatedAck
+	//	*Envelope_TeekPairAssignment
+	//	*Envelope_ClientAuth
 	Payload       isEnvelope_Payload `protobuf_oneof:"payload"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -494,6 +498,24 @@ func (x *Envelope) GetOprfOnlineFull() *OPRFOnlineFull {
 	return nil
 }
 
+func (x *Envelope) GetOtResumeRequest() *OTResumeRequest {
+	if x != nil {
+		if x, ok := x.Payload.(*Envelope_OtResumeRequest); ok {
+			return x.OtResumeRequest
+		}
+	}
+	return nil
+}
+
+func (x *Envelope) GetOtResumeResponse() *OTResumeResponse {
+	if x != nil {
+		if x, ok := x.Payload.(*Envelope_OtResumeResponse); ok {
+			return x.OtResumeResponse
+		}
+	}
+	return nil
+}
+
 func (x *Envelope) GetSessionConnectionInit() *SessionConnectionInit {
 	if x != nil {
 		if x, ok := x.Payload.(*Envelope_SessionConnectionInit); ok {
@@ -525,6 +547,24 @@ func (x *Envelope) GetSessionCreatedAck() *SessionCreatedAck {
 	if x != nil {
 		if x, ok := x.Payload.(*Envelope_SessionCreatedAck); ok {
 			return x.SessionCreatedAck
+		}
+	}
+	return nil
+}
+
+func (x *Envelope) GetTeekPairAssignment() *TEEKPairAssignment {
+	if x != nil {
+		if x, ok := x.Payload.(*Envelope_TeekPairAssignment); ok {
+			return x.TeekPairAssignment
+		}
+	}
+	return nil
+}
+
+func (x *Envelope) GetClientAuth() *ClientAuth {
+	if x != nil {
+		if x, ok := x.Payload.(*Envelope_ClientAuth); ok {
+			return x.ClientAuth
 		}
 	}
 	return nil
@@ -675,6 +715,17 @@ type Envelope_OprfOnlineFull struct {
 	OprfOnlineFull *OPRFOnlineFull `protobuf:"bytes,67,opt,name=oprf_online_full,json=oprfOnlineFull,proto3,oneof"` // TEE_K -> TEE_T (2-round online phase)
 }
 
+type Envelope_OtResumeRequest struct {
+	// OT pool resume across a transient control reconnect (both enclaves
+	// retained their pool halves). TEE_K sends epoch+counter instead of a
+	// full re-precompute; TEE_T accepts iff it still holds that pool.
+	OtResumeRequest *OTResumeRequest `protobuf:"bytes,68,opt,name=ot_resume_request,json=otResumeRequest,proto3,oneof"` // TEE_K -> TEE_T
+}
+
+type Envelope_OtResumeResponse struct {
+	OtResumeResponse *OTResumeResponse `protobuf:"bytes,69,opt,name=ot_resume_response,json=otResumeResponse,proto3,oneof"` // TEE_T -> TEE_K
+}
+
 type Envelope_SessionConnectionInit struct {
 	// Per-session connection management (TEE_K <-> TEE_T)
 	SessionConnectionInit *SessionConnectionInit `protobuf:"bytes,80,opt,name=session_connection_init,json=sessionConnectionInit,proto3,oneof"` // TEE_K -> TEE_T (on per-session WS)
@@ -690,6 +741,17 @@ type Envelope_SessionClosed struct {
 
 type Envelope_SessionCreatedAck struct {
 	SessionCreatedAck *SessionCreatedAck `protobuf:"bytes,83,opt,name=session_created_ack,json=sessionCreatedAck,proto3,oneof"` // TEE_T -> TEE_K (on control WS)
+}
+
+type Envelope_TeekPairAssignment struct {
+	// Router-mode pair assignment (multi-pair architecture, Phase 3+)
+	TeekPairAssignment *TEEKPairAssignment `protobuf:"bytes,84,opt,name=teek_pair_assignment,json=teekPairAssignment,proto3,oneof"` // TEE_K -> TEE_T (first message on /ws/peer)
+}
+
+type Envelope_ClientAuth struct {
+	// Router-mode client authentication. The first envelope a client sends
+	// on /ws to either TEE; carries the allocation JWT minted by /allocate.
+	ClientAuth *ClientAuth `protobuf:"bytes,85,opt,name=client_auth,json=clientAuth,proto3,oneof"` // Client -> TEE_K/TEE_T
 }
 
 func (*Envelope_ConnectionReady) isEnvelope_Payload() {}
@@ -758,6 +820,10 @@ func (*Envelope_OtPrecomputeComplete) isEnvelope_Payload() {}
 
 func (*Envelope_OprfOnlineFull) isEnvelope_Payload() {}
 
+func (*Envelope_OtResumeRequest) isEnvelope_Payload() {}
+
+func (*Envelope_OtResumeResponse) isEnvelope_Payload() {}
+
 func (*Envelope_SessionConnectionInit) isEnvelope_Payload() {}
 
 func (*Envelope_SessionConnectionAck) isEnvelope_Payload() {}
@@ -765,6 +831,10 @@ func (*Envelope_SessionConnectionAck) isEnvelope_Payload() {}
 func (*Envelope_SessionClosed) isEnvelope_Payload() {}
 
 func (*Envelope_SessionCreatedAck) isEnvelope_Payload() {}
+
+func (*Envelope_TeekPairAssignment) isEnvelope_Payload() {}
+
+func (*Envelope_ClientAuth) isEnvelope_Payload() {}
 
 // Basic types aligned with existing JSON models
 type RequestConnection struct {
@@ -2594,6 +2664,7 @@ type OTPrecomputeRequest struct {
 	Count         uint32                 `protobuf:"varint,1,opt,name=count,proto3" json:"count,omitempty"`                                       // Number of OTs to precompute
 	OtSenderSetup []byte                 `protobuf:"bytes,2,opt,name=ot_sender_setup,json=otSenderSetup,proto3" json:"ot_sender_setup,omitempty"` // Serialized bulk COSenderSetup for all OTs
 	IsInitial     bool                   `protobuf:"varint,3,opt,name=is_initial,json=isInitial,proto3" json:"is_initial,omitempty"`              // True for initial setup, false for extension
+	Epoch         string                 `protobuf:"bytes,4,opt,name=epoch,proto3" json:"epoch,omitempty"`                                        // Pool identity (UUID); set on initial setup so TEE_T can later resume it
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2649,6 +2720,111 @@ func (x *OTPrecomputeRequest) GetIsInitial() bool {
 	return false
 }
 
+func (x *OTPrecomputeRequest) GetEpoch() string {
+	if x != nil {
+		return x.Epoch
+	}
+	return ""
+}
+
+// OT pool resume: TEE_K still holds a ready pool after a transient control
+// reconnect and asks TEE_T to keep using it instead of re-precomputing.
+type OTResumeRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Epoch         string                 `protobuf:"bytes,1,opt,name=epoch,proto3" json:"epoch,omitempty"`                           // Pool identity TEE_K is resuming
+	NextIndex     uint32                 `protobuf:"varint,2,opt,name=next_index,json=nextIndex,proto3" json:"next_index,omitempty"` // TEE_K's next unreserved pool index (consistency check)
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *OTResumeRequest) Reset() {
+	*x = OTResumeRequest{}
+	mi := &file_transport_proto_msgTypes[34]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *OTResumeRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*OTResumeRequest) ProtoMessage() {}
+
+func (x *OTResumeRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_transport_proto_msgTypes[34]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use OTResumeRequest.ProtoReflect.Descriptor instead.
+func (*OTResumeRequest) Descriptor() ([]byte, []int) {
+	return file_transport_proto_rawDescGZIP(), []int{34}
+}
+
+func (x *OTResumeRequest) GetEpoch() string {
+	if x != nil {
+		return x.Epoch
+	}
+	return ""
+}
+
+func (x *OTResumeRequest) GetNextIndex() uint32 {
+	if x != nil {
+		return x.NextIndex
+	}
+	return 0
+}
+
+type OTResumeResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Accepted      bool                   `protobuf:"varint,1,opt,name=accepted,proto3" json:"accepted,omitempty"` // True if TEE_T still holds the matching pool; false -> TEE_K full re-precompute
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *OTResumeResponse) Reset() {
+	*x = OTResumeResponse{}
+	mi := &file_transport_proto_msgTypes[35]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *OTResumeResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*OTResumeResponse) ProtoMessage() {}
+
+func (x *OTResumeResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_transport_proto_msgTypes[35]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use OTResumeResponse.ProtoReflect.Descriptor instead.
+func (*OTResumeResponse) Descriptor() ([]byte, []int) {
+	return file_transport_proto_rawDescGZIP(), []int{35}
+}
+
+func (x *OTResumeResponse) GetAccepted() bool {
+	if x != nil {
+		return x.Accepted
+	}
+	return false
+}
+
 type OTPrecomputeResponse struct {
 	state          protoimpl.MessageState `protogen:"open.v1"`
 	Count          uint32                 `protobuf:"varint,1,opt,name=count,proto3" json:"count,omitempty"`                                          // Number of OTs responded
@@ -2659,7 +2835,7 @@ type OTPrecomputeResponse struct {
 
 func (x *OTPrecomputeResponse) Reset() {
 	*x = OTPrecomputeResponse{}
-	mi := &file_transport_proto_msgTypes[34]
+	mi := &file_transport_proto_msgTypes[36]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2671,7 +2847,7 @@ func (x *OTPrecomputeResponse) String() string {
 func (*OTPrecomputeResponse) ProtoMessage() {}
 
 func (x *OTPrecomputeResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_transport_proto_msgTypes[34]
+	mi := &file_transport_proto_msgTypes[36]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2684,7 +2860,7 @@ func (x *OTPrecomputeResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OTPrecomputeResponse.ProtoReflect.Descriptor instead.
 func (*OTPrecomputeResponse) Descriptor() ([]byte, []int) {
-	return file_transport_proto_rawDescGZIP(), []int{34}
+	return file_transport_proto_rawDescGZIP(), []int{36}
 }
 
 func (x *OTPrecomputeResponse) GetCount() uint32 {
@@ -2710,7 +2886,7 @@ type OTPrecomputeComplete struct {
 
 func (x *OTPrecomputeComplete) Reset() {
 	*x = OTPrecomputeComplete{}
-	mi := &file_transport_proto_msgTypes[35]
+	mi := &file_transport_proto_msgTypes[37]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2722,7 +2898,7 @@ func (x *OTPrecomputeComplete) String() string {
 func (*OTPrecomputeComplete) ProtoMessage() {}
 
 func (x *OTPrecomputeComplete) ProtoReflect() protoreflect.Message {
-	mi := &file_transport_proto_msgTypes[35]
+	mi := &file_transport_proto_msgTypes[37]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2735,7 +2911,7 @@ func (x *OTPrecomputeComplete) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OTPrecomputeComplete.ProtoReflect.Descriptor instead.
 func (*OTPrecomputeComplete) Descriptor() ([]byte, []int) {
-	return file_transport_proto_rawDescGZIP(), []int{35}
+	return file_transport_proto_rawDescGZIP(), []int{37}
 }
 
 func (x *OTPrecomputeComplete) GetPoolSize() uint32 {
@@ -2761,13 +2937,14 @@ type OPRFOnlineFull struct {
 	// Derandomized OT data
 	OtStartIndex  uint32 `protobuf:"varint,10,opt,name=ot_start_index,json=otStartIndex,proto3" json:"ot_start_index,omitempty"` // Starting index in precomputed OT pool
 	DualMasks     []byte `protobuf:"bytes,11,opt,name=dual_masks,json=dualMasks,proto3" json:"dual_masks,omitempty"`             // M0||M1 pairs for all 640 input bits
+	TotalRanges   int32  `protobuf:"varint,12,opt,name=total_ranges,json=totalRanges,proto3" json:"total_ranges,omitempty"`      // Total OPRF ranges this session; TEE_T's authoritative expected count
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *OPRFOnlineFull) Reset() {
 	*x = OPRFOnlineFull{}
-	mi := &file_transport_proto_msgTypes[36]
+	mi := &file_transport_proto_msgTypes[38]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2779,7 +2956,7 @@ func (x *OPRFOnlineFull) String() string {
 func (*OPRFOnlineFull) ProtoMessage() {}
 
 func (x *OPRFOnlineFull) ProtoReflect() protoreflect.Message {
-	mi := &file_transport_proto_msgTypes[36]
+	mi := &file_transport_proto_msgTypes[38]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2792,7 +2969,7 @@ func (x *OPRFOnlineFull) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OPRFOnlineFull.ProtoReflect.Descriptor instead.
 func (*OPRFOnlineFull) Descriptor() ([]byte, []int) {
-	return file_transport_proto_rawDescGZIP(), []int{36}
+	return file_transport_proto_rawDescGZIP(), []int{38}
 }
 
 func (x *OPRFOnlineFull) GetSessionId() string {
@@ -2872,14 +3049,21 @@ func (x *OPRFOnlineFull) GetDualMasks() []byte {
 	return nil
 }
 
-// OPRF result with MANDATORY output labels for garbler verification
+func (x *OPRFOnlineFull) GetTotalRanges() int32 {
+	if x != nil {
+		return x.TotalRanges
+	}
+	return 0
+}
+
+// OPRF result with MANDATORY output labels for garbler verification.
+// CMAC and HashOutput are intentionally NOT on the wire — TEE_K derives both
+// from the verified output labels so a compromised TEE_T can't substitute them.
 type OPRFMPCResult struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	SessionId     string                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
 	OprfSessionId uint64                 `protobuf:"varint,2,opt,name=oprf_session_id,json=oprfSessionId,proto3" json:"oprf_session_id,omitempty"`
 	RangeIndex    int32                  `protobuf:"varint,3,opt,name=range_index,json=rangeIndex,proto3" json:"range_index,omitempty"`
-	CmacOutput    []byte                 `protobuf:"bytes,4,opt,name=cmac_output,json=cmacOutput,proto3" json:"cmac_output,omitempty"`       // 16 bytes
-	HashOutput    []byte                 `protobuf:"bytes,5,opt,name=hash_output,json=hashOutput,proto3" json:"hash_output,omitempty"`       // 32 bytes (SHA-256 of CMAC)
 	OutputLabels  []byte                 `protobuf:"bytes,6,opt,name=output_labels,json=outputLabels,proto3" json:"output_labels,omitempty"` // MANDATORY: actual output wire labels for garbler verification
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -2887,7 +3071,7 @@ type OPRFMPCResult struct {
 
 func (x *OPRFMPCResult) Reset() {
 	*x = OPRFMPCResult{}
-	mi := &file_transport_proto_msgTypes[37]
+	mi := &file_transport_proto_msgTypes[39]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2899,7 +3083,7 @@ func (x *OPRFMPCResult) String() string {
 func (*OPRFMPCResult) ProtoMessage() {}
 
 func (x *OPRFMPCResult) ProtoReflect() protoreflect.Message {
-	mi := &file_transport_proto_msgTypes[37]
+	mi := &file_transport_proto_msgTypes[39]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2912,7 +3096,7 @@ func (x *OPRFMPCResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OPRFMPCResult.ProtoReflect.Descriptor instead.
 func (*OPRFMPCResult) Descriptor() ([]byte, []int) {
-	return file_transport_proto_rawDescGZIP(), []int{37}
+	return file_transport_proto_rawDescGZIP(), []int{39}
 }
 
 func (x *OPRFMPCResult) GetSessionId() string {
@@ -2936,20 +3120,6 @@ func (x *OPRFMPCResult) GetRangeIndex() int32 {
 	return 0
 }
 
-func (x *OPRFMPCResult) GetCmacOutput() []byte {
-	if x != nil {
-		return x.CmacOutput
-	}
-	return nil
-}
-
-func (x *OPRFMPCResult) GetHashOutput() []byte {
-	if x != nil {
-		return x.HashOutput
-	}
-	return nil
-}
-
 func (x *OPRFMPCResult) GetOutputLabels() []byte {
 	if x != nil {
 		return x.OutputLabels
@@ -2967,7 +3137,7 @@ type SessionConnectionInit struct {
 
 func (x *SessionConnectionInit) Reset() {
 	*x = SessionConnectionInit{}
-	mi := &file_transport_proto_msgTypes[38]
+	mi := &file_transport_proto_msgTypes[40]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2979,7 +3149,7 @@ func (x *SessionConnectionInit) String() string {
 func (*SessionConnectionInit) ProtoMessage() {}
 
 func (x *SessionConnectionInit) ProtoReflect() protoreflect.Message {
-	mi := &file_transport_proto_msgTypes[38]
+	mi := &file_transport_proto_msgTypes[40]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2992,7 +3162,7 @@ func (x *SessionConnectionInit) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SessionConnectionInit.ProtoReflect.Descriptor instead.
 func (*SessionConnectionInit) Descriptor() ([]byte, []int) {
-	return file_transport_proto_rawDescGZIP(), []int{38}
+	return file_transport_proto_rawDescGZIP(), []int{40}
 }
 
 func (x *SessionConnectionInit) GetSessionId() string {
@@ -3013,7 +3183,7 @@ type SessionConnectionAck struct {
 
 func (x *SessionConnectionAck) Reset() {
 	*x = SessionConnectionAck{}
-	mi := &file_transport_proto_msgTypes[39]
+	mi := &file_transport_proto_msgTypes[41]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3025,7 +3195,7 @@ func (x *SessionConnectionAck) String() string {
 func (*SessionConnectionAck) ProtoMessage() {}
 
 func (x *SessionConnectionAck) ProtoReflect() protoreflect.Message {
-	mi := &file_transport_proto_msgTypes[39]
+	mi := &file_transport_proto_msgTypes[41]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3038,7 +3208,7 @@ func (x *SessionConnectionAck) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SessionConnectionAck.ProtoReflect.Descriptor instead.
 func (*SessionConnectionAck) Descriptor() ([]byte, []int) {
-	return file_transport_proto_rawDescGZIP(), []int{39}
+	return file_transport_proto_rawDescGZIP(), []int{41}
 }
 
 func (x *SessionConnectionAck) GetSessionId() string {
@@ -3072,7 +3242,7 @@ type SessionClosed struct {
 
 func (x *SessionClosed) Reset() {
 	*x = SessionClosed{}
-	mi := &file_transport_proto_msgTypes[40]
+	mi := &file_transport_proto_msgTypes[42]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3084,7 +3254,7 @@ func (x *SessionClosed) String() string {
 func (*SessionClosed) ProtoMessage() {}
 
 func (x *SessionClosed) ProtoReflect() protoreflect.Message {
-	mi := &file_transport_proto_msgTypes[40]
+	mi := &file_transport_proto_msgTypes[42]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3097,7 +3267,7 @@ func (x *SessionClosed) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SessionClosed.ProtoReflect.Descriptor instead.
 func (*SessionClosed) Descriptor() ([]byte, []int) {
-	return file_transport_proto_rawDescGZIP(), []int{40}
+	return file_transport_proto_rawDescGZIP(), []int{42}
 }
 
 func (x *SessionClosed) GetSessionId() string {
@@ -3114,6 +3284,103 @@ func (x *SessionClosed) GetReason() string {
 	return ""
 }
 
+// TEEKPairAssignment is the first envelope TEE_K sends to TEE_T over the
+// RA-TLS peer connection in router mode. It carries the pair_id TEE_K
+// generated at boot; TEE_T uses it to register itself with the router
+// under the same id so both /register calls land on the same record.
+type TEEKPairAssignment struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	PairId        string                 `protobuf:"bytes,1,opt,name=pair_id,json=pairId,proto3" json:"pair_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *TEEKPairAssignment) Reset() {
+	*x = TEEKPairAssignment{}
+	mi := &file_transport_proto_msgTypes[43]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *TEEKPairAssignment) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*TEEKPairAssignment) ProtoMessage() {}
+
+func (x *TEEKPairAssignment) ProtoReflect() protoreflect.Message {
+	mi := &file_transport_proto_msgTypes[43]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use TEEKPairAssignment.ProtoReflect.Descriptor instead.
+func (*TEEKPairAssignment) Descriptor() ([]byte, []int) {
+	return file_transport_proto_rawDescGZIP(), []int{43}
+}
+
+func (x *TEEKPairAssignment) GetPairId() string {
+	if x != nil {
+		return x.PairId
+	}
+	return ""
+}
+
+// ClientAuth is the first envelope a client sends on its WebSocket
+// connection to TEE_K or TEE_T in router mode. The jwt field is the
+// ES256 token the router minted at /allocate; the TEE verifies signature,
+// expiry, and that the `aud` claim matches its own pair_id before
+// accepting any further messages from the client.
+type ClientAuth struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Jwt           string                 `protobuf:"bytes,1,opt,name=jwt,proto3" json:"jwt,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ClientAuth) Reset() {
+	*x = ClientAuth{}
+	mi := &file_transport_proto_msgTypes[44]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ClientAuth) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ClientAuth) ProtoMessage() {}
+
+func (x *ClientAuth) ProtoReflect() protoreflect.Message {
+	mi := &file_transport_proto_msgTypes[44]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ClientAuth.ProtoReflect.Descriptor instead.
+func (*ClientAuth) Descriptor() ([]byte, []int) {
+	return file_transport_proto_rawDescGZIP(), []int{44}
+}
+
+func (x *ClientAuth) GetJwt() string {
+	if x != nil {
+		return x.Jwt
+	}
+	return ""
+}
+
 type BatchedResponseLengths_Length struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Length        int32                  `protobuf:"varint,1,opt,name=length,proto3" json:"length,omitempty"`
@@ -3126,7 +3393,7 @@ type BatchedResponseLengths_Length struct {
 
 func (x *BatchedResponseLengths_Length) Reset() {
 	*x = BatchedResponseLengths_Length{}
-	mi := &file_transport_proto_msgTypes[41]
+	mi := &file_transport_proto_msgTypes[45]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3138,7 +3405,7 @@ func (x *BatchedResponseLengths_Length) String() string {
 func (*BatchedResponseLengths_Length) ProtoMessage() {}
 
 func (x *BatchedResponseLengths_Length) ProtoReflect() protoreflect.Message {
-	mi := &file_transport_proto_msgTypes[41]
+	mi := &file_transport_proto_msgTypes[45]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3192,7 +3459,7 @@ type BatchedTagSecrets_TagSecret struct {
 
 func (x *BatchedTagSecrets_TagSecret) Reset() {
 	*x = BatchedTagSecrets_TagSecret{}
-	mi := &file_transport_proto_msgTypes[42]
+	mi := &file_transport_proto_msgTypes[46]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3204,7 +3471,7 @@ func (x *BatchedTagSecrets_TagSecret) String() string {
 func (*BatchedTagSecrets_TagSecret) ProtoMessage() {}
 
 func (x *BatchedTagSecrets_TagSecret) ProtoReflect() protoreflect.Message {
-	mi := &file_transport_proto_msgTypes[42]
+	mi := &file_transport_proto_msgTypes[46]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3245,7 +3512,7 @@ type BatchedTagVerifications_Verification struct {
 
 func (x *BatchedTagVerifications_Verification) Reset() {
 	*x = BatchedTagVerifications_Verification{}
-	mi := &file_transport_proto_msgTypes[43]
+	mi := &file_transport_proto_msgTypes[47]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3257,7 +3524,7 @@ func (x *BatchedTagVerifications_Verification) String() string {
 func (*BatchedTagVerifications_Verification) ProtoMessage() {}
 
 func (x *BatchedTagVerifications_Verification) ProtoReflect() protoreflect.Message {
-	mi := &file_transport_proto_msgTypes[43]
+	mi := &file_transport_proto_msgTypes[47]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3298,7 +3565,7 @@ var File_transport_proto protoreflect.FileDescriptor
 
 const file_transport_proto_rawDesc = "" +
 	"\n" +
-	"\x0ftransport.proto\x12\bteeproto\x1a\fcommon.proto\x1a\rsigning.proto\x1a\x12attestor_api.proto\"\x93\x18\n" +
+	"\x0ftransport.proto\x12\bteeproto\x1a\fcommon.proto\x1a\rsigning.proto\x1a\x12attestor_api.proto\"\xb3\x1a\n" +
 	"\bEnvelope\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x10\n" +
@@ -3339,11 +3606,16 @@ const file_transport_proto_rawDesc = "" +
 	"\x15ot_precompute_request\x18@ \x01(\v2\x1d.teeproto.OTPrecomputeRequestH\x00R\x13otPrecomputeRequest\x12V\n" +
 	"\x16ot_precompute_response\x18A \x01(\v2\x1e.teeproto.OTPrecomputeResponseH\x00R\x14otPrecomputeResponse\x12V\n" +
 	"\x16ot_precompute_complete\x18B \x01(\v2\x1e.teeproto.OTPrecomputeCompleteH\x00R\x14otPrecomputeComplete\x12D\n" +
-	"\x10oprf_online_full\x18C \x01(\v2\x18.teeproto.OPRFOnlineFullH\x00R\x0eoprfOnlineFull\x12Y\n" +
+	"\x10oprf_online_full\x18C \x01(\v2\x18.teeproto.OPRFOnlineFullH\x00R\x0eoprfOnlineFull\x12G\n" +
+	"\x11ot_resume_request\x18D \x01(\v2\x19.teeproto.OTResumeRequestH\x00R\x0fotResumeRequest\x12J\n" +
+	"\x12ot_resume_response\x18E \x01(\v2\x1a.teeproto.OTResumeResponseH\x00R\x10otResumeResponse\x12Y\n" +
 	"\x17session_connection_init\x18P \x01(\v2\x1f.teeproto.SessionConnectionInitH\x00R\x15sessionConnectionInit\x12V\n" +
 	"\x16session_connection_ack\x18Q \x01(\v2\x1e.teeproto.SessionConnectionAckH\x00R\x14sessionConnectionAck\x12@\n" +
 	"\x0esession_closed\x18R \x01(\v2\x17.teeproto.SessionClosedH\x00R\rsessionClosed\x12M\n" +
-	"\x13session_created_ack\x18S \x01(\v2\x1b.teeproto.SessionCreatedAckH\x00R\x11sessionCreatedAckB\t\n" +
+	"\x13session_created_ack\x18S \x01(\v2\x1b.teeproto.SessionCreatedAckH\x00R\x11sessionCreatedAck\x12P\n" +
+	"\x14teek_pair_assignment\x18T \x01(\v2\x1c.teeproto.TEEKPairAssignmentH\x00R\x12teekPairAssignment\x127\n" +
+	"\vclient_auth\x18U \x01(\v2\x14.teeproto.ClientAuthH\x00R\n" +
+	"clientAuthB\t\n" +
 	"\apayload\"\xc3\x01\n" +
 	"\x11RequestConnection\x12\x1a\n" +
 	"\bhostname\x18\x01 \x01(\tR\bhostname\x12\x12\n" +
@@ -3495,17 +3767,24 @@ const file_transport_proto_rawDesc = "" +
 	"\x0fCiphertextReady\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12!\n" +
-	"\ftotal_length\x18\x02 \x01(\x05R\vtotalLength\"r\n" +
+	"\ftotal_length\x18\x02 \x01(\x05R\vtotalLength\"\x88\x01\n" +
 	"\x13OTPrecomputeRequest\x12\x14\n" +
 	"\x05count\x18\x01 \x01(\rR\x05count\x12&\n" +
 	"\x0fot_sender_setup\x18\x02 \x01(\fR\rotSenderSetup\x12\x1d\n" +
 	"\n" +
-	"is_initial\x18\x03 \x01(\bR\tisInitial\"V\n" +
+	"is_initial\x18\x03 \x01(\bR\tisInitial\x12\x14\n" +
+	"\x05epoch\x18\x04 \x01(\tR\x05epoch\"F\n" +
+	"\x0fOTResumeRequest\x12\x14\n" +
+	"\x05epoch\x18\x01 \x01(\tR\x05epoch\x12\x1d\n" +
+	"\n" +
+	"next_index\x18\x02 \x01(\rR\tnextIndex\".\n" +
+	"\x10OTResumeResponse\x12\x1a\n" +
+	"\baccepted\x18\x01 \x01(\bR\baccepted\"V\n" +
 	"\x14OTPrecomputeResponse\x12\x14\n" +
 	"\x05count\x18\x01 \x01(\rR\x05count\x12(\n" +
 	"\x10ot_receiver_data\x18\x02 \x01(\fR\x0eotReceiverData\"3\n" +
 	"\x14OTPrecomputeComplete\x12\x1b\n" +
-	"\tpool_size\x18\x01 \x01(\rR\bpoolSize\"\x94\x03\n" +
+	"\tpool_size\x18\x01 \x01(\rR\bpoolSize\"\xb7\x03\n" +
 	"\x0eOPRFOnlineFull\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12&\n" +
@@ -3522,18 +3801,15 @@ const file_transport_proto_rawDesc = "" +
 	"\x0eot_start_index\x18\n" +
 	" \x01(\rR\fotStartIndex\x12\x1d\n" +
 	"\n" +
-	"dual_masks\x18\v \x01(\fR\tdualMasks\"\xde\x01\n" +
+	"dual_masks\x18\v \x01(\fR\tdualMasks\x12!\n" +
+	"\ftotal_ranges\x18\f \x01(\x05R\vtotalRanges\"\xc2\x01\n" +
 	"\rOPRFMPCResult\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12&\n" +
 	"\x0foprf_session_id\x18\x02 \x01(\x04R\roprfSessionId\x12\x1f\n" +
 	"\vrange_index\x18\x03 \x01(\x05R\n" +
-	"rangeIndex\x12\x1f\n" +
-	"\vcmac_output\x18\x04 \x01(\fR\n" +
-	"cmacOutput\x12\x1f\n" +
-	"\vhash_output\x18\x05 \x01(\fR\n" +
-	"hashOutput\x12#\n" +
-	"\routput_labels\x18\x06 \x01(\fR\foutputLabels\"6\n" +
+	"rangeIndex\x12#\n" +
+	"\routput_labels\x18\x06 \x01(\fR\foutputLabelsJ\x04\b\x04\x10\x05J\x04\b\x05\x10\x06R\vcmac_outputR\vhash_output\"6\n" +
 	"\x15SessionConnectionInit\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\"t\n" +
@@ -3545,7 +3821,12 @@ const file_transport_proto_rawDesc = "" +
 	"\rSessionClosed\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x16\n" +
-	"\x06reason\x18\x02 \x01(\tR\x06reason*U\n" +
+	"\x06reason\x18\x02 \x01(\tR\x06reason\"-\n" +
+	"\x12TEEKPairAssignment\x12\x17\n" +
+	"\apair_id\x18\x01 \x01(\tR\x06pairId\"\x1e\n" +
+	"\n" +
+	"ClientAuth\x12\x10\n" +
+	"\x03jwt\x18\x01 \x01(\tR\x03jwt*U\n" +
 	"\x06Sender\x12\x16\n" +
 	"\x12SENDER_UNSPECIFIED\x10\x00\x12\x0f\n" +
 	"\vSENDER_USER\x10\x01\x12\x10\n" +
@@ -3565,7 +3846,7 @@ func file_transport_proto_rawDescGZIP() []byte {
 }
 
 var file_transport_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_transport_proto_msgTypes = make([]protoimpl.MessageInfo, 44)
+var file_transport_proto_msgTypes = make([]protoimpl.MessageInfo, 48)
 var file_transport_proto_goTypes = []any{
 	(Sender)(0),                                    // 0: teeproto.Sender
 	(*Envelope)(nil),                               // 1: teeproto.Envelope
@@ -3602,31 +3883,35 @@ var file_transport_proto_goTypes = []any{
 	(*OPRFRangesSubmission)(nil),                   // 32: teeproto.OPRFRangesSubmission
 	(*CiphertextReady)(nil),                        // 33: teeproto.CiphertextReady
 	(*OTPrecomputeRequest)(nil),                    // 34: teeproto.OTPrecomputeRequest
-	(*OTPrecomputeResponse)(nil),                   // 35: teeproto.OTPrecomputeResponse
-	(*OTPrecomputeComplete)(nil),                   // 36: teeproto.OTPrecomputeComplete
-	(*OPRFOnlineFull)(nil),                         // 37: teeproto.OPRFOnlineFull
-	(*OPRFMPCResult)(nil),                          // 38: teeproto.OPRFMPCResult
-	(*SessionConnectionInit)(nil),                  // 39: teeproto.SessionConnectionInit
-	(*SessionConnectionAck)(nil),                   // 40: teeproto.SessionConnectionAck
-	(*SessionClosed)(nil),                          // 41: teeproto.SessionClosed
-	(*BatchedResponseLengths_Length)(nil),          // 42: teeproto.BatchedResponseLengths.Length
-	(*BatchedTagSecrets_TagSecret)(nil),            // 43: teeproto.BatchedTagSecrets.TagSecret
-	(*BatchedTagVerifications_Verification)(nil),   // 44: teeproto.BatchedTagVerifications.Verification
-	(*ErrorData)(nil),                              // 45: teeproto.ErrorData
-	(*FinishedMessage)(nil),                        // 46: teeproto.FinishedMessage
-	(*SignedMessage)(nil),                          // 47: teeproto.SignedMessage
-	(*RequestRedactionRange)(nil),                  // 48: teeproto.RequestRedactionRange
-	(*ResponseRedactionRange)(nil),                 // 49: teeproto.ResponseRedactionRange
-	(*ResponseDecryptionStreamData)(nil),           // 50: teeproto.ResponseDecryptionStreamData
-	(*SignedRedactedDecryptionStream)(nil),         // 51: teeproto.SignedRedactedDecryptionStream
-	(*AttestationReport)(nil),                      // 52: teeproto.AttestationReport
+	(*OTResumeRequest)(nil),                        // 35: teeproto.OTResumeRequest
+	(*OTResumeResponse)(nil),                       // 36: teeproto.OTResumeResponse
+	(*OTPrecomputeResponse)(nil),                   // 37: teeproto.OTPrecomputeResponse
+	(*OTPrecomputeComplete)(nil),                   // 38: teeproto.OTPrecomputeComplete
+	(*OPRFOnlineFull)(nil),                         // 39: teeproto.OPRFOnlineFull
+	(*OPRFMPCResult)(nil),                          // 40: teeproto.OPRFMPCResult
+	(*SessionConnectionInit)(nil),                  // 41: teeproto.SessionConnectionInit
+	(*SessionConnectionAck)(nil),                   // 42: teeproto.SessionConnectionAck
+	(*SessionClosed)(nil),                          // 43: teeproto.SessionClosed
+	(*TEEKPairAssignment)(nil),                     // 44: teeproto.TEEKPairAssignment
+	(*ClientAuth)(nil),                             // 45: teeproto.ClientAuth
+	(*BatchedResponseLengths_Length)(nil),          // 46: teeproto.BatchedResponseLengths.Length
+	(*BatchedTagSecrets_TagSecret)(nil),            // 47: teeproto.BatchedTagSecrets.TagSecret
+	(*BatchedTagVerifications_Verification)(nil),   // 48: teeproto.BatchedTagVerifications.Verification
+	(*ErrorData)(nil),                              // 49: teeproto.ErrorData
+	(*FinishedMessage)(nil),                        // 50: teeproto.FinishedMessage
+	(*SignedMessage)(nil),                          // 51: teeproto.SignedMessage
+	(*RequestRedactionRange)(nil),                  // 52: teeproto.RequestRedactionRange
+	(*ResponseRedactionRange)(nil),                 // 53: teeproto.ResponseRedactionRange
+	(*ResponseDecryptionStreamData)(nil),           // 54: teeproto.ResponseDecryptionStreamData
+	(*SignedRedactedDecryptionStream)(nil),         // 55: teeproto.SignedRedactedDecryptionStream
+	(*AttestationReport)(nil),                      // 56: teeproto.AttestationReport
 }
 var file_transport_proto_depIdxs = []int32{
 	0,  // 0: teeproto.Envelope.sender:type_name -> teeproto.Sender
 	3,  // 1: teeproto.Envelope.connection_ready:type_name -> teeproto.ConnectionReady
 	4,  // 2: teeproto.Envelope.tcp_ready:type_name -> teeproto.TCPReady
-	45, // 3: teeproto.Envelope.error:type_name -> teeproto.ErrorData
-	46, // 4: teeproto.Envelope.finished:type_name -> teeproto.FinishedMessage
+	49, // 3: teeproto.Envelope.error:type_name -> teeproto.ErrorData
+	50, // 4: teeproto.Envelope.finished:type_name -> teeproto.FinishedMessage
 	26, // 5: teeproto.Envelope.session_created:type_name -> teeproto.SessionCreated
 	28, // 6: teeproto.Envelope.session_ready:type_name -> teeproto.SessionReady
 	2,  // 7: teeproto.Envelope.request_connection:type_name -> teeproto.RequestConnection
@@ -3646,39 +3931,43 @@ var file_transport_proto_depIdxs = []int32{
 	22, // 21: teeproto.Envelope.batched_tag_secrets:type_name -> teeproto.BatchedTagSecrets
 	23, // 22: teeproto.Envelope.batched_tag_verifications:type_name -> teeproto.BatchedTagVerifications
 	24, // 23: teeproto.Envelope.batched_decryption_streams:type_name -> teeproto.BatchedDecryptionStreams
-	47, // 24: teeproto.Envelope.signed_message:type_name -> teeproto.SignedMessage
+	51, // 24: teeproto.Envelope.signed_message:type_name -> teeproto.SignedMessage
 	29, // 25: teeproto.Envelope.teek_attestation:type_name -> teeproto.TEEKAttestationRequest
 	30, // 26: teeproto.Envelope.teet_attestation:type_name -> teeproto.TEETAttestationResponse
 	32, // 27: teeproto.Envelope.oprf_ranges_submission:type_name -> teeproto.OPRFRangesSubmission
 	33, // 28: teeproto.Envelope.ciphertext_ready:type_name -> teeproto.CiphertextReady
-	38, // 29: teeproto.Envelope.oprf_mpc_result:type_name -> teeproto.OPRFMPCResult
+	40, // 29: teeproto.Envelope.oprf_mpc_result:type_name -> teeproto.OPRFMPCResult
 	34, // 30: teeproto.Envelope.ot_precompute_request:type_name -> teeproto.OTPrecomputeRequest
-	35, // 31: teeproto.Envelope.ot_precompute_response:type_name -> teeproto.OTPrecomputeResponse
-	36, // 32: teeproto.Envelope.ot_precompute_complete:type_name -> teeproto.OTPrecomputeComplete
-	37, // 33: teeproto.Envelope.oprf_online_full:type_name -> teeproto.OPRFOnlineFull
-	39, // 34: teeproto.Envelope.session_connection_init:type_name -> teeproto.SessionConnectionInit
-	40, // 35: teeproto.Envelope.session_connection_ack:type_name -> teeproto.SessionConnectionAck
-	41, // 36: teeproto.Envelope.session_closed:type_name -> teeproto.SessionClosed
-	27, // 37: teeproto.Envelope.session_created_ack:type_name -> teeproto.SessionCreatedAck
-	11, // 38: teeproto.BatchedEncryptedDataResponse.fragments:type_name -> teeproto.EncryptedDataResponse
-	48, // 39: teeproto.RedactedRequest.redaction_ranges:type_name -> teeproto.RequestRedactionRange
-	49, // 40: teeproto.ResponseRedactionSpec.ranges:type_name -> teeproto.ResponseRedactionRange
-	17, // 41: teeproto.BatchedEncryptedRequest.fragments:type_name -> teeproto.EncryptedRequest
-	48, // 42: teeproto.EncryptedRequest.redaction_ranges:type_name -> teeproto.RequestRedactionRange
-	18, // 43: teeproto.BatchedEncryptedResponses.responses:type_name -> teeproto.EncryptedResponseData
-	42, // 44: teeproto.BatchedResponseLengths.lengths:type_name -> teeproto.BatchedResponseLengths.Length
-	43, // 45: teeproto.BatchedTagSecrets.tag_secrets:type_name -> teeproto.BatchedTagSecrets.TagSecret
-	44, // 46: teeproto.BatchedTagVerifications.verifications:type_name -> teeproto.BatchedTagVerifications.Verification
-	50, // 47: teeproto.BatchedDecryptionStreams.decryption_streams:type_name -> teeproto.ResponseDecryptionStreamData
-	51, // 48: teeproto.BatchedSignedRedactedDecryptionStreams.signed_redacted_streams:type_name -> teeproto.SignedRedactedDecryptionStream
-	52, // 49: teeproto.TEEKAttestationRequest.attestation_report:type_name -> teeproto.AttestationReport
-	52, // 50: teeproto.TEETAttestationResponse.attestation_report:type_name -> teeproto.AttestationReport
-	31, // 51: teeproto.OPRFRangesSubmission.ranges:type_name -> teeproto.OPRFRangeSpec
-	52, // [52:52] is the sub-list for method output_type
-	52, // [52:52] is the sub-list for method input_type
-	52, // [52:52] is the sub-list for extension type_name
-	52, // [52:52] is the sub-list for extension extendee
-	0,  // [0:52] is the sub-list for field type_name
+	37, // 31: teeproto.Envelope.ot_precompute_response:type_name -> teeproto.OTPrecomputeResponse
+	38, // 32: teeproto.Envelope.ot_precompute_complete:type_name -> teeproto.OTPrecomputeComplete
+	39, // 33: teeproto.Envelope.oprf_online_full:type_name -> teeproto.OPRFOnlineFull
+	35, // 34: teeproto.Envelope.ot_resume_request:type_name -> teeproto.OTResumeRequest
+	36, // 35: teeproto.Envelope.ot_resume_response:type_name -> teeproto.OTResumeResponse
+	41, // 36: teeproto.Envelope.session_connection_init:type_name -> teeproto.SessionConnectionInit
+	42, // 37: teeproto.Envelope.session_connection_ack:type_name -> teeproto.SessionConnectionAck
+	43, // 38: teeproto.Envelope.session_closed:type_name -> teeproto.SessionClosed
+	27, // 39: teeproto.Envelope.session_created_ack:type_name -> teeproto.SessionCreatedAck
+	44, // 40: teeproto.Envelope.teek_pair_assignment:type_name -> teeproto.TEEKPairAssignment
+	45, // 41: teeproto.Envelope.client_auth:type_name -> teeproto.ClientAuth
+	11, // 42: teeproto.BatchedEncryptedDataResponse.fragments:type_name -> teeproto.EncryptedDataResponse
+	52, // 43: teeproto.RedactedRequest.redaction_ranges:type_name -> teeproto.RequestRedactionRange
+	53, // 44: teeproto.ResponseRedactionSpec.ranges:type_name -> teeproto.ResponseRedactionRange
+	17, // 45: teeproto.BatchedEncryptedRequest.fragments:type_name -> teeproto.EncryptedRequest
+	52, // 46: teeproto.EncryptedRequest.redaction_ranges:type_name -> teeproto.RequestRedactionRange
+	18, // 47: teeproto.BatchedEncryptedResponses.responses:type_name -> teeproto.EncryptedResponseData
+	46, // 48: teeproto.BatchedResponseLengths.lengths:type_name -> teeproto.BatchedResponseLengths.Length
+	47, // 49: teeproto.BatchedTagSecrets.tag_secrets:type_name -> teeproto.BatchedTagSecrets.TagSecret
+	48, // 50: teeproto.BatchedTagVerifications.verifications:type_name -> teeproto.BatchedTagVerifications.Verification
+	54, // 51: teeproto.BatchedDecryptionStreams.decryption_streams:type_name -> teeproto.ResponseDecryptionStreamData
+	55, // 52: teeproto.BatchedSignedRedactedDecryptionStreams.signed_redacted_streams:type_name -> teeproto.SignedRedactedDecryptionStream
+	56, // 53: teeproto.TEEKAttestationRequest.attestation_report:type_name -> teeproto.AttestationReport
+	56, // 54: teeproto.TEETAttestationResponse.attestation_report:type_name -> teeproto.AttestationReport
+	31, // 55: teeproto.OPRFRangesSubmission.ranges:type_name -> teeproto.OPRFRangeSpec
+	56, // [56:56] is the sub-list for method output_type
+	56, // [56:56] is the sub-list for method input_type
+	56, // [56:56] is the sub-list for extension type_name
+	56, // [56:56] is the sub-list for extension extendee
+	0,  // [0:56] is the sub-list for field type_name
 }
 
 func init() { file_transport_proto_init() }
@@ -3723,10 +4012,14 @@ func file_transport_proto_init() {
 		(*Envelope_OtPrecomputeResponse)(nil),
 		(*Envelope_OtPrecomputeComplete)(nil),
 		(*Envelope_OprfOnlineFull)(nil),
+		(*Envelope_OtResumeRequest)(nil),
+		(*Envelope_OtResumeResponse)(nil),
 		(*Envelope_SessionConnectionInit)(nil),
 		(*Envelope_SessionConnectionAck)(nil),
 		(*Envelope_SessionClosed)(nil),
 		(*Envelope_SessionCreatedAck)(nil),
+		(*Envelope_TeekPairAssignment)(nil),
+		(*Envelope_ClientAuth)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
@@ -3734,7 +4027,7 @@ func file_transport_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_transport_proto_rawDesc), len(file_transport_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   44,
+			NumMessages:   48,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

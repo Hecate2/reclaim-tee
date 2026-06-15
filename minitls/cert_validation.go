@@ -58,15 +58,15 @@ func (c *Client) verifyCertificateChainWithDepth(certs []*x509.Certificate, serv
 		}
 	}
 
-	// Verify key usage flags - digitalSignature is required for TLS
-	// (keyEncipherment is for RSA key exchange, but we only use ECDHE)
-	if leafCert.KeyUsage != 0 {
-		requiredUsage := x509.KeyUsageDigitalSignature
-		if leafCert.KeyUsage&requiredUsage == 0 {
-			c.logger.Warn("Server certificate missing digitalSignature key usage",
-				zap.String("key_usage", fmt.Sprintf("0x%x", leafCert.KeyUsage)))
-			// Note: We log a warning but don't fail, as some valid certificates
-			// may not set this flag. The ExtKeyUsage check above is more important.
+	// Verify key usage flags — digitalSignature is required when KeyUsage
+	// is present. Matches Chrome/Firefox/NSS/JSSE/OpenSSL-TLS behavior;
+	// CA/B Forum BR §7.1.2.7.6 mandates it on public WebPKI subscriber
+	// certs (100% of top sites checked). Cert lacking the extension
+	// entirely (KeyUsage == 0) still passes — that's the legacy/IoT escape.
+	if leafCert.KeyUsage != 0 && leafCert.KeyUsage&x509.KeyUsageDigitalSignature == 0 {
+		return &CertificateError{
+			Type:    CertErrorVerification,
+			Message: fmt.Sprintf("server certificate KeyUsage 0x%x lacks digitalSignature", leafCert.KeyUsage),
 		}
 	}
 

@@ -15,57 +15,10 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-// handleOPRFRangesFromClient handles OPRFRangesSubmission from client
-func (t *TEET) handleOPRFRangesFromClient(sessionID string, msg *teeproto.OPRFRangesSubmission) error {
-	teetState, err := t.sessionManager.GetTEETSessionState(sessionID)
-	if err != nil {
-		return fmt.Errorf("failed to get TEE_T session state: %w", err)
-	}
-
-	t.logger.WithSession(sessionID).Debug("Received OPRF ranges from client",
-		zap.Int("range_count", len(msg.GetRanges())))
-
-	// If no ranges, mark OPRF as not needed
-	if len(msg.GetRanges()) == 0 {
-		teetState.OPRFState.Store(int32(shared.OPRFStateNone))
-		t.logger.WithSession(sessionID).Debug("No OPRF ranges - skipping MPC OPRF")
-		// Check if we can finalize now
-		return t.checkFinishedCondition(sessionID)
-	}
-
-	// Validate ranges against consolidated ciphertext
-	for i, r := range msg.GetRanges() {
-		if r.TlsStart < 0 || r.TlsLength <= 0 || r.TlsLength > 64 {
-			return fmt.Errorf("invalid range %d: start=%d length=%d", i, r.TlsStart, r.TlsLength)
-		}
-		rangeEnd := int(r.TlsStart) + int(r.TlsLength)
-		if rangeEnd > len(teetState.ConsolidatedResponseCiphertext) {
-			return fmt.Errorf("range %d exceeds ciphertext (end=%d, ciphertext_len=%d)",
-				i, rangeEnd, len(teetState.ConsolidatedResponseCiphertext))
-		}
-	}
-
-	// Initialize OPRF state
-	teetState.ClientOPRFRanges = msg.GetRanges()
-	teetState.ClientRangesReceived = true
-	teetState.OPRFState.Store(int32(shared.OPRFStateInProgress))
-	teetState.OPRFExpectedCount = len(msg.GetRanges())
-	teetState.OPRFResults = make(map[int]*shared.OPRFResult)
-
-	// Use persistent OPRF key share from TEET instance
-	if len(t.oprfKeyShare) == 0 {
-		return fmt.Errorf("OPRF key share not initialized")
-	}
-	teetState.OPRFKeyShare = t.oprfKeyShare
-
-	// In 2-round protocol, we just wait for OPRFOnlineFull messages from TEE_K
-	// No queueing needed - online messages contain everything needed for evaluation
-
-	return nil
-}
-
-// handleOPRFOnlineFull handles the 2-round online OPRF message from TEE_K
-// This is the only message in the online phase - contains all circuit data
+// handleOPRFOnlineFull handles the 2-round online OPRF message from TEE_K.
+// TEE_K is the authoritative, mutually-attested source of ranges: it relays the
+// client's ranges here (with TotalRanges), so TEE_T derives all OPRF state from
+// this single TCP-ordered stream rather than racing a separate client message.
 func (t *TEET) handleOPRFOnlineFull(sessionID string, msg *teeproto.OPRFOnlineFull) error {
 	// TIMING: Start of OPRF processing
 	startTime := time.Now()
@@ -87,24 +40,36 @@ func (t *TEET) handleOPRFOnlineFull(sessionID string, msg *teeproto.OPRFOnlineFu
 		}
 	}
 
-	// Wait for client ranges if not yet received
-	if !teetState.ClientRangesReceived {
-		// In 2-round protocol, TEE_K should wait for keystream before sending online messages
-		// If we get here before client ranges, something is wrong with the protocol order
-		return fmt.Errorf("received OPRFOnlineFull before client ranges - protocol order violation")
+	if len(t.oprfKeyShare) == 0 {
+		return fmt.Errorf("OPRF key share not initialized")
 	}
-
-	// SECURITY: Verify position matches what client sent
+	total := int(msg.TotalRanges)
+	if total <= 0 {
+		return fmt.Errorf("OPRFOnlineFull with non-positive total_ranges %d", total)
+	}
 	rangeIndex := int(msg.RangeIndex)
-	if rangeIndex < 0 || rangeIndex >= len(teetState.ClientOPRFRanges) {
-		return fmt.Errorf("invalid range index %d (have %d ranges)", rangeIndex, len(teetState.ClientOPRFRanges))
+	if rangeIndex < 0 || rangeIndex >= total {
+		return fmt.Errorf("range_index %d out of bounds (total_ranges=%d)", rangeIndex, total)
 	}
 
-	clientRange := teetState.ClientOPRFRanges[rangeIndex]
-	if msg.TlsStart != clientRange.TlsStart || msg.TlsLength != clientRange.TlsLength {
-		return fmt.Errorf("position mismatch: TEE_K [%d:%d] vs client [%d:%d]",
-			msg.TlsStart, msg.TlsStart+msg.TlsLength,
-			clientRange.TlsStart, clientRange.TlsStart+clientRange.TlsLength)
+	// Initialize OPRF state on the first message. Messages are processed
+	// serially on the per-session connection, so no lock is needed here.
+	if teetState.OPRFResults == nil {
+		teetState.OPRFExpectedCount = total
+		teetState.OPRFResults = make(map[int]*shared.OPRFResult)
+		teetState.OPRFKeyShare = t.oprfKeyShare
+		teetState.OPRFState.Store(int32(shared.OPRFStateInProgress))
+	} else if total != teetState.OPRFExpectedCount {
+		return fmt.Errorf("total_ranges changed mid-session: %d vs %d", total, teetState.OPRFExpectedCount)
+	}
+
+	// Validate range against the consolidated response ciphertext.
+	if msg.TlsStart < 0 || msg.TlsLength <= 0 || msg.TlsLength > 64 {
+		return fmt.Errorf("invalid range: start=%d length=%d", msg.TlsStart, msg.TlsLength)
+	}
+	if int(msg.TlsStart)+int(msg.TlsLength) > len(teetState.ConsolidatedResponseCiphertext) {
+		return fmt.Errorf("range exceeds ciphertext (end=%d, ciphertext_len=%d)",
+			int(msg.TlsStart)+int(msg.TlsLength), len(teetState.ConsolidatedResponseCiphertext))
 	}
 
 	// Check OT receiver pool is ready
@@ -181,11 +146,10 @@ func (t *TEET) handleOPRFOnlineFull(sessionID string, msg *teeproto.OPRFOnlineFu
 	hashOutput := sha256.Sum256(result.CMACOutput[:])
 
 	// Store result locally (thread-safe)
-	r := teetState.ClientOPRFRanges[rangeIndex]
 	teetState.SetOPRFResult(rangeIndex, &shared.OPRFResult{
 		RangeIndex: rangeIndex,
-		TLSStart:   int(r.TlsStart),
-		TLSLength:  int(r.TlsLength),
+		TLSStart:   int(msg.TlsStart),
+		TLSLength:  int(msg.TlsLength),
 		CMACOutput: result.CMACOutput,
 		HashOutput: hashOutput,
 	})
@@ -193,14 +157,12 @@ func (t *TEET) handleOPRFOnlineFull(sessionID string, msg *teeproto.OPRFOnlineFu
 	// Serialize output labels for garbler verification (MANDATORY)
 	outputLabelsBytes := oprfmpc.SerializeOutputLabels(result.OutputLabels)
 
-	// Send result back to TEE_K with output labels (MANDATORY for verification)
+	// Send only the labels — TEE_K derives CMAC and HashOutput from them.
 	if err := t.sendOPRFMPCResultToTEEK(sessionID, &teeproto.OPRFMPCResult{
 		SessionId:     sessionID,
 		OprfSessionId: msg.OprfSessionId,
 		RangeIndex:    int32(rangeIndex),
-		CmacOutput:    result.CMACOutput[:],
-		HashOutput:    hashOutput[:],
-		OutputLabels:  outputLabelsBytes, // MANDATORY: for garbler verification
+		OutputLabels:  outputLabelsBytes,
 	}); err != nil {
 		return err
 	}
@@ -263,7 +225,7 @@ func (t *TEET) sendOPRFMPCResultToTEEK(sessionID string, result *teeproto.OPRFMP
 }
 
 // buildOPRFOutputsForSigning builds OPRF outputs for inclusion in signed payload
-// IMPORTANT: Iterates over ClientOPRFRanges slice (not OPRFResults map) for deterministic ordering
+// IMPORTANT: Iterates by range index 0..ExpectedCount for deterministic ordering
 // ZERO ERROR POLICY: Returns nil if any expected result is missing (caller should check)
 func (t *TEET) buildOPRFOutputsForSigning(teetState *TEETSessionState) []*teeproto.OPRFOutput {
 	// Get snapshot of results with lock
@@ -275,21 +237,20 @@ func (t *TEET) buildOPRFOutputsForSigning(teetState *TEETSessionState) []*teepro
 
 	var outputs []*teeproto.OPRFOutput
 
-	// Iterate over ranges slice for deterministic ordering
-	for i, r := range teetState.ClientOPRFRanges {
+	for i := 0; i < teetState.OPRFExpectedCount; i++ {
 		result, ok := oprfResults[i]
 		if !ok {
 			// ZERO ERROR POLICY: Missing result when state is Complete is a critical error
 			// This should never happen - return nil to signal failure
 			t.logger.Error("CRITICAL: Missing OPRF result for range",
 				zap.Int("range_index", i),
-				zap.Int("expected_count", len(teetState.ClientOPRFRanges)),
+				zap.Int("expected_count", teetState.OPRFExpectedCount),
 				zap.Int("actual_count", len(oprfResults)))
 			return nil
 		}
 		outputs = append(outputs, &teeproto.OPRFOutput{
-			TlsStart:   r.TlsStart,
-			TlsLength:  r.TlsLength,
+			TlsStart:   int32(result.TLSStart),
+			TlsLength:  int32(result.TLSLength),
 			HashOutput: result.HashOutput[:],
 		})
 	}

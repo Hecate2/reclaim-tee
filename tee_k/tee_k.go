@@ -1,11 +1,11 @@
 package main
 
 import (
-	"context"
-	"crypto/rand"
+	"crypto/ecdsa"
 	"fmt"
 	"log"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/reclaimprotocol/reclaim-tee/minitls"
@@ -13,6 +13,7 @@ import (
 	"github.com/reclaimprotocol/reclaim-tee/shared"
 
 	"go.uber.org/zap"
+	"golang.org/x/sync/singleflight"
 )
 
 // RedactionOperation represents a redaction to be applied to a specific sequence
@@ -48,13 +49,15 @@ type TEEK struct {
 	// Single Session Mode: ECDSA signing keys
 	signingKeyPair *shared.SigningKeyPair // ECDSA key pair for signing transcripts
 
-	// Enclave manager for attestation generation
-	enclaveManager *shared.EnclaveManager
-
 	// Attestation caching for performance optimization
 	cachedAttestation *teeproto.AttestationReport
 	attestationMutex  sync.RWMutex
 	attestationExpiry time.Time
+	// attestationSF coalesces concurrent cache-miss refreshes into a single
+	// launcher-socket call. Without it, N concurrent sessions all hitting
+	// an empty cache spawn N simultaneous GenerateGCPAttestation calls,
+	// which saturate the launcher socket and time out.
+	attestationSF singleflight.Group
 
 	// Mutual attestation (managed by connection manager)
 	teetAttestationVerified bool
@@ -65,121 +68,143 @@ type TEEK struct {
 
 	// OT precomputation state for 2-round OPRF protocol
 	otPrecomputeState *OTPrecomputeState
+
+	// V2 router-mode wiring. Nil/zero in standalone mode; filled in by
+	// NewTEEKForRouter when ROUTER_URL is set. The connection manager,
+	// attestation code, and heartbeat goroutine all read these.
+	ratls                   *shared.RATLSManager
+	router                  *shared.RouterClient
+	pairID                  string
+	expectedPeerImageDigest string             // sha256:... of TEE_T container image, for RA-TLS peer verification
+	jwtPubKey               *ecdsa.PublicKey   // verifies client allocation JWTs (nil = no JWT check, local dev)
+	expectedJWTIssuer       string             // expected iss claim on client allocation JWTs
+	jtiTracker              *shared.JTITracker // replay guard for allocation-JWT jti (nil in standalone)
+
+	// Heartbeat observation state — written by the connection manager
+	// (controlHealthy on peer connect/disconnect), OT precompute code
+	// (otReady on pool ready/cleared), and the session manager
+	// (activeSessions). Read by the router-heartbeat goroutine each tick.
+	// Atomic so reads stay lock-free.
+	controlHealthy atomic.Bool
+	otReady        atomic.Bool
+	activeSessions atomic.Int32
 }
 
 // NewTEEKWithConfig creates a new TEEK instance with the provided configuration
 func NewTEEKWithConfig(config *TEEKConfig) *TEEK {
-	teek := NewTEEKWithEnclaveManager(config.Port, nil)
+	teek := NewTEEK(config.Port)
 	teek.SetTEETURL(config.TEETURL)
 	teek.SetForceTLSVersion(config.ForceTLSVersion)
 	teek.SetForceCipherSuite(config.ForceCipherSuite)
 	return teek
 }
 
-// NewTEEKWithEnclaveManager creates a new TEEK instance with optional enclave manager
-func NewTEEKWithEnclaveManager(port int, enclaveManager *shared.EnclaveManager) *TEEK {
-	// Generate ECDSA signing key pair
+// NewTEEKForRouter constructs a TEEK wired for the V2 router-mode path:
+// RA-TLS instead of ACME-issued certs, router client for register +
+// heartbeat, deterministic pair_id generated at boot. Used only when
+// ROUTER_URL is set; standalone-mode boot continues to use NewTEEKWithConfig.
+//
+// Returns a fully-initialized TEEK with router-mode fields populated but
+// no peer connection or HTTP server started yet — the caller wires those up.
+func NewTEEKForRouter(
+	config *TEEKConfig,
+	ratls *shared.RATLSManager,
+	router *shared.RouterClient,
+	pairID string,
+) *TEEK {
+	teek := NewTEEK(config.Port)
+	teek.ratls = ratls
+	teek.router = router
+	teek.pairID = pairID
+	teek.expectedPeerImageDigest = config.ExpectedPeerImageDigest
+	if config.JWTPublicKey != "" {
+		pubKey, err := shared.ParseECDSAPublicKeyPEM([]byte(config.JWTPublicKey))
+		if err != nil {
+			log.Fatalf("[TEE_K] CRITICAL: parse JWT_PUBLIC_KEY: %v", err)
+		}
+		teek.jwtPubKey = pubKey
+		teek.expectedJWTIssuer = config.ExpectedJWTIssuer
+		teek.jtiTracker = shared.NewJTITracker(0)
+	}
+	// In router mode the peer URL is derived from PEER_ADDR rather than
+	// the legacy TEET_URL env var. /ws is the base path; the connection
+	// manager extends it to /ws/control and /ws/session. Scheme tracks
+	// whether we have an RA-TLS identity (prod) or not (local dev).
+	scheme := "wss"
+	if ratls == nil {
+		scheme = "ws"
+	}
+	teek.SetTEETURL(scheme + "://" + config.PeerAddr + "/ws")
+	teek.SetForceTLSVersion(config.ForceTLSVersion)
+	teek.SetForceCipherSuite(config.ForceCipherSuite)
+	return teek
+}
+
+// NewTEEK constructs a baseline TEEK on the given port. Higher-level
+// constructors (NewTEEKWithConfig, NewTEEKForRouter) layer mode-specific
+// wiring on top.
+func NewTEEK(port int) *TEEK {
 	signingKeyPair, err := shared.GenerateSigningKeyPair()
 	if err != nil {
-		// Critical failure - cannot operate without signing capability
 		log.Fatalf("[TEE_K] CRITICAL: Failed to generate signing key pair: %v", err)
 	}
 
-	// Get logger
 	logger := shared.GetTEEKLogger()
 	logger.Info("Generated ECDSA signing key pair")
 
-	// Initialize cached certificate fetcher (shared across all TLS connections)
-	certFetcher, err := NewCertificateFetcher(enclaveManager, logger)
+	certFetcher, err := NewCertificateFetcher(logger)
 	if err != nil {
 		log.Fatalf("[TEE_K] CRITICAL: Failed to initialize certificate fetcher: %v", err)
 	}
-	logger.Info("Initialized cached certificate fetcher", zap.String("mode", func() string {
-		if enclaveManager != nil {
-			return "enclave"
-		}
-		return "http"
-	}()))
+	logger.Info("Initialized cached certificate fetcher")
 
-	// Initialize OPRF key share (persistent across restarts)
-	oprfKeyShare := initializeOPRFKeyShare(enclaveManager, logger, "tee_k")
+	oprfKeyShare := initializeOPRFKeyShare(logger)
 
 	sessionManager := NewTEEKSessionManager()
 	sessionManager.SetLogger(logger)
 
-	return &TEEK{
+	teek := &TEEK{
 		port:              port,
 		sessionManager:    sessionManager,
 		sessionTerminator: shared.NewSessionTerminator(logger),
 		logger:            logger,
 		teetURL:           "ws://localhost:8081/teek", // Default TEE_T URL
 		signingKeyPair:    signingKeyPair,
-		enclaveManager:    enclaveManager,
 		certFetcher:       certFetcher,
 		oprfKeyShare:      oprfKeyShare,
 	}
+
+	sessionManager.SetOnSessionExpired(teek.cleanupSessionWithSession)
+
+	return teek
 }
 
-// initializeOPRFKeyShare loads OPRF key share from cloud storage or generates and saves a new one
-func initializeOPRFKeyShare(enclaveManager *shared.EnclaveManager, logger *shared.Logger, serviceName string) []byte {
-	const oprfKeyShareSize = 16
-
-	// Build domain-specific key name (e.g., "eu-tk-oprf-key-share" for eu.tk.reclaimprotocol.org)
-	oprfKeyShareKey := "oprf-key-share" // default for standalone
-	if enclaveManager != nil {
-		if cfg := enclaveManager.GetConfig(); cfg != nil && cfg.Domain != "" {
-			// Use domain prefix for region-specific keys
-			oprfKeyShareKey = cfg.Domain + "-oprf-key-share"
-		}
-	}
-
-	// In standalone mode (no enclave manager), use static key for testing
-	if enclaveManager == nil {
+// initializeOPRFKeyShare returns TEE_K's MPC OPRF key share. When
+// KMS_ENCLAVE_DOMAIN_KEY is set the share is loaded from (or created in)
+// GCP Secret Manager — same secret name + envelope format as the legacy
+// EnclaveCache, so existing V1 shares are picked up unchanged. When the
+// env var is empty (local dev / standalone), a hardcoded share is used.
+func initializeOPRFKeyShare(logger *shared.Logger) []byte {
+	deploymentKey := shared.GetEnvOrDefault("KMS_ENCLAVE_DOMAIN_KEY", "")
+	if deploymentKey == "" {
 		keyShare := []byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10}
-		logger.Info("Using static OPRF key share (standalone mode)")
+		logger.Info("Using static OPRF key share (KMS_ENCLAVE_DOMAIN_KEY unset)")
 		return keyShare
 	}
-
-	// Try to load from cloud storage
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	cache := enclaveManager.GetCache()
-	if cache == nil {
-		logger.Error("EnclaveManager has no cache - OPRF keys will not persist!")
-	} else {
-		existingKey, err := cache.Get(ctx, oprfKeyShareKey)
-		if err == nil && len(existingKey) == oprfKeyShareSize {
-			logger.Info("Loaded OPRF key share from cloud storage")
-			return existingKey
-		}
-		if err != nil {
-			logger.Info("OPRF key share not found in cloud storage, will generate new one", zap.Error(err))
-		} else if len(existingKey) == 0 {
-			logger.Error("Cache returned empty data without error - GCP adapter may be nil")
-		}
+	share, err := shared.LoadOPRFShare("tee_k", deploymentKey, logger)
+	if err != nil {
+		log.Fatalf("[TEE_K] CRITICAL: load OPRF share: %v", err)
 	}
-
-	// Generate new key share
-	keyShare := make([]byte, oprfKeyShareSize)
-	if _, err := rand.Read(keyShare); err != nil {
-		log.Fatalf("[%s] CRITICAL: Failed to generate OPRF key share: %v", serviceName, err)
-	}
-
-	// Save to cloud storage
-	if cache != nil {
-		if err := cache.Put(ctx, oprfKeyShareKey, keyShare); err != nil {
-			logger.Error("Failed to save OPRF key share to cloud storage", zap.Error(err))
-			// Continue anyway - we have a valid key share in memory
-		} else {
-			logger.Info("Generated and saved OPRF key share to cloud storage")
-		}
-	} else {
-		logger.Info("Generated OPRF key share (no cache available)")
-	}
-
-	return keyShare
+	return share
 }
+
+// PairID / Router / ControlHealthy / OTReady / ActiveSessions satisfy
+// shared.HeartbeatTarget so router heartbeat logic lives in shared/.
+func (t *TEEK) PairID() string                { return t.pairID }
+func (t *TEEK) Router() *shared.RouterClient  { return t.router }
+func (t *TEEK) ControlHealthy() bool          { return t.controlHealthy.Load() }
+func (t *TEEK) OTReady() bool                 { return t.otReady.Load() }
+func (t *TEEK) ActiveSessions() int           { return int(t.activeSessions.Load()) }
 
 // SetTEETURL sets the TEE_T connection URL
 func (t *TEEK) SetTEETURL(url string) {
@@ -217,25 +242,34 @@ func (t *TEEK) getSessionResponseState(sessionID string) (*shared.ResponseSessio
 	return session.ResponseState, nil
 }
 
-// cleanupSession performs complete cleanup of session resources
-// This function is idempotent - safe to call multiple times for the same session
+// CAS-guarded; exactly one caller per session runs the cleanup side-effects.
 func (t *TEEK) cleanupSession(sessionID string) {
-	// Close per-session connection to TEE_T
-	if t.connManager != nil {
-		t.connManager.CloseSessionConnection(sessionID, "session_cleanup")
-	}
-
-	// Close the session in session manager (handles connections and state cleanup)
-	if err := t.sessionManager.CloseSession(sessionID); err != nil {
-		// Session already cleaned up - expected when both sides close proactively
-		t.logger.WithSession(sessionID).Debug("Session already cleaned up", zap.Error(err))
+	session, err := t.sessionManager.GetSession(sessionID)
+	if err != nil {
+		t.logger.WithSession(sessionID).Debug("Session missing, cleanup already ran")
 		return
 	}
+	t.cleanupSessionWithSession(session)
+}
 
-	// Cleanup session terminator tracking
-	t.sessionTerminator.CleanupSession(sessionID)
-
-	t.logger.WithSession(sessionID).Info("Session terminated and cleaned up")
+// Variant used by the expiry callback, which already holds *Session.
+func (t *TEEK) cleanupSessionWithSession(session *shared.Session) {
+	if !session.CleanedUp.CompareAndSwap(false, true) {
+		t.logger.WithSession(session.ID).Debug("Session cleanup already claimed by another caller")
+		return
+	}
+	// Unblock any TCPData sender that's waiting on a full pendingData
+	// buffer because minitls has stopped draining.
+	if tlsState, err := t.getSessionTLSState(session.ID); err == nil && tlsState.WSConn2TLS != nil {
+		tlsState.WSConn2TLS.Shutdown()
+	}
+	if t.connManager != nil {
+		t.connManager.CloseSessionConnection(session.ID, "session_cleanup")
+	}
+	_ = t.sessionManager.CloseSession(session.ID)
+	t.activeSessions.Add(-1)
+	t.sessionTerminator.CleanupSession(session.ID)
+	t.logger.WithSession(session.ID).Info("Session terminated and cleaned up")
 }
 
 // terminateSessionWithError terminates a session due to a critical error

@@ -23,26 +23,23 @@ func main() {
 	logger := shared.GetTEEKLogger()
 	defer logger.Sync()
 
-	// Start background root CA updater (fetches fresh certs from curl.se daily)
+	// Diagnostic safety net.
+	defer shared.RecoverAndCrash(logger, "tee_k.main")
+	shared.InstallSignalCrashHandler(logger)
+	go shared.RunRuntimeStatsLogger(context.Background(), logger)
+	go shared.RunDeadlockWatchdog(context.Background(), logger)
+
 	StartRootCAUpdater(logger)
 
-	enclaveMode := shared.GetEnvOrDefault("ENCLAVE_MODE", "false") == "true"
+	config := LoadTEEKConfig()
 
-	var config *TEEKConfig
-	if enclaveMode {
-		logger.Info("=== TEE_K Enclave Mode ===")
-
-		// GCP: Configuration comes from environment variables
-		config = LoadTEEKConfig()
-		logger.Info("Loaded config from environment",
-			zap.String("domain", config.Domain))
-
-		startEnclaveMode(config, logger)
-	} else {
-		logger.Info("=== TEE_K Standalone Mode ===")
-		config = LoadTEEKConfig()
-		startStandaloneMode(config, logger)
+	if config.RouterMode() {
+		startRouterMode(context.Background(), config, logger)
+		return
 	}
+
+	logger.Info("=== TEE_K Standalone Mode ===")
+	startStandaloneMode(config, logger)
 }
 
 func startStandaloneMode(config *TEEKConfig, logger *shared.Logger) {

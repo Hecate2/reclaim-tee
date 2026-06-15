@@ -1,0 +1,13 @@
+# Keep the Docker build context small. Anything not needed to compile the
+# router binary is excluded.
+.git
+.github
+docs
+deploy
+flutter
+js_sdk
+bin
+*.so
+*.log
+test_*
+**/*_test.go

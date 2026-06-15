@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	teeproto "github.com/reclaimprotocol/reclaim-tee/proto"
@@ -53,10 +54,31 @@ func (w *WSConnection) GetWebSocketConn() *websocket.Conn {
 	return w.conn
 }
 
+// WSWriteDeadline bounds how long a single WriteMessage may block before
+// returning. Sized for mobile networks (radio handoff can pause writes
+// for seconds) — anything beyond this is a wedged consumer, not a slow link.
+const WSWriteDeadline = 30 * time.Second
+
+// WriteWSBinary calls conn.WriteMessage with WSWriteDeadline applied.
+// Callers MUST still hold their own write mutex for concurrent-write safety
+// (gorilla/websocket panics on concurrent writes). The helper only bundles
+// the deadline so we can't forget it at a call site.
+func WriteWSBinary(conn *websocket.Conn, data []byte) error {
+	if err := conn.SetWriteDeadline(time.Now().Add(WSWriteDeadline)); err != nil {
+		return err
+	}
+	return conn.WriteMessage(websocket.BinaryMessage, data)
+}
+
 // WriteMessage writes a message to the WebSocket connection with thread safety
+// and a write deadline that prevents a slow/dead peer from blocking the writer
+// goroutine forever (which would hold session locks indefinitely).
 func (w *WSConnection) WriteMessage(messageType int, data []byte) error {
 	w.mutex.Lock()
 	defer w.mutex.Unlock()
+	if err := w.conn.SetWriteDeadline(time.Now().Add(WSWriteDeadline)); err != nil {
+		return err
+	}
 	return w.conn.WriteMessage(messageType, data)
 }
 
@@ -142,9 +164,6 @@ const (
 	// Single Session Mode message types
 	MsgFinished      MessageType = "finished"
 	MsgRedactionSpec MessageType = "redaction_spec"
-
-	// MPC OPRF message types
-	MsgOPRFRanges MessageType = "oprf_ranges"
 )
 
 const (
@@ -285,10 +304,23 @@ type Session struct {
 	IsClosed bool
 	Context  context.Context
 	Cancel   context.CancelFunc
+
+	// CAS guard: only the cleanupSession caller that flips this owns the
+	// activeSessions decrement. Lives here, not on per-TEE state structs.
+	CleanedUp atomic.Bool
 }
 
-// RedactionSessionState holds redaction-specific state for each session
+// RedactionSessionState holds redaction-specific state for each session.
+//
+// Streams + commitment-keys arrive from the client; ranges + expected
+// commitments arrive from TEE_K. Those two paths run on different
+// goroutines and may write concurrently before the counter-at-join
+// barrier (RequestPartsArrived hitting 2). Reads that happen AFTER the
+// join are race-free via the counter's happens-before edge, but
+// verifyCommitmentsIfReady runs on BOTH paths BEFORE the join — those
+// reads MUST go through the mutex via SnapshotForCommitmentCheck.
 type RedactionSessionState struct {
+	mu                    sync.Mutex
 	Ranges                []RequestRedactionRange
 	CommitmentOpenings    [][]byte
 	ExpectedCommitments   [][]byte // [comm_s, comm_sp] received from TEE_K
@@ -296,6 +328,35 @@ type RedactionSessionState struct {
 	EncryptedResponseData []EncryptedResponseData
 	RedactionStreams      [][]byte
 	CommitmentKeys        [][]byte
+}
+
+// SetStreamsAndKeys stores client-supplied redaction streams + their
+// commitment keys atomically. Called by handleRedactionStreams before
+// the counter-at-join barrier.
+func (r *RedactionSessionState) SetStreamsAndKeys(streams, keys [][]byte) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.RedactionStreams = streams
+	r.CommitmentKeys = keys
+}
+
+// SetRangesAndCommitments stores TEE_K-supplied ranges + expected
+// commitments atomically. Called by handleBatchedEncryptedRequest before
+// the counter-at-join barrier.
+func (r *RedactionSessionState) SetRangesAndCommitments(ranges []RequestRedactionRange, commitments [][]byte) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.Ranges = ranges
+	r.ExpectedCommitments = commitments
+}
+
+// SnapshotForCommitmentCheck returns the three slices needed by
+// verifyCommitmentsIfReady under one lock acquisition. Slice headers
+// are copied; the underlying byte arrays are immutable once published.
+func (r *RedactionSessionState) SnapshotForCommitmentCheck() (streams, keys, expected [][]byte) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.RedactionStreams, r.CommitmentKeys, r.ExpectedCommitments
 }
 
 // ResponseSessionState holds response handling state for each session
@@ -457,11 +518,13 @@ type RedactedRequestData struct {
 	RedactionRanges []RequestRedactionRange `json:"redaction_ranges"` // Position metadata
 }
 
-// RedactionStreamsData contains the XOR streams and commitment keys for revelation
+// RedactionStreamsData contains the XOR streams and commitment keys for
+// revelation. Ranges are NOT carried here — TEE_T uses the authoritative
+// ranges TEE_K validated in BatchedEncryptedRequest, not whatever the
+// client claims separately.
 type RedactionStreamsData struct {
-	Streams        [][]byte                `json:"streams"`         // [Str_S, Str_SP]
-	CommitmentKeys [][]byte                `json:"commitment_keys"` // [K_S, K_SP]
-	Ranges         []RequestRedactionRange `json:"ranges"`          // Redaction ranges to identify R_S vs R_SP
+	Streams        [][]byte `json:"streams"`         // [Str_S, Str_SP]
+	CommitmentKeys [][]byte `json:"commitment_keys"` // [K_S, K_SP]
 }
 
 // DecryptedResponseData contains decrypted response data

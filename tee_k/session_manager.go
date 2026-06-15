@@ -31,6 +31,14 @@ type TEEKSessionState struct {
 	CombinedKey       []byte
 	ServerSequenceNum uint64
 
+	// Count of TLS-1.3 App records forwarded by client as TCPData (type 0x17).
+	AppRecordsViaTCPData atomic.Uint32
+
+	// TEE_K-owned server-app-seq for response tag-secret generation. See
+	// [[tcpdata-ack-protocol-2026-06-10]] — Option 3 / final design.
+	responseTagSeq     atomic.Uint64
+	responseTagSeqInit sync.Once
+
 	// MPC OPRF state (2-round protocol with OT precomputation)
 	ConsolidatedKeystream []byte                                    // Keystream for response decryption
 	OPRFKeyShare          []byte                                    // 16-byte key share for MPC OPRF
@@ -39,7 +47,7 @@ type TEEKSessionState struct {
 	OPRFResults           map[int]*shared.OPRFResult                // Completed OPRF results by range index
 	OPRFState             atomic.Int32                              // Current OPRF processing state (shared.OPRFSessionState values)
 	OPRFExpectedCount     int                                       // Number of OPRF results expected
-	ClientRangesReceived  bool                                      // Whether client has sent ranges
+	ClientRangesReceived  atomic.Bool                               // publishes OPRFRanges/OPRFKeyShare/GarblerOnlineSessions/OPRFResults
 
 	// Per-session mutex for thread-safe access to OPRF state
 	// Must be held when accessing GarblerOnlineSessions, OPRFResults, or OPRFRanges
@@ -84,6 +92,24 @@ func (t *TEEKSessionManager) RemoveTEEKSessionState(sessionID string) {
 func (t *TEEKSessionManager) CloseSession(sessionID string) error {
 	t.RemoveTEEKSessionState(sessionID)
 	return t.SessionManager.CloseSession(sessionID)
+}
+
+// NextResponseTagSeq returns the next server-app-seq to use for a response
+// tag-secret nonce. On first call, initializes from the offset = (App records
+// arrived via TCPData) − (App records minitls consumed during handshake).
+// Subsequent calls increment. TLS-1.3 only — TLS-1.2 uses client-provided seq.
+func (s *TEEKSessionState) NextResponseTagSeq() uint64 {
+	s.responseTagSeqInit.Do(func() {
+		var consumed uint32
+		if s.TLSClient != nil {
+			consumed = s.TLSClient.HandshakeAppRecordsConsumed()
+		}
+		arrived := s.AppRecordsViaTCPData.Load()
+		if arrived > consumed {
+			s.responseTagSeq.Store(uint64(arrived - consumed))
+		}
+	})
+	return s.responseTagSeq.Add(1) - 1
 }
 
 // LockOPRF acquires the per-session OPRF mutex

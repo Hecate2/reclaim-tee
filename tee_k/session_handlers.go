@@ -85,8 +85,18 @@ func (t *TEEK) handleTCPData(sessionID string, msg *shared.Message) error {
 	}
 
 	if tlsState.WSConn2TLS != nil {
-		// Forward data to TLS client for processing
-		tlsState.WSConn2TLS.pendingData <- tcpData.Data
+		// Count App records so TLS-1.3 response tag-gen can derive the right offset.
+		if len(tcpData.Data) >= 1 && tcpData.Data[0] == 0x17 {
+			tlsState.AppRecordsViaTCPData.Add(1)
+		}
+		// Bail out via done channel if the session was torn down between
+		// the websocket recv and here — otherwise we'd pin this goroutine
+		// when pendingData is full and minitls is no longer draining.
+		select {
+		case tlsState.WSConn2TLS.pendingData <- tcpData.Data:
+		case <-tlsState.WSConn2TLS.done:
+			return nil
+		}
 	} else {
 		err := fmt.Errorf("no WebSocket-to-TLS adapter available")
 		t.terminateSessionWithError(sessionID, shared.ReasonInternalError, err, "No WebSocket-to-TLS adapter available")

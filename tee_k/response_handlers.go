@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/reclaimprotocol/reclaim-tee/minitls"
 	teeproto "github.com/reclaimprotocol/reclaim-tee/proto"
 	"github.com/reclaimprotocol/reclaim-tee/shared"
 
@@ -43,6 +44,16 @@ func (t *TEEK) handleBatchedResponseLengths(sessionID string, msg *shared.Messag
 		SeqNum     uint64 `json:"seq_num"`
 	}
 
+	// TLS 1.3: TEE_K owns the server-app-seq, ignoring the client's seq for
+	// nonce purposes. See [[tcpdata-ack-protocol-2026-06-10]] / Option 3.
+	// TLS 1.2: client's seq is correct (no NSTs to throw off alignment).
+	tlsState, tlsErr := t.getSessionTLSState(sessionID)
+	if tlsErr != nil {
+		t.terminateSessionWithError(sessionID, shared.ReasonInternalError, tlsErr, "Failed to get TLS state for tag-secret generation")
+		return tlsErr
+	}
+	useTEEKSeq := minitls.IsTLS13CipherSuite(tlsState.CipherSuite)
+
 	session.ResponseState.ResponsesMutex.Lock()
 	for _, lengthData := range batchedLengths.Lengths {
 		// Store response lengths in session state for later decryption stream generation
@@ -53,11 +64,16 @@ func (t *TEEK) handleBatchedResponseLengths(sessionID string, msg *shared.Messag
 			session.ResponseState.ExplicitIVBySeq[lengthData.SeqNum] = lengthData.ExplicitIV
 		}
 
+		nonceSeq := lengthData.SeqNum
+		if useTEEKSeq {
+			nonceSeq = tlsState.NextResponseTagSeq()
+		}
+
 		// Generate tag secrets for this response
 		tagSecretsBytes, nonce, err := t.generateResponseTagSecrets(
 			sessionID,
 			lengthData.Length,
-			lengthData.SeqNum,
+			nonceSeq,
 			lengthData.RecordHeader,
 			lengthData.ExplicitIV,
 		)

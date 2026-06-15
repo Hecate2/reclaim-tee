@@ -24,6 +24,7 @@ import (
 	"io"
 	"math/big"
 
+	"filippo.io/nistec"
 	"github.com/markkurossi/mpc/circuit"
 	"github.com/markkurossi/mpc/compiler"
 	"github.com/markkurossi/mpc/compiler/utils"
@@ -119,6 +120,21 @@ type CMACOnlinePayload struct {
 	OutputHints   []ot.Wire    // For decoding output
 	DualMasks     []DualMask   // M0||M1 pairs for derandomized OT
 	OTStartIndex  int          // Starting index in precomputed OT pool
+
+	// Set only by CMACGarblerOnline; slices above point into pooled scratch.
+	// Caller MUST invoke Release after serializing to the wire.
+	garbled *circuit.Garbled
+}
+
+// Returns pooled garble scratch to the circuit pool. Idempotent.
+func (p *CMACOnlinePayload) Release() {
+	if p == nil || p.garbled == nil {
+		return
+	}
+	g := p.garbled
+	p.garbled = nil
+	p.GarbledTables = nil
+	g.Release()
 }
 
 // CMACOnlineResult holds the evaluator's output
@@ -137,17 +153,7 @@ var (
 	errCMACNilRandom = errors.New("aes_cmac_oprf: randomness source must not be nil")
 )
 
-// CMACGarblerOnline creates the online phase payload using precomputed OT
-// Parameters:
-//   - rng: randomness source
-//   - garblerInput: 80-byte input (64 bytes data + 16 bytes key share)
-//   - otEntries: precomputed OT entries from the pool (640 entries for 640 input bits)
-//   - otStartIndex: starting index in the OT pool (for tracking)
-//
-// Returns:
-//   - payload: the message to send to evaluator
-//   - session: state for verifying evaluator's output
-//   - err: any error
+// Builds the online-phase payload using precomputed OT (640 entries / OPRF).
 func CMACGarblerOnline(rng io.Reader, curve elliptic.Curve, garblerInput [80]byte, otEntries []*OTPoolEntry, otStartIndex int) (*CMACOnlinePayload, *CMACGarblerOnlineSession, error) {
 	if rng == nil {
 		return nil, nil, errCMACNilRandom
@@ -195,28 +201,20 @@ func CMACGarblerOnline(rng io.Reader, curve elliptic.Curve, garblerInput [80]byt
 	// Extract evaluator's wire labels (wires 640-1279)
 	evaluatorWires := garbled.Wires[gBits : gBits+cmacInputBitCount]
 
-	// Compute dual masks for derandomized OT
-	// For each evaluator input bit i:
-	//   - We have precomputed random labels (R0, R1) where garbler knows both
-	//   - We have actual wire labels (L0, L1) for the circuit
-	//   - Compute M0 = L0 XOR R0, M1 = L1 XOR R1
-	//   - Evaluator can recover: Lb = Rb XOR Mb (where b is their choice bit)
+	// Derandomized OT dual masks: M0=L0^R0, M1=L1^R1, Delta=R0^R1.
+	// One scratch shared across 640 iterations, mutated in place.
 	dualMasks := make([]DualMask, cmacInputBitCount)
+	scratch := newNistecScratch()
 	for i := 0; i < cmacInputBitCount; i++ {
 		entry := otEntries[i]
 		wire := evaluatorWires[i]
-
-		// The precomputed OT gives us random label pair (R0, R1)
-		// Derive using ECDH: R0 = H(B^a), R1 = H((B-A)^a)
-		// where B is receiver's point, a is sender's scalar, A is sender's public point
-		r0, r1 := deriveRandomLabelsFromSetup(curve, entry.SenderSetup, entry.ReceiverPoint, i)
-
-		// Compute masks: M0 = L0 XOR R0, M1 = L1 XOR R1
-		// Also compute delta = R0 XOR R1 for derandomization correction
+		r0, r1, err := deriveRandomLabelsFromSetup(entry.SenderSetup, entry.ReceiverPoint, i, scratch)
+		if err != nil {
+			return nil, nil, fmt.Errorf("dual-mask derivation at i=%d: %w", i, err)
+		}
 		m0 := xorLabels(wire.L0, r0)
 		m1 := xorLabels(wire.L1, r1)
 		delta := xorLabels(r0, r1)
-
 		dualMasks[i] = DualMask{M0: m0, M1: m1, Delta: delta}
 	}
 
@@ -234,6 +232,7 @@ func CMACGarblerOnline(rng io.Reader, curve elliptic.Curve, garblerInput [80]byt
 		OutputHints:   outputHints,
 		DualMasks:     dualMasks,
 		OTStartIndex:  otStartIndex,
+		garbled:       garbled,
 	}
 
 	session := &CMACGarblerOnlineSession{
@@ -244,15 +243,7 @@ func CMACGarblerOnline(rng io.Reader, curve elliptic.Curve, garblerInput [80]byt
 	return payload, session, nil
 }
 
-// CMACEvaluatorOnline evaluates the garbled circuit using precomputed OT
-// Parameters:
-//   - payload: the online payload from garbler
-//   - evaluatorInput: 80-byte input (64 bytes data + 16 bytes key share)
-//   - receiverEntries: precomputed OT receiver entries from the pool
-//
-// Returns:
-//   - result: CMAC output and output labels
-//   - err: any error
+// Evaluates the garbled circuit using precomputed OT.
 func CMACEvaluatorOnline(curve elliptic.Curve, payload *CMACOnlinePayload, evaluatorInput [80]byte, receiverEntries []*OTReceiverEntry) (*CMACOnlineResult, error) {
 	if payload == nil {
 		return nil, errors.New("nil payload")
@@ -278,7 +269,11 @@ func CMACEvaluatorOnline(curve elliptic.Curve, payload *CMACOnlinePayload, evalu
 	//   - We receive M0, M1, Delta from dual masks
 	//   - If actual == d: L_actual = R_d XOR M_actual
 	//   - If actual != d: First compute R_actual = R_d XOR Delta, then L_actual = R_actual XOR M_actual
+	//
+	// One nistecScratch shared by all 640 iterations — see CMACGarblerOnline
+	// for the rationale.
 	evaluatorLabels := make([]ot.Label, cmacInputBitCount)
+	scratch := newNistecScratch()
 	for i := 0; i < cmacInputBitCount; i++ {
 		entry := receiverEntries[i]
 		mask := payload.DualMasks[i]
@@ -286,7 +281,10 @@ func CMACEvaluatorOnline(curve elliptic.Curve, payload *CMACOnlinePayload, evalu
 		// Get the precomputed choice bit and the derived random label R_d
 		precomputedChoice := entry.ReceiverBundle.Bits[0]
 		actualChoice := bits[i]
-		receivedR := deriveReceivedLabelFromEntry(curve, entry, i)
+		receivedR, err := deriveReceivedLabelFromEntry(entry, i, scratch)
+		if err != nil {
+			return nil, fmt.Errorf("evaluator label derivation at i=%d: %w", i, err)
+		}
 
 		// If precomputed choice differs from actual, correct using delta
 		// R_actual = R_d XOR Delta (Delta = R0 XOR R1)
@@ -352,26 +350,41 @@ func CMACEvaluatorOnline(curve elliptic.Curve, payload *CMACOnlinePayload, evalu
 	}, nil
 }
 
-// CMACGarblerVerifyOutput verifies that the evaluator returned correct output labels
-// This is MANDATORY for security - prevents malicious evaluator from fabricating outputs
-func CMACGarblerVerifyOutput(session *CMACGarblerOnlineSession, outputLabels []ot.Label) error {
+// CMACGarblerVerifyOutput verifies the evaluator's output labels and derives
+// the CMAC bytes from them. Each label MUST equal L0 or L1; the bit is then
+// 0 or 1. TEE_K trusts these derived bytes — not whatever CMAC bytes TEE_T
+// also sends on the wire — so a malicious evaluator can't substitute the
+// output without first forging a label collision.
+func CMACGarblerVerifyOutput(session *CMACGarblerOnlineSession, outputLabels []ot.Label) ([16]byte, error) {
+	var zero [16]byte
 	if session == nil {
-		return errors.New("nil session")
+		return zero, errors.New("nil session")
 	}
 	if len(outputLabels) != len(session.ExpectedOutputHints) {
-		return fmt.Errorf("output label count mismatch: got %d, expected %d",
+		return zero, fmt.Errorf("output label count mismatch: got %d, expected %d",
 			len(outputLabels), len(session.ExpectedOutputHints))
 	}
+	if len(outputLabels) != 128 {
+		return zero, fmt.Errorf("expected 128 output labels for 16-byte CMAC, got %d", len(outputLabels))
+	}
 
-	// Verify each output label matches one of the expected labels (L0 or L1)
+	bits := make([]bool, len(outputLabels))
 	for i, label := range outputLabels {
 		hint := session.ExpectedOutputHints[i]
-		if !label.Equal(hint.L0) && !label.Equal(hint.L1) {
-			return fmt.Errorf("output label %d verification failed: label does not match either L0 or L1", i)
+		switch {
+		case label.Equal(hint.L0):
+			bits[i] = false
+		case label.Equal(hint.L1):
+			bits[i] = true
+		default:
+			return zero, fmt.Errorf("output label %d verification failed: label does not match either L0 or L1", i)
 		}
 	}
 
-	return nil
+	outBytes := cmacBitsToBytes(bits)
+	var out [16]byte
+	copy(out[:], outBytes)
+	return out, nil
 }
 
 // Helper functions
@@ -417,76 +430,88 @@ func xorLabels(a, b ot.Label) ot.Label {
 	}
 }
 
-// deriveRandomLabelsFromSetup derives random labels using ECDH from OT protocol
-// This implements the Correlated OT sender-side derivation:
-//   - R0 = H(B^a) where B is receiver's point, a is sender's scalar
-//   - R1 = H((B * A^{-1})^a) where A = g^a is sender's public point
-//
-// When receiver chose 0: B = g^b, so R0 = H(g^{ab}) matches receiver's derivation
-// When receiver chose 1: B = A*g^b, so R1 = H(g^{ab}) matches receiver's derivation
-func deriveRandomLabelsFromSetup(curve elliptic.Curve, setup ot.COSenderSetup, receiverPoint ot.ECPoint, index int) (r0, r1 ot.Label) {
-	// R0 = H(B^a) - scalar multiply receiver's point B by sender's scalar a
-	r0x, r0y := curve.ScalarMult(receiverPoint.X, receiverPoint.Y, setup.Scalar.Bytes())
-	r0 = deriveLabelFromPoint(r0x, r0y, index, 0)
-
-	// R1 = H((B * A^{-1})^a)
-	// First compute B - A (point subtraction = B + (-A))
-	// -A has same x but negated y: -A = (Ax, -Ay mod p)
-	negAy := new(big.Int).Neg(setup.Ay)
-	negAy.Mod(negAy, curve.Params().P)
-
-	// B - A = B + (-A)
-	bMinusAx, bMinusAy := curve.Add(receiverPoint.X, receiverPoint.Y, setup.Ax, negAy)
-
-	// (B - A)^a
-	r1x, r1y := curve.ScalarMult(bMinusAx, bMinusAy, setup.Scalar.Bytes())
-	r1 = deriveLabelFromPoint(r1x, r1y, index, 1)
-
-	return r0, r1
+// Reusable scratch for the 640-iter ECDH dual-mask loop. Mutated in place.
+type nistecScratch struct {
+	bPt, aPt, aAInvPt *nistec.P256Point
+	r0Pt, r1Pt        *nistec.P256Point
+	pointEnc          [65]byte // 0x04 || x32 || y32
+	altEnc            [65]byte
+	scalar            [32]byte
 }
 
-// deriveLabelFromPoint derives a label from an EC point using SHA-256
-// The index and selector ensure unique labels for each OT and each bit value
-func deriveLabelFromPoint(x, y *big.Int, index int, selector byte) ot.Label {
-	h := sha256.New()
-	h.Write(x.Bytes())
-	h.Write(y.Bytes())
+func newNistecScratch() *nistecScratch {
+	return &nistecScratch{
+		bPt:     nistec.NewP256Point(),
+		aPt:     nistec.NewP256Point(),
+		aAInvPt: nistec.NewP256Point(),
+		r0Pt:    nistec.NewP256Point(),
+		r1Pt:    nistec.NewP256Point(),
+	}
+}
 
-	indexBytes := make([]byte, 8)
-	binary.BigEndian.PutUint64(indexBytes, uint64(index))
-	h.Write(indexBytes)
-	h.Write([]byte{selector})
+// Writes (0x04 || x32 || y32) SEC 1 uncompressed encoding via FillBytes (no alloc).
+func encodeUncompressedInto(out *[65]byte, x, y *big.Int) {
+	out[0] = 0x04
+	x.FillBytes(out[1:33])
+	y.FillBytes(out[33:65])
+}
 
-	hash := h.Sum(nil) // 32 bytes
+// scalarToFixed32 writes the 32-byte big-endian encoding of s into out.
+func scalarToFixed32(out *[32]byte, s *big.Int) {
+	s.FillBytes(out[:])
+}
 
+// SHA256(x32 || y32 || index8 || selector1) -> ot.Label. K and T must agree.
+func labelFromNistecPoint(p *nistec.P256Point, index int, selector byte) ot.Label {
+	pb := p.Bytes()
+	var buf [32 + 32 + 8 + 1]byte
+	copy(buf[0:32], pb[1:33])
+	copy(buf[32:64], pb[33:65])
+	binary.BigEndian.PutUint64(buf[64:72], uint64(index))
+	buf[72] = selector
+	hash := sha256.Sum256(buf[:])
 	return ot.Label{
 		D0: binary.BigEndian.Uint64(hash[0:8]),
 		D1: binary.BigEndian.Uint64(hash[8:16]),
 	}
 }
 
-// deriveReceivedLabelFromEntry derives the received random label for the evaluator
-// This implements the Correlated OT receiver-side derivation:
-//   - R = H(A^b) where A is sender's public point, b is receiver's scalar
-//
-// The derivation matches the sender's R0 or R1 based on the choice bit:
-//   - If choice=0: B = g^b, sender computed R0 = H(B^a) = H(g^{ab}) = H(A^b)
-//   - If choice=1: B = A*g^b, sender computed R1 = H((B-A)^a) = H(g^{ab}) = H(A^b)
-//
-// Note: Each OTReceiverEntry contains a bundle with exactly 1 choice bit (at index 0),
-// but the 'index' parameter indicates the position in the overall input (0-639)
-// and is used in key derivation to match the garbler's derivation.
-func deriveReceivedLabelFromEntry(curve elliptic.Curve, entry *OTReceiverEntry, index int) ot.Label {
+// CO OT sender: R0 = H(aB), R1 = H(R0 + (-aA)). Identity: a(B-A) = aB - aA.
+func deriveRandomLabelsFromSetup(setup ot.COSenderSetup, receiverPoint ot.ECPoint, index int, s *nistecScratch) (r0, r1 ot.Label, err error) {
+	encodeUncompressedInto(&s.pointEnc, receiverPoint.X, receiverPoint.Y)
+	encodeUncompressedInto(&s.altEnc, setup.AaInvX, setup.AaInvY)
+	scalarToFixed32(&s.scalar, setup.Scalar)
+
+	if _, err = s.bPt.SetBytes(s.pointEnc[:]); err != nil {
+		return r0, r1, fmt.Errorf("decode receiver point: %w", err)
+	}
+	if _, err = s.aAInvPt.SetBytes(s.altEnc[:]); err != nil {
+		return r0, r1, fmt.Errorf("decode AaInv point: %w", err)
+	}
+	if _, err = s.r0Pt.ScalarMult(s.bPt, s.scalar[:]); err != nil {
+		return r0, r1, fmt.Errorf("scalar mult B^a: %w", err)
+	}
+	s.r1Pt.Add(s.r0Pt, s.aAInvPt)
+
+	r0 = labelFromNistecPoint(s.r0Pt, index, 0)
+	r1 = labelFromNistecPoint(s.r1Pt, index, 1)
+	return r0, r1, nil
+}
+
+// CO OT receiver: R = H(A^b). Matches sender's R0 (choice=0) or R1 (choice=1).
+func deriveReceivedLabelFromEntry(entry *OTReceiverEntry, index int, s *nistecScratch) (ot.Label, error) {
 	bundle := entry.ReceiverBundle
 	choiceBit := bundle.Bits[0]
 
-	// Compute A^b = sender's public point raised to receiver's scalar
-	// This equals g^{ab} which matches what the sender computes
-	ax, ay := entry.SenderPublicPoint.X, entry.SenderPublicPoint.Y
-	b := bundle.Scalars[0]
+	encodeUncompressedInto(&s.pointEnc, entry.SenderPublicPoint.X, entry.SenderPublicPoint.Y)
+	scalarToFixed32(&s.scalar, bundle.Scalars[0])
 
-	// A^b
-	sharedX, sharedY := curve.ScalarMult(ax, ay, b.Bytes())
+	if _, err := s.aPt.SetBytes(s.pointEnc[:]); err != nil {
+		return ot.Label{}, fmt.Errorf("decode A point: %w", err)
+	}
+	if _, err := s.r0Pt.ScalarMult(s.aPt, s.scalar[:]); err != nil {
+		return ot.Label{}, fmt.Errorf("scalar mult A^b: %w", err)
+	}
 
 	// Selector matches sender's derivation: 0 for R0, 1 for R1
 	selector := byte(0)
@@ -494,7 +519,7 @@ func deriveReceivedLabelFromEntry(curve elliptic.Curve, entry *OTReceiverEntry, 
 		selector = 1
 	}
 
-	return deriveLabelFromPoint(sharedX, sharedY, index, selector)
+	return labelFromNistecPoint(s.r0Pt, index, selector), nil
 }
 
 // Serialization helpers for wire protocol
@@ -515,49 +540,58 @@ func deserializeLabel(data []byte) ot.Label {
 	}
 }
 
-// SerializeOnlinePayload serializes CMACOnlinePayload to bytes
+// One allocation; size known up front. DualMasks are NOT in this payload —
+// they travel in a separate proto field that the evaluator reads directly.
 func SerializeOnlinePayload(p *CMACOnlinePayload) []byte {
-	var buf []byte
-
-	// Session ID + Key + OT Start Index
-	tmp := make([]byte, 8+32+4)
-	binary.BigEndian.PutUint64(tmp[0:8], p.SessionID)
-	copy(tmp[8:40], p.Key[:])
-	binary.BigEndian.PutUint32(tmp[40:44], uint32(p.OTStartIndex))
-	buf = append(buf, tmp...)
-
-	// Garbled Tables (each gate is []Label)
-	numGatesBuf := make([]byte, 4)
-	binary.BigEndian.PutUint32(numGatesBuf, uint32(len(p.GarbledTables)))
-	buf = append(buf, numGatesBuf...)
+	totalGateLabels := 0
 	for _, gate := range p.GarbledTables {
-		numLabelsBuf := make([]byte, 4)
-		binary.BigEndian.PutUint32(numLabelsBuf, uint32(len(gate)))
-		buf = append(buf, numLabelsBuf...)
+		totalGateLabels += len(gate)
+	}
+
+	size := 8 + 32 + 4 + // sessionID + key + OTStartIndex
+		4 + len(p.GarbledTables)*4 + totalGateLabels*16 + // gates: numGates + per-gate (numLabels + labels)
+		4 + len(p.GarblerInputs)*16 + // garbler inputs
+		4 + len(p.OutputHints)*32 // output hints (each Wire = 2 labels = 32 B)
+
+	buf := make([]byte, size)
+	off := 0
+
+	binary.BigEndian.PutUint64(buf[off:off+8], p.SessionID)
+	off += 8
+	copy(buf[off:off+32], p.Key[:])
+	off += 32
+	binary.BigEndian.PutUint32(buf[off:off+4], uint32(p.OTStartIndex))
+	off += 4
+
+	binary.BigEndian.PutUint32(buf[off:off+4], uint32(len(p.GarbledTables)))
+	off += 4
+	for _, gate := range p.GarbledTables {
+		binary.BigEndian.PutUint32(buf[off:off+4], uint32(len(gate)))
+		off += 4
 		for _, label := range gate {
-			buf = append(buf, serializeLabel(label)...)
+			binary.BigEndian.PutUint64(buf[off:off+8], label.D0)
+			binary.BigEndian.PutUint64(buf[off+8:off+16], label.D1)
+			off += 16
 		}
 	}
 
-	// Garbler Inputs ([]Label)
-	numGIBuf := make([]byte, 4)
-	binary.BigEndian.PutUint32(numGIBuf, uint32(len(p.GarblerInputs)))
-	buf = append(buf, numGIBuf...)
+	binary.BigEndian.PutUint32(buf[off:off+4], uint32(len(p.GarblerInputs)))
+	off += 4
 	for _, label := range p.GarblerInputs {
-		buf = append(buf, serializeLabel(label)...)
+		binary.BigEndian.PutUint64(buf[off:off+8], label.D0)
+		binary.BigEndian.PutUint64(buf[off+8:off+16], label.D1)
+		off += 16
 	}
 
-	// Output Hints ([]Wire, each Wire has L0 and L1 Labels)
-	numOHBuf := make([]byte, 4)
-	binary.BigEndian.PutUint32(numOHBuf, uint32(len(p.OutputHints)))
-	buf = append(buf, numOHBuf...)
+	binary.BigEndian.PutUint32(buf[off:off+4], uint32(len(p.OutputHints)))
+	off += 4
 	for _, wire := range p.OutputHints {
-		buf = append(buf, serializeLabel(wire.L0)...)
-		buf = append(buf, serializeLabel(wire.L1)...)
+		binary.BigEndian.PutUint64(buf[off:off+8], wire.L0.D0)
+		binary.BigEndian.PutUint64(buf[off+8:off+16], wire.L0.D1)
+		binary.BigEndian.PutUint64(buf[off+16:off+24], wire.L1.D0)
+		binary.BigEndian.PutUint64(buf[off+24:off+32], wire.L1.D1)
+		off += 32
 	}
-
-	// Dual Masks
-	buf = append(buf, SerializeDualMasks(p.DualMasks)...)
 
 	return buf
 }
@@ -586,6 +620,11 @@ func DeserializeOnlinePayload(data []byte) (*CMACOnlinePayload, error) {
 	}
 	numGates := binary.BigEndian.Uint32(data[offset : offset+4])
 	offset += 4
+	// Must equal the compiled circuit's gate count — circ.Eval would
+	// index garbled[i] for i in 0..circ.NumGates without bounds-checking.
+	if int(numGates) != aesCMACCircuit.NumGates {
+		return nil, fmt.Errorf("gate count mismatch: payload has %d, circuit has %d", numGates, aesCMACCircuit.NumGates)
+	}
 	gates := make([][]ot.Label, numGates)
 	for i := range gates {
 		if offset+4 > len(data) {
@@ -628,6 +667,9 @@ func DeserializeOnlinePayload(data []byte) (*CMACOnlinePayload, error) {
 	numOH := binary.BigEndian.Uint32(data[offset : offset+4])
 	offset += 4
 
+	if int(numOH) != aesCMACCircuit.Outputs.Size() {
+		return nil, fmt.Errorf("output hint count mismatch: payload has %d, circuit has %d", numOH, aesCMACCircuit.Outputs.Size())
+	}
 	if offset+int(numOH)*32 > len(data) {
 		return nil, fmt.Errorf("data too short for %d output hints", numOH)
 	}
@@ -638,10 +680,8 @@ func DeserializeOnlinePayload(data []byte) (*CMACOnlinePayload, error) {
 		offset += 32
 	}
 
-	// Dual Masks
-	dualMasks, err := DeserializeDualMasks(data[offset:])
-	if err != nil {
-		return nil, fmt.Errorf("failed to deserialize dual masks: %w", err)
+	if offset != len(data) {
+		return nil, fmt.Errorf("trailing bytes after output hints (%d)", len(data)-offset)
 	}
 
 	return &CMACOnlinePayload{
@@ -650,7 +690,6 @@ func DeserializeOnlinePayload(data []byte) (*CMACOnlinePayload, error) {
 		GarbledTables: gates,
 		GarblerInputs: garblerInputs,
 		OutputHints:   outputHints,
-		DualMasks:     dualMasks,
 		OTStartIndex:  int(otStartIndex),
 	}, nil
 }

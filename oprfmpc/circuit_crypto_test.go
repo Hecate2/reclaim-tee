@@ -17,6 +17,29 @@ import (
 	"github.com/markkurossi/mpc/ot"
 )
 
+// mustDeriveRandomLabels wraps deriveRandomLabelsFromSetup for tests —
+// nistec-based derivation can in principle return an error if SetBytes
+// rejects the point encoding, but for setups produced by GenerateCOSenderSetup
+// + BuildCOChoices that never happens. Tests fail fast on the unexpected.
+func mustDeriveRandomLabels(t *testing.T, setup ot.COSenderSetup, receiverPoint ot.ECPoint, index int) (ot.Label, ot.Label) {
+	t.Helper()
+	r0, r1, err := deriveRandomLabelsFromSetup(setup, receiverPoint, index, newNistecScratch())
+	if err != nil {
+		t.Fatalf("deriveRandomLabelsFromSetup index=%d: %v", index, err)
+	}
+	return r0, r1
+}
+
+// mustDeriveReceivedLabel mirrors mustDeriveRandomLabels for the evaluator side.
+func mustDeriveReceivedLabel(t *testing.T, entry *OTReceiverEntry, index int) ot.Label {
+	t.Helper()
+	r, err := deriveReceivedLabelFromEntry(entry, index, newNistecScratch())
+	if err != nil {
+		t.Fatalf("deriveReceivedLabelFromEntry index=%d: %v", index, err)
+	}
+	return r
+}
+
 // TestECDHLabelDerivation_Choice0 verifies that when receiver chose 0,
 // garbler's R0 matches evaluator's derived R.
 //
@@ -45,7 +68,7 @@ func TestECDHLabelDerivation_Choice0(t *testing.T) {
 		receiverPoint := choicePoints[0]
 
 		// Sender derives R0 and R1
-		r0, r1 := deriveRandomLabelsFromSetup(curve, setup, receiverPoint, trial)
+		r0, r1 := mustDeriveRandomLabels(t, setup, receiverPoint, trial)
 
 		// Create receiver entry
 		entry := &OTReceiverEntry{
@@ -55,7 +78,7 @@ func TestECDHLabelDerivation_Choice0(t *testing.T) {
 		}
 
 		// Receiver derives R (should match R0 since choice=0)
-		receivedR := deriveReceivedLabelFromEntry(curve, entry, trial)
+		receivedR := mustDeriveReceivedLabel(t, entry, trial)
 
 		// Verify R0 matches receiver's R
 		if !r0.Equal(receivedR) {
@@ -98,7 +121,7 @@ func TestECDHLabelDerivation_Choice1(t *testing.T) {
 		receiverPoint := choicePoints[0]
 
 		// Sender derives R0 and R1
-		r0, r1 := deriveRandomLabelsFromSetup(curve, setup, receiverPoint, trial)
+		r0, r1 := mustDeriveRandomLabels(t, setup, receiverPoint, trial)
 
 		// Create receiver entry
 		entry := &OTReceiverEntry{
@@ -108,7 +131,7 @@ func TestECDHLabelDerivation_Choice1(t *testing.T) {
 		}
 
 		// Receiver derives R (should match R1 since choice=1)
-		receivedR := deriveReceivedLabelFromEntry(curve, entry, trial)
+		receivedR := mustDeriveReceivedLabel(t, entry, trial)
 
 		// Verify R1 matches receiver's R
 		if !r1.Equal(receivedR) {
@@ -142,8 +165,8 @@ func TestECDHLabelDerivation_Deterministic(t *testing.T) {
 
 	// Derive labels multiple times with same inputs
 	for i := 0; i < 10; i++ {
-		r0a, r1a := deriveRandomLabelsFromSetup(curve, setup, receiverPoint, 42)
-		r0b, r1b := deriveRandomLabelsFromSetup(curve, setup, receiverPoint, 42)
+		r0a, r1a := mustDeriveRandomLabels(t, setup, receiverPoint, 42)
+		r0b, r1b := mustDeriveRandomLabels(t, setup, receiverPoint, 42)
 
 		if !r0a.Equal(r0b) {
 			t.Errorf("iteration %d: R0 not deterministic", i)
@@ -154,8 +177,8 @@ func TestECDHLabelDerivation_Deterministic(t *testing.T) {
 	}
 
 	// Different indices should produce different labels
-	r0_idx0, r1_idx0 := deriveRandomLabelsFromSetup(curve, setup, receiverPoint, 0)
-	r0_idx1, r1_idx1 := deriveRandomLabelsFromSetup(curve, setup, receiverPoint, 1)
+	r0_idx0, r1_idx0 := mustDeriveRandomLabels(t, setup, receiverPoint, 0)
+	r0_idx1, r1_idx1 := mustDeriveRandomLabels(t, setup, receiverPoint, 1)
 
 	if r0_idx0.Equal(r0_idx1) {
 		t.Error("different indices produced same R0 (index not mixed into derivation)")
@@ -210,7 +233,7 @@ func TestDerandomization_AllCases(t *testing.T) {
 			l1 = ot.Label{D0: uint64(buf[16])<<56 | uint64(buf[17])<<48, D1: uint64(buf[18]) << 56}
 
 			// Garbler side: derive random labels and compute masks
-			r0, r1 := deriveRandomLabelsFromSetup(curve, setup, receiverPoint, 0)
+			r0, r1 := mustDeriveRandomLabels(t, setup, receiverPoint, 0)
 			m0 := xorLabels(l0, r0)
 			m1 := xorLabels(l1, r1)
 			delta := xorLabels(r0, r1)
@@ -225,7 +248,7 @@ func TestDerandomization_AllCases(t *testing.T) {
 			}
 
 			// Get the precomputed R (based on precomputed choice)
-			receivedR := deriveReceivedLabelFromEntry(curve, entry, 0)
+			receivedR := mustDeriveReceivedLabel(t, entry, 0)
 
 			// If precomputed choice differs from actual, correct using delta
 			rActual := receivedR
@@ -282,7 +305,7 @@ func TestDerandomization_NoLeakage(t *testing.T) {
 		l0 := ot.Label{D0: 0xAAAAAAAAAAAAAAAA, D1: 0xBBBBBBBBBBBBBBBB}
 		l1 := ot.Label{D0: 0xCCCCCCCCCCCCCCCC, D1: 0xDDDDDDDDDDDDDDDD}
 
-		r0, r1 := deriveRandomLabelsFromSetup(curve, setup, receiverPoint, trial)
+		r0, r1 := mustDeriveRandomLabels(t, setup, receiverPoint, trial)
 		m0 := xorLabels(l0, r0)
 		m1 := xorLabels(l1, r1)
 		delta := xorLabels(r0, r1)
@@ -295,7 +318,7 @@ func TestDerandomization_NoLeakage(t *testing.T) {
 			Index:             trial,
 		}
 
-		receivedR := deriveReceivedLabelFromEntry(curve, entry, trial)
+		receivedR := mustDeriveReceivedLabel(t, entry, trial)
 
 		// Evaluator chose 0, so they should recover L0
 		recoveredL0 := xorLabels(receivedR, mask.M0)
@@ -347,7 +370,7 @@ func TestDerandomization_Property(t *testing.T) {
 		l1 = ot.Label{D0: uint64(buf[16])<<56 | uint64(buf[17])<<48 | uint64(buf[18])<<40 | uint64(buf[19])<<32,
 			D1: uint64(buf[20])<<56 | uint64(buf[21])<<48}
 
-		r0, r1 := deriveRandomLabelsFromSetup(curve, setup, receiverPoint, trial%100)
+		r0, r1 := mustDeriveRandomLabels(t, setup, receiverPoint, trial%100)
 		m0 := xorLabels(l0, r0)
 		m1 := xorLabels(l1, r1)
 		delta := xorLabels(r0, r1)
@@ -360,7 +383,7 @@ func TestDerandomization_Property(t *testing.T) {
 			Index:             trial % 100,
 		}
 
-		receivedR := deriveReceivedLabelFromEntry(curve, entry, trial%100)
+		receivedR := mustDeriveReceivedLabel(t, entry, trial%100)
 
 		// Apply derandomization correction
 		rActual := receivedR
@@ -536,10 +559,13 @@ func TestGarbledCircuit_EndToEnd(t *testing.T) {
 		t.Fatalf("CMACEvaluatorOnline failed: %v", err)
 	}
 
-	// Garbler verifies output labels
-	err = CMACGarblerVerifyOutput(session, result.OutputLabels)
+	// Garbler verifies output labels AND derives CMAC from them
+	derivedCmac, err := CMACGarblerVerifyOutput(session, result.OutputLabels)
 	if err != nil {
 		t.Fatalf("Output label verification failed: %v", err)
+	}
+	if derivedCmac != result.CMACOutput {
+		t.Fatalf("garbler-derived CMAC %x != evaluator CMAC %x", derivedCmac, result.CMACOutput)
 	}
 
 	// Verify the CMAC output is correct
@@ -669,7 +695,7 @@ func TestOutputLabelVerification_ValidLabels(t *testing.T) {
 	result, _ := CMACEvaluatorOnline(curve, payload, evaluatorInput, receiverEntries)
 
 	// Valid labels should pass
-	err := CMACGarblerVerifyOutput(session, result.OutputLabels)
+	_, err := CMACGarblerVerifyOutput(session, result.OutputLabels)
 	if err != nil {
 		t.Errorf("valid output labels rejected: %v", err)
 	}
@@ -702,7 +728,7 @@ func TestOutputLabelVerification_InvalidLabels(t *testing.T) {
 	}
 
 	// Fabricated labels should be rejected
-	err := CMACGarblerVerifyOutput(session, fakeLabels)
+	_, err := CMACGarblerVerifyOutput(session, fakeLabels)
 	if err == nil {
 		t.Error("fabricated output labels accepted (security violation)")
 	}
@@ -742,7 +768,7 @@ func TestOutputLabelVerification_ModifiedLabels(t *testing.T) {
 	result.OutputLabels[0].D0 ^= 0x1
 
 	// Modified labels should be rejected
-	err := CMACGarblerVerifyOutput(session, result.OutputLabels)
+	_, err := CMACGarblerVerifyOutput(session, result.OutputLabels)
 	if err == nil {
 		t.Error("modified output labels accepted (security violation)")
 	}

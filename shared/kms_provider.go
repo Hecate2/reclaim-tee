@@ -14,103 +14,103 @@ import (
 	kmspb "cloud.google.com/go/kms/apiv1/kmspb"
 )
 
-// KMSProvider defines an abstraction over key management systems
-// Implementations MUST NOT persist any plaintext keys. They should return
-// plaintext data keys to the caller only for in-memory usage.
-type KMSProvider interface {
-	Encrypt(data []byte, keyID string) ([]byte, error)
-	Decrypt(data []byte, keyID string, ciphertextBlob []byte) ([]byte, error)
-	GenerateDataKey(keyID string) (*DataKey, error)
-}
-
-// DataKey represents a generated data key
-type DataKey struct {
-	Plaintext      []byte
-	CiphertextBlob []byte
-}
-
-// GoogleKMSProvider implements KMSProvider using Google Cloud KMS
+// GoogleKMSProvider wraps a Google Cloud KMS key for envelope encryption.
+// Used to wrap the data encryption key under which the OPRF share is
+// stored in Secret Manager — same envelope format used by the legacy
+// EnclaveCache, so existing stored shares decrypt unchanged.
 type GoogleKMSProvider struct {
 	kmsClient   *kms.KeyManagementClient
 	keyResource string
 }
 
-// NewGoogleKMSProvider initializes a GoogleKMSProvider
+// DataKey is a freshly-generated 32-byte AES key plus its KMS-wrapped form.
+// The plaintext is for in-memory use only and must never be persisted.
+type DataKey struct {
+	Plaintext      []byte
+	CiphertextBlob []byte
+}
+
+// NewGoogleKMSProvider builds a KMS client bound to a specific crypto key.
 func NewGoogleKMSProvider(ctx context.Context, projectID, location, keyRing, keyName string) (*GoogleKMSProvider, error) {
 	client, err := kms.NewKeyManagementClient(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create GCP KMS client: %v", err)
+		return nil, fmt.Errorf("create GCP KMS client: %w", err)
 	}
-	keyResource := fmt.Sprintf("projects/%s/locations/%s/keyRings/%s/cryptoKeys/%s", projectID, location, keyRing, keyName)
+	keyResource := fmt.Sprintf("projects/%s/locations/%s/keyRings/%s/cryptoKeys/%s",
+		projectID, location, keyRing, keyName)
 	return &GoogleKMSProvider{kmsClient: client, keyResource: keyResource}, nil
 }
 
-func (p *GoogleKMSProvider) GenerateDataKey(keyID string) (*DataKey, error) {
-	// Generate 32 random bytes locally and wrap with Cloud KMS
+// GenerateDataKey returns a new 32-byte random key plus its KMS-wrapped form.
+// The plaintext is for in-memory AES-GCM use; the ciphertext blob is what
+// gets persisted alongside the encrypted payload.
+func (p *GoogleKMSProvider) GenerateDataKey(ctx context.Context) (*DataKey, error) {
 	plaintext := make([]byte, 32)
 	if _, err := rand.Read(plaintext); err != nil {
-		return nil, fmt.Errorf("failed to generate random data key: %v", err)
+		return nil, fmt.Errorf("generate random data key: %w", err)
 	}
-	resp, err := p.kmsClient.Encrypt(context.Background(), &kmspb.EncryptRequest{
+	resp, err := p.kmsClient.Encrypt(ctx, &kmspb.EncryptRequest{
 		Name:      p.keyResource,
 		Plaintext: plaintext,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("gcp kms Encrypt failed: %v", err)
+		return nil, fmt.Errorf("gcp kms Encrypt: %w", err)
 	}
 	return &DataKey{Plaintext: plaintext, CiphertextBlob: resp.Ciphertext}, nil
 }
 
-func (p *GoogleKMSProvider) Encrypt(data []byte, keyID string) ([]byte, error) {
-	dk, err := p.GenerateDataKey("")
-	if err != nil {
-		return nil, err
-	}
-	return aesGCMOperation(dk.Plaintext, data, true)
-}
-
-func (p *GoogleKMSProvider) Decrypt(data []byte, keyID string, ciphertextBlob []byte) ([]byte, error) {
+// DecryptDataKey unwraps a previously-generated data key. The returned
+// plaintext is for in-memory use only.
+func (p *GoogleKMSProvider) DecryptDataKey(ctx context.Context, ciphertextBlob []byte) ([]byte, error) {
 	if len(ciphertextBlob) == 0 {
-		return nil, fmt.Errorf("missing wrapped data key for decryption")
+		return nil, errors.New("kms: missing wrapped data key")
 	}
-	resp, err := p.kmsClient.Decrypt(context.Background(), &kmspb.DecryptRequest{
+	resp, err := p.kmsClient.Decrypt(ctx, &kmspb.DecryptRequest{
 		Name:       p.keyResource,
 		Ciphertext: ciphertextBlob,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("gcp kms Decrypt failed: %v", err)
+		return nil, fmt.Errorf("gcp kms Decrypt: %w", err)
 	}
-	return aesGCMOperation(resp.Plaintext, data, false)
+	return resp.Plaintext, nil
 }
 
-// aesGCMOperation handles AES-GCM encryption or decryption based on the encrypt flag
-func aesGCMOperation(key, data []byte, encrypt bool) ([]byte, error) {
+// aesGCMEncrypt encrypts data with the supplied 32-byte key and prepends
+// the nonce. Layout: nonce(12) || ciphertext+tag.
+func aesGCMEncrypt(key, data []byte) ([]byte, error) {
+	gcm, err := newGCM(key)
+	if err != nil {
+		return nil, err
+	}
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		return nil, fmt.Errorf("aes-gcm: generate nonce: %w", err)
+	}
+	return append(nonce, gcm.Seal(nil, nonce, data, nil)...), nil
+}
+
+// aesGCMDecrypt reverses aesGCMEncrypt.
+func aesGCMDecrypt(key, data []byte) ([]byte, error) {
+	gcm, err := newGCM(key)
+	if err != nil {
+		return nil, err
+	}
+	ns := gcm.NonceSize()
+	if len(data) < ns {
+		return nil, errors.New("aes-gcm: ciphertext too short")
+	}
+	nonce, ciphertext := data[:ns], data[ns:]
+	return gcm.Open(nil, nonce, ciphertext, nil)
+}
+
+func newGCM(key []byte) (cipher.AEAD, error) {
 	block, err := aes.NewCipher(key)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create AES cipher: %v", err)
+		return nil, fmt.Errorf("aes new cipher: %w", err)
 	}
-
 	gcm, err := cipher.NewGCM(block)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create GCM: %v", err)
+		return nil, fmt.Errorf("aes new gcm: %w", err)
 	}
-
-	nonceSize := gcm.NonceSize()
-
-	if encrypt {
-		// Encryption: generate nonce and encrypt
-		nonce := make([]byte, nonceSize)
-		if _, err := rand.Read(nonce); err != nil {
-			return nil, fmt.Errorf("failed to generate nonce: %v", err)
-		}
-		// Return nonce + ciphertext
-		return append(nonce, gcm.Seal(nil, nonce, data, nil)...), nil
-	} else {
-		// Decryption: extract nonce and decrypt
-		if len(data) < nonceSize {
-			return nil, errors.New("encrypted data too short")
-		}
-		nonce, ciphertext := data[:nonceSize], data[nonceSize:]
-		return gcm.Open(nil, nonce, ciphertext, nil)
-	}
+	return gcm, nil
 }

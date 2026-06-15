@@ -2,7 +2,6 @@ package client
 
 import (
 	"bytes"
-	"crypto/sha256"
 	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
@@ -15,6 +14,7 @@ import (
 	"github.com/reclaimprotocol/reclaim-tee/minitls"
 	teeproto "github.com/reclaimprotocol/reclaim-tee/proto"
 	"github.com/reclaimprotocol/reclaim-tee/providers"
+	"github.com/reclaimprotocol/reclaim-tee/shared"
 
 	"github.com/mr-tron/base58"
 	prover "github.com/reclaimprotocol/zk-symmetric-crypto/gnark/libraries/prover/impl"
@@ -374,16 +374,27 @@ func extractCertHashFromAttestation(attestation *teeproto.AttestationReport, pre
 	return ""
 }
 
-// peerCertHash extracts the SHA256 hash of the peer TLS certificate from a WebSocket connection.
-// Returns "", nil if the connection is not TLS (e.g. standalone ws://, or mobile native networking).
-func peerCertHash(conn *websocket.Conn) (string, error) {
+// peerSPKIHash extracts sha256(MarshalPKIXPublicKey(peer.PublicKey)) from
+// the peer TLS certificate on a WebSocket connection.
+//
+// The attestation nonce binds to the SPKI hash rather than the cert DER
+// because the TEE rotates the cert envelope (new serial, NotBefore,
+// attestation extension) every ~4 minutes while keeping the same TLS
+// keypair. Binding to the cert DER would mismatch whenever a session
+// straddled a refresh — the client's TLS state holds whatever DER was
+// presented at handshake, but the TEE's cached attestation would by
+// then bind to the next DER. The SPKI never changes for the manager's
+// lifetime, so this binding is race-free.
+//
+// Returns "", nil if the connection is not TLS (standalone ws:// or
+// mobile native bridge).
+func peerSPKIHash(conn *websocket.Conn) (string, error) {
 	if conn == nil {
 		return "", nil
 	}
 
 	tlsConn, ok := conn.NetConn().(*tls.Conn)
 	if !ok {
-		// Not a TLS connection (standalone mode or mobile native bridge)
 		return "", nil
 	}
 
@@ -392,68 +403,70 @@ func peerCertHash(conn *websocket.Conn) (string, error) {
 		return "", fmt.Errorf("TLS connection has no peer certificates")
 	}
 
-	hash := sha256.Sum256(state.PeerCertificates[0].Raw)
+	hash, err := shared.SPKIHashFromCertDER(state.PeerCertificates[0].Raw)
+	if err != nil {
+		return "", fmt.Errorf("compute SPKI hash: %w", err)
+	}
 	return fmt.Sprintf("%x", hash[:]), nil
 }
 
-// verifyAttestationCertHashes checks that the TLS certificate hashes in each TEE's attestation
-// match the actual TLS certificates on the client's WebSocket connections.
-// Skipped when: no attestation reports (standalone mode), or no TLS state available (mobile).
-func (c *Client) verifyAttestationCertHashes() error {
-	// TEE_K cert hash verification
-	if err := c.verifyOneCertHash(
+// verifyAttestationSPKIBinding checks that the SPKI hash in each TEE's
+// attestation matches the SPKI of the cert the client saw on its WS
+// connections. SPKI (not the full cert DER) because the TEE's cert
+// envelope rotates ~every 4 minutes while the keypair is stable — the
+// only race-free binding is to the keypair.
+//
+// Skipped when: no attestation reports (standalone mode), or no TLS
+// state available (mobile native networking, ws://).
+func (c *Client) verifyAttestationSPKIBinding() error {
+	if err := c.verifyOneSPKIBinding(
 		c.teekSignedMessage.GetAttestationReport(),
 		c.wsConn,
-		"tee_k_cert_hash:",
+		shared.SPKINoncePrefix("tee_k"),
 		"TEE_K",
 	); err != nil {
 		return err
 	}
-
-	// TEE_T cert hash verification
-	if err := c.verifyOneCertHash(
+	if err := c.verifyOneSPKIBinding(
 		c.teetSignedMessage.GetAttestationReport(),
 		c.teetConn,
-		"tee_t_cert_hash:",
+		shared.SPKINoncePrefix("tee_t"),
 		"TEE_T",
 	); err != nil {
 		return err
 	}
-
 	return nil
 }
 
-// verifyOneCertHash verifies a single TEE's attestation cert hash against the connection's peer cert.
-func (c *Client) verifyOneCertHash(attestation *teeproto.AttestationReport, conn *websocket.Conn, noncePrefix string, teeName string) error {
+// verifyOneSPKIBinding verifies a single TEE's attestation SPKI hash
+// against the connection's peer cert SPKI.
+func (c *Client) verifyOneSPKIBinding(attestation *teeproto.AttestationReport, conn *websocket.Conn, noncePrefix string, teeName string) error {
 	// No attestation report means standalone mode -- skip
 	if attestation == nil {
-		c.logger.Debug("No attestation report, skipping cert hash check", zap.String("tee", teeName))
+		c.logger.Debug("No attestation report, skipping SPKI check", zap.String("tee", teeName))
 		return nil
 	}
 
 	attestedHash := extractCertHashFromAttestation(attestation, noncePrefix)
 	if attestedHash == "" {
-		// Both TEEs should include cert hashes. If missing, the attestation may be from
-		// an older deployment or malformed -- log a warning but don't block the session.
-		c.logger.Warn("No cert hash in attestation", zap.String("tee", teeName))
-		return nil
+		return fmt.Errorf("%s attestation missing %q nonce", teeName, noncePrefix)
 	}
 
-	connHash, err := peerCertHash(conn)
+	connHash, err := peerSPKIHash(conn)
 	if err != nil {
-		return fmt.Errorf("%s cert hash verification failed: %v", teeName, err)
+		return fmt.Errorf("%s SPKI hash verification failed: %v", teeName, err)
 	}
 	if connHash == "" {
 		// No TLS state available (mobile native networking or ws://) -- skip
-		c.logger.Debug("No TLS state available, skipping cert hash check", zap.String("tee", teeName))
+		c.logger.Debug("No TLS state available, skipping SPKI check", zap.String("tee", teeName))
 		return nil
 	}
 
 	if attestedHash != connHash {
-		return fmt.Errorf("%s certificate mismatch: attestation cert hash does not match TLS connection certificate", teeName)
+		return fmt.Errorf("%s SPKI mismatch: attestation says %q, TLS conn SPKI hashes to %q", teeName, attestedHash, connHash)
 	}
 
-	c.logger.Info("Attestation cert hash verified", zap.String("tee", teeName))
+	c.logger.Info("Attestation SPKI binding verified", zap.String("tee", teeName))
 	return nil
 }
 
@@ -473,7 +486,7 @@ func (c *Client) buildVerificationBundle() ([]byte, error) {
 	// SECURITY: Verify attestation cert hashes match the TLS certificates on our connections.
 	// This binds the attestation to the specific TLS channel, preventing certificate substitution.
 	// Skipped in standalone mode (no attestation reports) and on mobile (no access to TLS state).
-	if err := c.verifyAttestationCertHashes(); err != nil {
+	if err := c.verifyAttestationSPKIBinding(); err != nil {
 		return nil, fmt.Errorf("SECURITY ERROR: %v", err)
 	}
 

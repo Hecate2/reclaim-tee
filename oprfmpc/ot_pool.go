@@ -151,6 +151,14 @@ func (p *OTPool) TotalCount() int {
 	return p.totalCount
 }
 
+// NextIndex returns the next unreserved entry index. Sent to TEE_T on resume
+// so it can confirm its retained pool still covers what TEE_K will reserve.
+func (p *OTPool) NextIndex() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.nextIndex
+}
+
 // Clear resets the pool, clearing all entries
 // Called on disconnect to prevent replay attacks
 func (p *OTPool) Clear() {
@@ -182,11 +190,17 @@ type OTReceiverEntry struct {
 	Used              bool
 }
 
-// OTReceiverPool manages precomputed OT entries for the evaluator (TEE_T)
+// OTReceiverPool manages precomputed OT entries for the evaluator (TEE_T).
+//
+// Consumption is by ABSOLUTE INDEX (the sender, TEE_K, picks the index via
+// its own Reserve and tells TEE_T over the wire). The previous "monotonic
+// nextIndex" guard was unsound under concurrent sessions: each session has
+// its own per-session WS connection to TEE_T, so OPRF online messages
+// across sessions arrive in arbitrary order — sometimes higher indices
+// land first. The actual replay defense is the per-entry Used flag.
 type OTReceiverPool struct {
 	mu         sync.Mutex
 	entries    []*OTReceiverEntry
-	nextIndex  int // Next unused entry
 	totalCount int // Total entries allocated
 	usedCount  int // Consumed entries
 }
@@ -195,7 +209,6 @@ type OTReceiverPool struct {
 func NewOTReceiverPool(capacity int) *OTReceiverPool {
 	return &OTReceiverPool{
 		entries:    make([]*OTReceiverEntry, 0, capacity),
-		nextIndex:  0,
 		totalCount: 0,
 		usedCount:  0,
 	}
@@ -213,40 +226,37 @@ func (p *OTReceiverPool) AddEntries(entries []*OTReceiverEntry) {
 	p.totalCount += len(entries)
 }
 
-// Consume retrieves entries from the pool starting at the given index.
-// If startIndex is ahead of nextIndex, the skipped entries are marked as wasted
-// (this happens when TEE_K reserved entries but OPRF failed before reaching TEE_T).
+// Consume retrieves entries from the pool at the given absolute index.
+// Returns an error if the range is out of bounds or any entry is already
+// used. Order-independent — concurrent OPRF online messages from different
+// sessions can arrive at TEE_T in any order; only the per-entry Used flag
+// guards against replay/double-consume.
 func (p *OTReceiverPool) Consume(startIndex int, count int) ([]*OTReceiverEntry, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	if startIndex < p.nextIndex {
-		return nil, fmt.Errorf("OT index behind: expected >= %d, got %d (possible replay)", p.nextIndex, startIndex)
+	if startIndex < 0 || count <= 0 {
+		return nil, fmt.Errorf("invalid OT range: startIndex=%d count=%d", startIndex, count)
 	}
-
-	// Skip ahead if TEE_K wasted entries (e.g., OPRF failed after reserving)
-	if startIndex > p.nextIndex {
-		skipped := startIndex - p.nextIndex
-		p.nextIndex = startIndex
-		p.usedCount += skipped
-	}
-
 	if startIndex+count > p.totalCount {
 		return nil, fmt.Errorf("insufficient OT entries: need %d at index %d, have %d total",
 			count, startIndex, p.totalCount)
 	}
 
+	// Validate all entries are unused BEFORE mutating any — keeps the pool
+	// consistent if a partial range is already used (no half-consumed state).
+	for i := 0; i < count; i++ {
+		if p.entries[startIndex+i].Used {
+			return nil, fmt.Errorf("OT entry %d already used (replay)", startIndex+i)
+		}
+	}
+
 	entries := make([]*OTReceiverEntry, count)
 	for i := 0; i < count; i++ {
-		entry := p.entries[p.nextIndex+i]
-		if entry.Used {
-			return nil, fmt.Errorf("OT entry %d already used (corruption detected)", p.nextIndex+i)
-		}
+		entry := p.entries[startIndex+i]
 		entry.Used = true
 		entries[i] = entry
 	}
-
-	p.nextIndex += count
 	p.usedCount += count
 
 	return entries, nil
@@ -272,46 +282,45 @@ func (p *OTReceiverPool) Clear() {
 	defer p.mu.Unlock()
 
 	p.entries = nil
-	p.nextIndex = 0
 	p.totalCount = 0
 	p.usedCount = 0
 }
 
 // Serialization helpers for bulk OT data
 
-// SerializeBulkCOSenderSetup serializes multiple COSenderSetup structures
-// Format per entry: curveNameLen(2) + curveName + scalar(32) + Ax(32) + Ay(32) + AaInvX(32) + AaInvY(32) = ~162 bytes
+// SenderPublicSetup is what crosses the K→T wire — public point A only.
+// The sender's secret scalar `a` and the derived -aA stay on TEE_K, never
+// in a struct that gets serialized.
+type SenderPublicSetup struct {
+	CurveName string
+	Ax, Ay    *big.Int
+}
+
+// Wire format: curveNameLen(2) + curveName + Ax(32) + Ay(32) = 66 B/entry.
 func SerializeBulkCOSenderSetup(setups []ot.COSenderSetup) []byte {
 	if len(setups) == 0 {
 		return nil
 	}
 
-	// Estimate size: 4 bytes count + ~162 bytes per entry
-	buf := make([]byte, 4, 4+len(setups)*170)
+	buf := make([]byte, 4, 4+len(setups)*70)
 	binary.BigEndian.PutUint32(buf[0:4], uint32(len(setups)))
 
 	for _, setup := range setups {
 		curveNameBytes := []byte(setup.CurveName)
 
-		// Curve name length and name
 		lenBuf := make([]byte, 2)
 		binary.BigEndian.PutUint16(lenBuf, uint16(len(curveNameBytes)))
 		buf = append(buf, lenBuf...)
 		buf = append(buf, curveNameBytes...)
 
-		// Fixed-size big.Int fields (32 bytes each, zero-padded)
-		buf = append(buf, bigIntTo32Bytes(setup.Scalar)...)
 		buf = append(buf, bigIntTo32Bytes(setup.Ax)...)
 		buf = append(buf, bigIntTo32Bytes(setup.Ay)...)
-		buf = append(buf, bigIntTo32Bytes(setup.AaInvX)...)
-		buf = append(buf, bigIntTo32Bytes(setup.AaInvY)...)
 	}
 
 	return buf
 }
 
-// DeserializeBulkCOSenderSetup deserializes multiple COSenderSetup structures
-func DeserializeBulkCOSenderSetup(data []byte) ([]ot.COSenderSetup, error) {
+func DeserializeBulkCOSenderSetup(data []byte) ([]SenderPublicSetup, error) {
 	if len(data) < 4 {
 		return nil, errors.New("data too short for count")
 	}
@@ -319,15 +328,14 @@ func DeserializeBulkCOSenderSetup(data []byte) ([]ot.COSenderSetup, error) {
 	count := binary.BigEndian.Uint32(data[0:4])
 	offset := 4
 
-	// Bounds check: each entry is at least 162 bytes (2 + 0 + 160)
-	// Validate count is reasonable before allocating
-	minBytesPerEntry := 162
+	// Min per entry: 2 (curveNameLen) + 0 (curveName) + 64 (Ax+Ay).
+	minBytesPerEntry := 66
 	maxPossibleEntries := (len(data) - 4) / minBytesPerEntry
 	if int(count) > maxPossibleEntries {
 		return nil, fmt.Errorf("invalid count %d: data can hold at most %d entries", count, maxPossibleEntries)
 	}
 
-	setups := make([]ot.COSenderSetup, count)
+	setups := make([]SenderPublicSetup, count)
 
 	for i := uint32(0); i < count; i++ {
 		if offset+2 > len(data) {
@@ -336,22 +344,19 @@ func DeserializeBulkCOSenderSetup(data []byte) ([]ot.COSenderSetup, error) {
 		curveNameLen := binary.BigEndian.Uint16(data[offset : offset+2])
 		offset += 2
 
-		if offset+int(curveNameLen)+160 > len(data) {
+		if offset+int(curveNameLen)+64 > len(data) {
 			return nil, fmt.Errorf("data too short for entry %d", i)
 		}
 
 		curveName := string(data[offset : offset+int(curveNameLen)])
 		offset += int(curveNameLen)
 
-		setups[i] = ot.COSenderSetup{
+		setups[i] = SenderPublicSetup{
 			CurveName: curveName,
-			Scalar:    new(big.Int).SetBytes(data[offset : offset+32]),
-			Ax:        new(big.Int).SetBytes(data[offset+32 : offset+64]),
-			Ay:        new(big.Int).SetBytes(data[offset+64 : offset+96]),
-			AaInvX:    new(big.Int).SetBytes(data[offset+96 : offset+128]),
-			AaInvY:    new(big.Int).SetBytes(data[offset+128 : offset+160]),
+			Ax:        new(big.Int).SetBytes(data[offset : offset+32]),
+			Ay:        new(big.Int).SetBytes(data[offset+32 : offset+64]),
 		}
-		offset += 160
+		offset += 64
 	}
 
 	return setups, nil

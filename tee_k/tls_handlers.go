@@ -36,10 +36,11 @@ func (t *TEEK) performTLSHandshakeAndHTTP(sessionID string) error {
 	// Create session-specific TLS client
 	wsConn := session.ClientConn.(*shared.WSConnection)
 	tlsConn := &WebSocketConn{
-		wsConn:      wsConn, // Use wrapper for thread-safe writes
+		wsConn:      wsConn,
 		pendingData: make(chan []byte, 10),
-		teek:        t,         // Add TEEK reference for transcript collection
-		sessionID:   sessionID, // Add session ID for per-session transcript collection
+		done:        make(chan struct{}),
+		teek:        t,
+		sessionID:   sessionID,
 	}
 
 	// Configure TLS with shared cached certificate fetcher

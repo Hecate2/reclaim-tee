@@ -69,6 +69,38 @@ func NewTEEKConnectionManager(teet *TEET, logger *shared.Logger) *TEEKConnection
 	}
 }
 
+// readPairAssignment consumes the first envelope on a router-mode control
+// connection and expects it to be TEEKPairAssignment. The decoded pair_id
+// is stored on TEET and the onPairAssigned hook (set by router_boot) is
+// invoked synchronously — that hook handles router registration and
+// kicks off the heartbeat goroutine.
+func (cm *TEEKConnectionManager) readPairAssignment(conn *websocket.Conn) error {
+	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	_, msgBytes, err := conn.ReadMessage()
+	conn.SetReadDeadline(time.Time{})
+	if err != nil {
+		return fmt.Errorf("read first envelope: %w", err)
+	}
+	var env teeproto.Envelope
+	if err := proto.Unmarshal(msgBytes, &env); err != nil {
+		return fmt.Errorf("parse first envelope: %w", err)
+	}
+	pa, ok := env.Payload.(*teeproto.Envelope_TeekPairAssignment)
+	if !ok {
+		return fmt.Errorf("expected TEEKPairAssignment first, got %T", env.Payload)
+	}
+	pairID := pa.TeekPairAssignment.GetPairId()
+	if pairID == "" {
+		return fmt.Errorf("TEEKPairAssignment carried empty pair_id")
+	}
+	cm.teet.pairID.Store(&pairID)
+	cm.logger.Info("Received pair_id from TEE_K", zap.String("pair_id", pairID))
+	if cm.teet.onPairAssigned != nil {
+		cm.teet.onPairAssigned(pairID)
+	}
+	return nil
+}
+
 // HandleControlConnection handles a new control connection from TEE_K
 // This performs attestation and then handles control messages
 func (cm *TEEKConnectionManager) HandleControlConnection(conn *websocket.Conn) error {
@@ -76,6 +108,19 @@ func (cm *TEEKConnectionManager) HandleControlConnection(conn *websocket.Conn) e
 
 	// Set read limit
 	conn.SetReadLimit(MaxWebSocketMessageSize)
+
+	// Router mode: the very first envelope on the wire is TEEKPairAssignment,
+	// announcing the pair_id TEE_K generated. Consume it here, store the
+	// pair_id, fire the registration hook, then fall through to the existing
+	// TEEKAttestation read. Detection uses `router != nil` (not ratls) so
+	// local-dev router mode — which has no RA-TLS — still exchanges pair_id.
+	// Standalone mode (no router) skips this and reads TEEKAttestation as
+	// the first envelope.
+	if cm.teet.router != nil {
+		if err := cm.readPairAssignment(conn); err != nil {
+			return fmt.Errorf("pair assignment: %w", err)
+		}
+	}
 
 	// Wait for attestation request (first message)
 	conn.SetReadDeadline(time.Now().Add(10 * time.Second))
@@ -96,8 +141,19 @@ func (cm *TEEKConnectionManager) HandleControlConnection(conn *websocket.Conn) e
 		return fmt.Errorf("expected attestation as first message, got %T", env.Payload)
 	}
 
+	// Pull TEE_K's client cert off the underlying TLS connection so the
+	// attestation can be cert-hash-bound. Nil in standalone mode (no TLS),
+	// which verifyTEEKAttestation handles separately.
+	var peerCert []byte
+	if cm.teet.ratls != nil {
+		peerCert, err = shared.ExtractTLSCertFromWebSocket(conn)
+		if err != nil {
+			return fmt.Errorf("extract TEE_K peer cert: %v", err)
+		}
+	}
+
 	// Verify TEE_K attestation
-	if err := cm.teet.verifyTEEKAttestation(req.TeekAttestation); err != nil {
+	if err := cm.teet.verifyTEEKAttestation(req.TeekAttestation, peerCert); err != nil {
 		return fmt.Errorf("attestation verification failed: %v", err)
 	}
 
@@ -124,7 +180,7 @@ func (cm *TEEKConnectionManager) HandleControlConnection(conn *websocket.Conn) e
 		return fmt.Errorf("failed to marshal attestation response: %v", err)
 	}
 
-	if err := conn.WriteMessage(websocket.BinaryMessage, data); err != nil {
+	if err := shared.WriteWSBinary(conn, data); err != nil {
 		return fmt.Errorf("failed to send attestation response: %v", err)
 	}
 
@@ -143,6 +199,7 @@ func (cm *TEEKConnectionManager) HandleControlConnection(conn *websocket.Conn) e
 
 	// Update TEET's connection state
 	cm.teet.setTEEKConnected(true)
+	cm.teet.controlHealthy.Store(true)
 
 	// Bidirectional ping/pong heartbeat. Sets the read deadline that
 	// handleControlMessages relies on, so a dead peer is detected even when no
@@ -171,12 +228,37 @@ func (cm *TEEKConnectionManager) HandleControlConnection(conn *websocket.Conn) e
 
 	cm.mu.Lock()
 	cm.controlConn = nil
+	// Snapshot + reset sessionConns under the lock, then close them
+	// outside the lock. Orphaned per-session WSes from before the control
+	// disconnect would otherwise hold MaxConcurrentSessions slots until
+	// their 60s read deadline fires, surfacing as "Max concurrent
+	// sessions reached" rejections during recovery.
+	orphans := make([]*SessionTEEKConnection, 0, len(cm.sessionConns))
+	for _, c := range cm.sessionConns {
+		orphans = append(orphans, c)
+	}
+	cm.sessionConns = make(map[string]*SessionTEEKConnection)
 	cm.mu.Unlock()
 
-	cm.teet.setTEEKConnected(false)
+	if len(orphans) > 0 {
+		cm.logger.Info("Purging orphaned per-session connections after control disconnect",
+			zap.Int("count", len(orphans)))
+	}
+	for _, c := range orphans {
+		c.mu.Lock()
+		if !c.closed {
+			c.closed = true
+			c.conn.Close()
+		}
+		c.mu.Unlock()
+	}
 
-	// Clear OT pool on disconnect
-	cm.teet.clearOTReceiverPool()
+	cm.teet.setTEEKConnected(false)
+	cm.teet.controlHealthy.Store(false)
+
+	// Retain a ready pool so TEE_K can resume it on reconnect; clears only if
+	// it was mid-precompute (nothing to resume).
+	cm.teet.suspendOTReceiverPoolForReconnect()
 
 	return nil
 }
@@ -318,6 +400,12 @@ func (cm *TEEKConnectionManager) handleControlMessages(conn *shared.WSConnection
 				cm.logger.Error("Failed to handle OT precompute complete", zap.Error(err))
 			}
 
+		case *teeproto.Envelope_OtResumeRequest:
+			// TEE_K asks to resume the retained pool instead of re-precomputing.
+			if err := cm.teet.handleOTResumeRequest(conn, p.OtResumeRequest); err != nil {
+				cm.logger.Error("Failed to handle OT resume request", zap.Error(err))
+			}
+
 		case *teeproto.Envelope_Error:
 			// Error from TEE_K - cleanup the affected session
 			cm.logger.WithSession(sessionID).Error("Received error from TEE_K (control)",
@@ -412,6 +500,21 @@ func (cm *TEEKConnectionManager) HandleSessionConnection(conn *websocket.Conn) e
 	cm.mu.Lock()
 	cm.sessionConns[sessionID] = sessionConn
 	cm.mu.Unlock()
+	// Defer the cleanup so it runs even if the handler below panics or
+	// any future change adds an early return between here and the
+	// existing teardown path. Without this, a goroutine death between
+	// map-insert and map-delete would leak the slot forever.
+	defer func() {
+		cm.mu.Lock()
+		delete(cm.sessionConns, sessionID)
+		cm.mu.Unlock()
+		sessionConn.mu.Lock()
+		if !sessionConn.closed {
+			sessionConn.closed = true
+			sessionConn.conn.Close()
+		}
+		sessionConn.mu.Unlock()
+	}()
 
 	// Associate connection with session for routing (use mutex to prevent race)
 	session, _ := cm.teet.sessionManager.GetSession(sessionID)
@@ -426,22 +529,9 @@ func (cm *TEEKConnectionManager) HandleSessionConnection(conn *websocket.Conn) e
 
 	cm.logger.WithSession(sessionID).Debug("Per-session connection established")
 
-	// Handle session messages in a loop
+	// Handle session messages in a loop. Cleanup runs via the defer
+	// above when this returns (or panics).
 	cm.handleSessionMessages(sessionID, sessionConn)
-
-	// Cleanup on disconnect - ZERO TOLERANCE for resource leaks
-	cm.mu.Lock()
-	delete(cm.sessionConns, sessionID)
-	cm.mu.Unlock()
-
-	// Explicitly close connection to ensure no leak
-	sessionConn.mu.Lock()
-	if !sessionConn.closed {
-		sessionConn.closed = true
-		sessionConn.conn.Close()
-	}
-	sessionConn.mu.Unlock()
-
 	return nil
 }
 
@@ -609,7 +699,7 @@ func (cm *TEEKConnectionManager) sendSessionConnectionAck(conn *websocket.Conn, 
 		return
 	}
 
-	if err := conn.WriteMessage(websocket.BinaryMessage, data); err != nil {
+	if err := shared.WriteWSBinary(conn, data); err != nil {
 		cm.logger.Error("Failed to send SessionConnectionAck", zap.Error(err))
 	}
 }
