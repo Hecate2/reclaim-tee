@@ -16,7 +16,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.3
 	github.com/joho/godotenv v1.5.1
-	github.com/markkurossi/mpc v0.0.0-20260325113446-c911bbd029d1
+	github.com/markkurossi/mpc v0.0.0-20260616034910-9c484ce016a7
 	github.com/mr-tron/base58 v1.3.0
 	github.com/reclaimprotocol/jsonpathplus-go/v2 v2.0.1
 	github.com/reclaimprotocol/xpath-go v1.4.1
@@ -82,6 +82,5 @@ require (
 
 replace (
 	github.com/consensys/gnark-crypto v0.20.1 => github.com/consensys/gnark-crypto v0.19.2
-	github.com/markkurossi/mpc => github.com/Scratch-net/mpc v0.0.0-20260611121342-f5e7e6d349b3
 	github.com/reclaimprotocol/zk-symmetric-crypto/gnark v0.0.0-20260407154851-d134fefd8eff => github.com/reclaimprotocol/zk-symmetric-crypto/gnark v0.0.0-20251205140100-6fd752973b8f
 )
