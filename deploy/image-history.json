@@ -108,5 +108,27 @@
     "updateTime": "2026-06-15T17:02:40+05:00",
     "sourceCommit": "bc9bf0278376fbfa19f77caf36a52e683e28984d",
     "sourceDateEpoch": 1781524960
+  },
+  {
+    "package": "asia-south2-docker.pkg.dev/new-reclaim-architecture/tees-v2/tee-k",
+    "tags": [
+      "93fd780"
+    ],
+    "version": "sha256:683b0bbd29c0bcd7e42ae8304613af077e379eb491963b76f692eaa32ef67b60",
+    "createTime": "2026-06-16T18:42:04+05:00",
+    "updateTime": "2026-06-16T18:42:04+05:00",
+    "sourceCommit": "93fd78080ff9fa6977774b793d881a162d285fd2",
+    "sourceDateEpoch": 1781617324
+  },
+  {
+    "package": "asia-south2-docker.pkg.dev/new-reclaim-architecture/tees-v2/tee-t",
+    "tags": [
+      "93fd780"
+    ],
+    "version": "sha256:fac86e1b6ec3221c00f628b960fe03e26c10d90ef9a1839e0b8b81818d00f04c",
+    "createTime": "2026-06-16T18:42:04+05:00",
+    "updateTime": "2026-06-16T18:42:04+05:00",
+    "sourceCommit": "93fd78080ff9fa6977774b793d881a162d285fd2",
+    "sourceDateEpoch": 1781617324
   }
 ]
