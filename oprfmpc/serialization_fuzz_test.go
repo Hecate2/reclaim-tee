@@ -343,18 +343,23 @@ func TestDeserialize_Truncated(t *testing.T) {
 
 // TestSerializationRoundtrip_OTReceiverData verifies roundtrip for receiver data
 func TestSerializationRoundtrip_OTReceiverData(t *testing.T) {
+	// Compressed-point encoding recovers Y via the curve equation, so the
+	// points must actually be on P-256. Generate real points (k*G).
+	curve := elliptic.P256()
+	realPoint := func(k int64) ot.ECPoint {
+		x, y := curve.ScalarBaseMult(big.NewInt(k + 1).Bytes())
+		return ot.ECPoint{X: x, Y: y}
+	}
 	points := make([]ot.ECPoint, 100)
 	for i := range points {
-		points[i] = ot.ECPoint{
-			X: big.NewInt(int64(i * 2)),
-			Y: big.NewInt(int64(i*2 + 1)),
-		}
+		points[i] = realPoint(int64(i))
 	}
+	a := realPoint(424242)
 
 	original := &OTReceiverData{
 		CurveName: "P-256",
-		Ax:        big.NewInt(12345),
-		Ay:        big.NewInt(67890),
+		Ax:        a.X,
+		Ay:        a.Y,
 		Points:    points,
 	}
 

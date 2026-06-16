@@ -10,8 +10,33 @@ import (
 	"math/big"
 	"sync"
 
+	"filippo.io/nistec"
 	"github.com/markkurossi/mpc/ot"
 )
+
+// compressedPointLen is the SEC1 compressed P-256 point size: 1 parity byte
+// (0x02 even / 0x03 odd Y) + 32-byte big-endian X. Half the raw X||Y size;
+// Y is recovered on decode from the curve equation.
+const compressedPointLen = 33
+
+// compressPoint encodes (x, y) as a 33-byte SEC1 compressed P-256 point.
+func compressPoint(x, y *big.Int) []byte {
+	out := make([]byte, compressedPointLen)
+	out[0] = 0x02 | byte(y.Bit(0))
+	x.FillBytes(out[1:])
+	return out
+}
+
+// decompressPoint recovers (x, y) from a 33-byte compressed P-256 point.
+// nistec.SetBytes does the modular sqrt and rejects off-curve encodings.
+func decompressPoint(b []byte) (x, y *big.Int, err error) {
+	p, err := nistec.NewP256Point().SetBytes(b)
+	if err != nil {
+		return nil, nil, fmt.Errorf("decompress P-256 point: %w", err)
+	}
+	u := p.Bytes() // 0x04 || X(32) || Y(32)
+	return new(big.Int).SetBytes(u[1:33]), new(big.Int).SetBytes(u[33:65]), nil
+}
 
 // OT Pool configuration constants
 const (
@@ -296,13 +321,13 @@ type SenderPublicSetup struct {
 	Ax, Ay    *big.Int
 }
 
-// Wire format: curveNameLen(2) + curveName + Ax(32) + Ay(32) = 66 B/entry.
+// Wire format: curveNameLen(2) + curveName + A(33, compressed) = ~35 B/entry.
 func SerializeBulkCOSenderSetup(setups []ot.COSenderSetup) []byte {
 	if len(setups) == 0 {
 		return nil
 	}
 
-	buf := make([]byte, 4, 4+len(setups)*70)
+	buf := make([]byte, 4, 4+len(setups)*40)
 	binary.BigEndian.PutUint32(buf[0:4], uint32(len(setups)))
 
 	for _, setup := range setups {
@@ -313,8 +338,7 @@ func SerializeBulkCOSenderSetup(setups []ot.COSenderSetup) []byte {
 		buf = append(buf, lenBuf...)
 		buf = append(buf, curveNameBytes...)
 
-		buf = append(buf, bigIntTo32Bytes(setup.Ax)...)
-		buf = append(buf, bigIntTo32Bytes(setup.Ay)...)
+		buf = append(buf, compressPoint(setup.Ax, setup.Ay)...)
 	}
 
 	return buf
@@ -328,8 +352,8 @@ func DeserializeBulkCOSenderSetup(data []byte) ([]SenderPublicSetup, error) {
 	count := binary.BigEndian.Uint32(data[0:4])
 	offset := 4
 
-	// Min per entry: 2 (curveNameLen) + 0 (curveName) + 64 (Ax+Ay).
-	minBytesPerEntry := 66
+	// Min per entry: 2 (curveNameLen) + 0 (curveName) + 33 (compressed A).
+	minBytesPerEntry := 2 + compressedPointLen
 	maxPossibleEntries := (len(data) - 4) / minBytesPerEntry
 	if int(count) > maxPossibleEntries {
 		return nil, fmt.Errorf("invalid count %d: data can hold at most %d entries", count, maxPossibleEntries)
@@ -344,19 +368,19 @@ func DeserializeBulkCOSenderSetup(data []byte) ([]SenderPublicSetup, error) {
 		curveNameLen := binary.BigEndian.Uint16(data[offset : offset+2])
 		offset += 2
 
-		if offset+int(curveNameLen)+64 > len(data) {
+		if offset+int(curveNameLen)+compressedPointLen > len(data) {
 			return nil, fmt.Errorf("data too short for entry %d", i)
 		}
 
 		curveName := string(data[offset : offset+int(curveNameLen)])
 		offset += int(curveNameLen)
 
-		setups[i] = SenderPublicSetup{
-			CurveName: curveName,
-			Ax:        new(big.Int).SetBytes(data[offset : offset+32]),
-			Ay:        new(big.Int).SetBytes(data[offset+32 : offset+64]),
+		ax, ay, err := decompressPoint(data[offset : offset+compressedPointLen])
+		if err != nil {
+			return nil, fmt.Errorf("entry %d: %w", i, err)
 		}
-		offset += 64
+		setups[i] = SenderPublicSetup{CurveName: curveName, Ax: ax, Ay: ay}
+		offset += compressedPointLen
 	}
 
 	return setups, nil
@@ -371,11 +395,12 @@ type OTReceiverData struct {
 	Points    []ot.ECPoint // Choice points B[i]
 }
 
-// SerializeBulkOTReceiverData serializes receiver data for transmission
-// Format: curveNameLen(2) + curveName + Ax(32) + Ay(32) + count(4) + points(64 each)
+// SerializeBulkOTReceiverData serializes receiver data for transmission.
+// Format: curveNameLen(2) + curveName + A(33) + count(4) + points(33 each), all
+// points SEC1-compressed.
 func SerializeBulkOTReceiverData(data *OTReceiverData) []byte {
 	curveNameBytes := []byte(data.CurveName)
-	buf := make([]byte, 0, 2+len(curveNameBytes)+64+4+len(data.Points)*64)
+	buf := make([]byte, 0, 2+len(curveNameBytes)+compressedPointLen+4+len(data.Points)*compressedPointLen)
 
 	// Curve name
 	lenBuf := make([]byte, 2)
@@ -383,19 +408,17 @@ func SerializeBulkOTReceiverData(data *OTReceiverData) []byte {
 	buf = append(buf, lenBuf...)
 	buf = append(buf, curveNameBytes...)
 
-	// A point
-	buf = append(buf, bigIntTo32Bytes(data.Ax)...)
-	buf = append(buf, bigIntTo32Bytes(data.Ay)...)
+	// A point (compressed)
+	buf = append(buf, compressPoint(data.Ax, data.Ay)...)
 
 	// Points count
 	countBuf := make([]byte, 4)
 	binary.BigEndian.PutUint32(countBuf, uint32(len(data.Points)))
 	buf = append(buf, countBuf...)
 
-	// Points
+	// Points (compressed)
 	for _, pt := range data.Points {
-		buf = append(buf, bigIntTo32Bytes(pt.X)...)
-		buf = append(buf, bigIntTo32Bytes(pt.Y)...)
+		buf = append(buf, compressPoint(pt.X, pt.Y)...)
 	}
 
 	return buf
@@ -413,39 +436,40 @@ func DeserializeBulkOTReceiverData(data []byte) (*OTReceiverData, error) {
 	curveNameLen := binary.BigEndian.Uint16(data[offset : offset+2])
 	offset += 2
 
-	if offset+int(curveNameLen)+68 > len(data) {
+	// header after curve name = A(33) + count(4).
+	if offset+int(curveNameLen)+compressedPointLen+4 > len(data) {
 		return nil, errors.New("data too short for header")
 	}
 
 	curveName := string(data[offset : offset+int(curveNameLen)])
 	offset += int(curveNameLen)
 
-	// A point
-	ax := new(big.Int).SetBytes(data[offset : offset+32])
-	ay := new(big.Int).SetBytes(data[offset+32 : offset+64])
-	offset += 64
+	// A point (compressed)
+	ax, ay, err := decompressPoint(data[offset : offset+compressedPointLen])
+	if err != nil {
+		return nil, fmt.Errorf("A point: %w", err)
+	}
+	offset += compressedPointLen
 
 	// Points count
-	if offset+4 > len(data) {
-		return nil, errors.New("data too short for points count")
-	}
 	pointCount := binary.BigEndian.Uint32(data[offset : offset+4])
 	offset += 4
 
-	// Bounds check: prevent integer overflow and memory exhaustion
-	// Each point is 64 bytes, max possible points = (len(data) - offset) / 64
-	maxPossiblePoints := (len(data) - offset) / 64
+	// Bounds check: prevent integer overflow and memory exhaustion.
+	// Each compressed point is 33 bytes.
+	maxPossiblePoints := (len(data) - offset) / compressedPointLen
 	if int(pointCount) > maxPossiblePoints {
 		return nil, fmt.Errorf("invalid point count %d: data can hold at most %d points", pointCount, maxPossiblePoints)
 	}
 
 	points := make([]ot.ECPoint, pointCount)
 	for i := uint32(0); i < pointCount; i++ {
-		points[i] = ot.ECPoint{
-			X: new(big.Int).SetBytes(data[offset : offset+32]),
-			Y: new(big.Int).SetBytes(data[offset+32 : offset+64]),
+		px, py, err := decompressPoint(data[offset : offset+compressedPointLen])
+		if err != nil {
+			return nil, fmt.Errorf("point %d: %w", i, err)
 		}
-		offset += 64
+		points[i] = ot.ECPoint{X: px, Y: py}
+		offset += compressedPointLen
 	}
 
 	return &OTReceiverData{
