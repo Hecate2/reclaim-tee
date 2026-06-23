@@ -81,6 +81,22 @@ func (s *SecretStore) LoadOrCreateOPRFShare(ctx context.Context, role, deploymen
 	return share, nil
 }
 
+// LoadExistingOPRFShare loads an existing share and never creates one — used
+// by the export tool so a wrong (role, deploymentKey) errors out instead of
+// silently minting a new prod-named secret.
+func (s *SecretStore) LoadExistingOPRFShare(ctx context.Context, role, deploymentKey string) ([]byte, error) {
+	secretID := oprfSecretID(role, deploymentKey)
+	share, err := s.load(ctx, secretID)
+	if err != nil {
+		return nil, err
+	}
+	if len(share) != oprfKeyShareSize {
+		return nil, fmt.Errorf("oprf share %q has wrong length: got %d, want %d",
+			secretID, len(share), oprfKeyShareSize)
+	}
+	return share, nil
+}
+
 func (s *SecretStore) load(ctx context.Context, secretID string) ([]byte, error) {
 	resp, err := s.sm.AccessSecretVersion(ctx, &secretspb.AccessSecretVersionRequest{
 		Name: fmt.Sprintf("projects/%s/secrets/%s/versions/latest", s.projectID, secretID),

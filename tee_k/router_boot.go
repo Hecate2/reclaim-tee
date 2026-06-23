@@ -28,7 +28,7 @@ func startRouterMode(parent context.Context, config *TEEKConfig, logger *shared.
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
 
-	devMode := !shared.IsEnclaveMode()
+	devMode := !shared.IsProductionTEE()
 	logger.Info("=== TEE_K Router Mode ===",
 		zap.String("router_url", config.RouterURL),
 		zap.String("self_addr", config.SelfAddr),
@@ -73,9 +73,9 @@ func startRouterMode(parent context.Context, config *TEEKConfig, logger *shared.
 	}
 
 	tokenSource := shared.MetadataServerTokenSource
-	if devMode {
-		// Local dev: router-standalone skips SA token validation, and the
-		// laptop has no metadata server to mint one anyway.
+	if devMode || shared.IsSEVSNPMode() {
+		// Local dev has no metadata server; SEV-SNP TEEs hold no GCP SA and
+		// the router skips the SA token for them. Either way, send no token.
 		tokenSource = shared.NoopTokenSource
 	}
 	router := shared.NewRouterClient(config.RouterURL, tokenSource)
@@ -84,11 +84,11 @@ func startRouterMode(parent context.Context, config *TEEKConfig, logger *shared.
 	teek.sessionManager.StartCleanupRoutine()
 
 	register := func(ctx context.Context) error {
-		var imageDigest string
-		var attestationJWT []byte
+		var imageDigest, attestationType string
+		var attestation []byte
 		if teek.ratls != nil {
 			var err error
-			imageDigest, attestationJWT, err = shared.ExtractIdentityFromRATLS(teek.ratls, logger)
+			imageDigest, attestationType, attestation, err = shared.ExtractIdentityFromRATLS(teek.ratls, logger)
 			if err != nil {
 				return fmt.Errorf("extract identity: %w", err)
 			}
@@ -97,12 +97,13 @@ func startRouterMode(parent context.Context, config *TEEKConfig, logger *shared.
 			imageDigest = "local-dev"
 		}
 		regReq := shared.RegisterRequest{
-			PairID:         teek.pairID,
-			Role:           "K",
-			SelfAddr:       config.SelfAddr,
-			PeerAddrClaim:  config.PeerAddr,
-			ImageDigest:    imageDigest,
-			AttestationJWT: string(attestationJWT),
+			PairID:          teek.pairID,
+			Role:            "K",
+			SelfAddr:        config.SelfAddr,
+			PeerAddrClaim:   config.PeerAddr,
+			ImageDigest:     imageDigest,
+			AttestationType: attestationType,
+			AttestationJWT:  string(attestation),
 		}
 		// Bind the body to the attestation by signing it with the RA-TLS key.
 		if teek.ratls != nil {
@@ -137,7 +138,7 @@ func startRouterMode(parent context.Context, config *TEEKConfig, logger *shared.
 		// Regenerate the per-session cached attestation on every cert
 		// rotation so its cert_hash nonce stays in lockstep with the
 		// live cert. Single ticker drives both — no drift window.
-		go shared.RunRATLSRefresh(ctx, teek.ratls, teek.refreshAttestation, logger)
+		go shared.RunRATLSRefresh(ctx, teek.ratls, teek.refreshAttestation, teek.nextRATLSRefresh, logger)
 	}
 	go shared.RunHeartbeats(ctx, teek, "K", logger, register, shared.RouterHeartbeatInterval)
 
@@ -198,7 +199,10 @@ func validateRouterConfig(c *TEEKConfig) error {
 		{"JWT_PUBLIC_KEY", c.JWTPublicKey},
 		{"EXPECTED_JWT_ISSUER", c.ExpectedJWTIssuer},
 	}
-	if shared.IsEnclaveMode() {
+	if shared.IsProductionTEE() {
+		// An attested TEE (SEV-SNP or enclave) must use the real KMS-backed OPRF
+		// share, never the world-known static dev share. No test exemption: the
+		// static path is local-dev-only (see initializeOPRFKeyShare).
 		required = append(required,
 			struct{ name, value string }{"EXPECTED_PEER_IMAGE_DIGEST", c.ExpectedPeerImageDigest},
 			struct{ name, value string }{"KMS_ENCLAVE_DOMAIN_KEY", c.KMSEnclaveDomainKey},

@@ -45,6 +45,11 @@ type Config struct {
 	// instead of the in-memory one. Required for multi-replica deployments.
 	FirestoreProjectID string
 
+	// FirestoreDatabaseID selects a named Firestore database; empty means
+	// the "(default)" database. Lets an isolated test router share a project
+	// without touching the prod database's pairs/digests.
+	FirestoreDatabaseID string
+
 	// KMSKeyName, when set, selects the KMS-backed Signer instead of the
 	// in-process LocalSigner. Format:
 	//
@@ -133,21 +138,22 @@ func Load() (*Config, error) {
 	}
 
 	cfg := &Config{
-		Port:               cmp.Or(os.Getenv("PORT"), "8080"),
-		JWTIssuer:          cmp.Or(os.Getenv("JWT_ISSUER"), "router.reclaimprotocol.org"),
-		JWTExpiry:          jwtExpiry,
-		SATokenAudience:    saAudience,
-		ApprovedDigests:    digests,
-		ApprovedSAPattern:  saPattern,
-		HeartbeatStaleness: heartbeatStaleness,
-		ControlUnhealthy:   controlUnhealthy,
-		OTNotReady:         otNotReady,
-		AdminToken:         os.Getenv("ADMIN_TOKEN"),
-		FirestoreProjectID: os.Getenv("FIRESTORE_PROJECT_ID"),
-		KMSKeyName:         os.Getenv("KMS_KEY_NAME"),
-		TEEKSAEmail:        os.Getenv("TEE_K_SA_EMAIL"),
-		TEETSAEmail:        os.Getenv("TEE_T_SA_EMAIL"),
-		Standalone:         standalone,
+		Port:                cmp.Or(os.Getenv("PORT"), "8080"),
+		JWTIssuer:           cmp.Or(os.Getenv("JWT_ISSUER"), "router.reclaimprotocol.org"),
+		JWTExpiry:           jwtExpiry,
+		SATokenAudience:     saAudience,
+		ApprovedDigests:     digests,
+		ApprovedSAPattern:   saPattern,
+		HeartbeatStaleness:  heartbeatStaleness,
+		ControlUnhealthy:    controlUnhealthy,
+		OTNotReady:          otNotReady,
+		AdminToken:          os.Getenv("ADMIN_TOKEN"),
+		FirestoreProjectID:  os.Getenv("FIRESTORE_PROJECT_ID"),
+		FirestoreDatabaseID: os.Getenv("FIRESTORE_DATABASE_ID"),
+		KMSKeyName:          os.Getenv("KMS_KEY_NAME"),
+		TEEKSAEmail:         os.Getenv("TEE_K_SA_EMAIL"),
+		TEETSAEmail:         os.Getenv("TEE_T_SA_EMAIL"),
+		Standalone:          standalone,
 	}
 	if !standalone {
 		if cfg.TEEKSAEmail == "" || cfg.TEETSAEmail == "" {
@@ -161,6 +167,7 @@ func Load() (*Config, error) {
 		// shell, so a stray export can't accidentally pull real GCP
 		// resources into a local demo run.
 		cfg.FirestoreProjectID = ""
+		cfg.FirestoreDatabaseID = ""
 		cfg.KMSKeyName = ""
 	}
 	return cfg, nil

@@ -23,7 +23,16 @@ type AllocationResponse struct {
 // client nonce and returns the pair allocation + JWT. routerURL is the
 // base URL (e.g. http://localhost:9090 or https://tee.reclaimprotocol.org).
 func AllocatePair(routerURL, clientNonce string) (*AllocationResponse, error) {
-	body, err := json.Marshal(map[string]string{"client_nonce": clientNonce})
+	// Announce the attestation types this client can verify so the router never
+	// allocates a pair we can't check. Wire values mirror shared.AttestationType*
+	// ("cs","sev-snp"); the client package cannot import shared.
+	body, err := json.Marshal(struct {
+		ClientNonce string   `json:"client_nonce"`
+		Accepts     []string `json:"accepts"`
+	}{
+		ClientNonce: clientNonce,
+		Accepts:     []string{"cs", "sev-snp"},
+	})
 	if err != nil {
 		return nil, fmt.Errorf("marshal request: %w", err)
 	}

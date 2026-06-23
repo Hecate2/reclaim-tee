@@ -3,8 +3,8 @@
 package shared
 
 import (
-	"crypto/sha256"
 	"crypto/x509"
+	"encoding/asn1"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -37,7 +37,7 @@ type RATLSVerifyOptions struct {
 //
 // Standalone certs (no attestation extension) are rejected. Local-dev
 // flows must avoid this verifier.
-func validateRATLSCertStructure(rawCerts [][]byte, peerRole string, logger *Logger) (imageDigest string, err error) {
+func validateRATLSCertStructure(rawCerts [][]byte, peerRole string, logger *Logger) (identity string, err error) {
 	if len(rawCerts) == 0 {
 		return "", errors.New("ratls: no peer certificate")
 	}
@@ -46,11 +46,24 @@ func validateRATLSCertStructure(rawCerts [][]byte, peerRole string, logger *Logg
 		return "", fmt.Errorf("ratls: parse peer cert: %w", err)
 	}
 
-	attestation, err := ExtractAttestationFromCert(leaf)
+	spkiDER, err := x509.MarshalPKIXPublicKey(leaf.PublicKey)
 	if err != nil {
-		return "", fmt.Errorf("ratls: %w", err)
+		return "", fmt.Errorf("ratls: marshal peer SPKI: %w", err)
 	}
+	actualHash := spkiSha256(spkiDER)
 
+	if snp := findExtension(leaf, AttestationOIDSEVSNP); snp != nil {
+		return validateSEVSNP(snp, spkiDER)
+	}
+	if jwt := findExtension(leaf, AttestationOID); jwt != nil {
+		return validateGCPCS(jwt, peerRole, actualHash, logger)
+	}
+	return "", errors.New("ratls: attestation extension not present on certificate")
+}
+
+// validateGCPCS verifies a Confidential Space attestation JWT, binds the SPKI
+// nonce to the cert's actual key, and returns the container image_digest.
+func validateGCPCS(attestation []byte, peerRole string, actualHash [32]byte, logger *Logger) (string, error) {
 	attestor, err := NewGoogleAttestor()
 	if err != nil {
 		return "", fmt.Errorf("ratls: build attestor: %w", err)
@@ -59,18 +72,12 @@ func validateRATLSCertStructure(rawCerts [][]byte, peerRole string, logger *Logg
 		return "", fmt.Errorf("ratls: attestation invalid: %w", err)
 	}
 
-	imageDigest, err = ExtractImageDigestFromGCPAttestation(attestation, logger)
+	imageDigest, err := ExtractImageDigestFromGCPAttestation(attestation, logger)
 	if err != nil {
 		return "", fmt.Errorf("ratls: extract image digest: %w", err)
 	}
 
-	spkiDER, err := x509.MarshalPKIXPublicKey(leaf.PublicKey)
-	if err != nil {
-		return "", fmt.Errorf("ratls: marshal peer SPKI: %w", err)
-	}
-	actualHash := sha256.Sum256(spkiDER)
 	actualHex := hex.EncodeToString(actualHash[:])
-
 	expectedHex, err := FindNonceValue(attestation, SPKINoncePrefix(peerRole))
 	if err != nil {
 		return "", fmt.Errorf("ratls: %w", err)
@@ -80,6 +87,31 @@ func validateRATLSCertStructure(rawCerts [][]byte, peerRole string, logger *Logg
 			expectedHex, actualHex)
 	}
 	return imageDigest, nil
+}
+
+// validateSEVSNP verifies a combined vTPM+SEV-SNP attestation: the AK cert chains
+// to the Google vTPM root, the SEV report to the AMD root, report_data binds the
+// AK to this cert's SPKI (anti-splice), and the AK-signed quote pins PCR 8 (app)
+// + PCR 11 (base). Returns the app (payload) identity "snp-app:<hex(appHash)>".
+func validateSEVSNP(attestation, spkiDER []byte) (string, error) {
+	app, _, err := VerifyCombinedSEVSNPAttestation(attestation, spkiDER)
+	if err != nil {
+		return "", fmt.Errorf("ratls: %w", err)
+	}
+	// RA-TLS peer pinning matches the app (payload) identity; the per-cloud base
+	// is pinned at the router/attestor on admission.
+	return app, nil
+}
+
+// findExtension returns the value of the first cert extension matching oid, or
+// nil if absent.
+func findExtension(cert *x509.Certificate, oid asn1.ObjectIdentifier) []byte {
+	for _, ext := range cert.Extensions {
+		if ext.Id.Equal(oid) {
+			return ext.Value
+		}
+	}
+	return nil
 }
 
 // VerifyRATLSPeer returns a tls.Config.VerifyPeerCertificate callback for
@@ -125,6 +157,19 @@ func ExtractAttestationFromCert(cert *x509.Certificate) ([]byte, error) {
 		}
 	}
 	return nil, errors.New("attestation extension not present on certificate")
+}
+
+// FindNonceInList returns the substring after the first nonce that starts with
+// prefix. It is the SEV-SNP analogue of FindNonceValue: the nonces come from a
+// VerifyCombinedSEVSNPNonceAttestation result (already hardware-attested), so no
+// JWT parsing is involved.
+func FindNonceInList(nonces []string, prefix string) (string, error) {
+	for _, n := range nonces {
+		if val, ok := strings.CutPrefix(n, prefix); ok {
+			return val, nil
+		}
+	}
+	return "", fmt.Errorf("nonce with prefix %q not found", prefix)
 }
 
 // FindNonceValue inspects the eat_nonce claim of an attestation JWT for a

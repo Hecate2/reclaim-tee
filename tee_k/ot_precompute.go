@@ -63,10 +63,18 @@ func (t *TEEK) performOTPrecomputation(count int, isInitial bool) error {
 	state := t.otPrecomputeState
 
 	// A fresh pool gets a fresh identity so TEE_T can later distinguish a
-	// resumable pool from a stale one across reconnects.
+	// resumable pool from a stale one across reconnects. Clearing the pool is
+	// essential: an initial precompute can re-run after a reconnect when TEE_T
+	// declines to resume (it rebuilds a fresh receiver pool via
+	// NewOTReceiverState). If we kept the stale entries, the response handler
+	// would APPEND the new ones (pool grows 100k -> 200k) while TEE_T's pool is
+	// a fresh 100k, so garbler/evaluator OT indices no longer correspond and the
+	// online OPRF fails with "unknown label". Reset to match TEE_T exactly.
 	if isInitial {
 		state.mu.Lock()
 		state.epoch = uuid.NewString()
+		state.pool.Clear()
+		state.ready = false
 		state.mu.Unlock()
 	}
 

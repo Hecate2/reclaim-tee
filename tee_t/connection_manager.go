@@ -16,8 +16,10 @@ import (
 // MaxConcurrentSessions is the maximum number of concurrent session connections
 const MaxConcurrentSessions = 100
 
-// SessionReadTimeout is the maximum time to wait for a message on a session connection
-const SessionReadTimeout = 1 * time.Minute
+// SessionReadTimeout bounds idle time on a session connection (client-facing and
+// inter-TEE). Below the client's 60s protocol timeout so the TEE times out FIRST
+// with a clean error instead of blocking until the client tears down (bad record MAC).
+const SessionReadTimeout = 50 * time.Second
 
 // OTReadyWatchdogTimeout bounds how long the control connection may stay up
 // without TEE_K sending OtPrecomputeComplete. If the receiver pool isn't ready

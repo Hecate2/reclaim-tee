@@ -182,3 +182,38 @@ func TestVerifyRATLSPeer_RejectsGarbageAttestation(t *testing.T) {
 		t.Fatal("expected error for cert with garbage attestation bytes")
 	}
 }
+
+// TestVerifyRATLSPeer_DispatchesToSEVSNP proves a cert carrying the SEV-SNP
+// OID is routed to the SEV-SNP verifier (which rejects the garbage bytes),
+// not the CS-JWT path or the "extension not present" branch.
+func TestVerifyRATLSPeer_DispatchesToSEVSNP(t *testing.T) {
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("gen key: %v", err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "tee_k"},
+		NotBefore:    time.Now(),
+		NotAfter:     time.Now().Add(time.Hour),
+		ExtraExtensions: []pkix.Extension{
+			{Id: AttestationOIDSEVSNP, Value: []byte("not a sev-snp report")},
+		},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &priv.PublicKey, priv)
+	if err != nil {
+		t.Fatalf("create cert: %v", err)
+	}
+
+	verify := VerifyRATLSPeer(RATLSVerifyOptions{
+		PeerRole:            "tee_k",
+		ExpectedImageDigest: "snp-measurement:anything",
+	})
+	err = verify([][]byte{der}, nil)
+	if err == nil {
+		t.Fatal("expected error for cert with garbage SEV-SNP bytes")
+	}
+	if strings.Contains(err.Error(), "extension not present") {
+		t.Fatalf("dispatched to wrong branch (extension not found): %v", err)
+	}
+}

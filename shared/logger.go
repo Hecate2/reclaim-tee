@@ -5,6 +5,7 @@ package shared
 import (
 	"context"
 	"os"
+	"strings"
 	"sync"
 
 	"cloud.google.com/go/logging"
@@ -31,11 +32,12 @@ type gcpCore struct {
 	logger      *logging.Logger
 	serviceName string
 	enclaveMode bool
+	level       zapcore.Level
 	fields      []zap.Field
 }
 
 func (c *gcpCore) Enabled(level zapcore.Level) bool {
-	return level >= zapcore.InfoLevel // Only INFO and above in production
+	return level >= c.level
 }
 
 func (c *gcpCore) With(fields []zapcore.Field) zapcore.Core {
@@ -48,6 +50,7 @@ func (c *gcpCore) With(fields []zapcore.Field) zapcore.Core {
 		logger:      c.logger,
 		serviceName: c.serviceName,
 		enclaveMode: c.enclaveMode,
+		level:       c.level,
 		fields:      append(c.fields, zapFields...),
 	}
 }
@@ -127,74 +130,70 @@ func addFieldToPayload(payload map[string]any, field zap.Field) {
 	}
 }
 
-// NewLogger creates a new logger instance based on the configuration
+// logLevelFromEnv parses LOG_LEVEL (debug|info|warn|error); default info.
+func logLevelFromEnv() zapcore.Level {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("LOG_LEVEL"))) {
+	case "debug":
+		return zapcore.DebugLevel
+	case "warn", "warning":
+		return zapcore.WarnLevel
+	case "error":
+		return zapcore.ErrorLevel
+	default: // "info" or unset
+		return zapcore.InfoLevel
+	}
+}
+
+func gcpProjectID() string {
+	if p := os.Getenv("GCP_PROJECT_ID"); p != "" {
+		return p
+	}
+	return os.Getenv("GOOGLE_PROJECT_ID")
+}
+
+// NewLogger creates a new logger instance based on the configuration.
+// Cloud sink selection: AWS SEV-SNP -> CloudWatch; GCP (CS enclave or SEV-SNP)
+// with a project ID -> Cloud Logging; otherwise console JSON. Level is from
+// LOG_LEVEL (default info), so SEV-SNP TEEs no longer default to debug.
 func NewLogger(config LoggerConfig) (*Logger, error) {
 	var zapLogger *zap.Logger
 	var err error
+	level := logLevelFromEnv()
 
-	// GCP cloud logging for enclave mode
-	if config.EnclaveMode {
-		projectID := os.Getenv("GCP_PROJECT_ID")
-		if projectID == "" {
-			projectID = os.Getenv("GOOGLE_PROJECT_ID") // Fallback
+	switch {
+	case IsAWSSEVSNP():
+		// AWS SEV-SNP: ship to CloudWatch Logs via the instance IAM role.
+		if core, cerr := newCloudWatchCore(config.ServiceName, level); cerr == nil && core != nil {
+			zapLogger = zap.New(core)
 		}
-
-		if projectID != "" {
-			// Create GCP Cloud Logging client
-			ctx := context.Background()
-			client, err := logging.NewClient(ctx, projectID)
-			if err != nil {
-				// Fall back to console logging if GCP client fails
-				zapConfig := zap.NewProductionConfig()
-				zapConfig.EncoderConfig.TimeKey = "timestamp"
-				zapConfig.EncoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder
-				zapLogger, _ = zapConfig.Build()
-			} else {
-				// Create GCP logger with service name as log name
-				gcpLogger := client.Logger(config.ServiceName)
-
-				// Create zap core that writes to GCP
-				core := &gcpCore{
-					logger:      gcpLogger,
+	default:
+		// GCP Cloud Logging for CS enclaves AND SEV-SNP-on-GCP, when a project
+		// ID is set (VM needs an SA with roles/logging.logWriter + cloud scope).
+		if pid := gcpProjectID(); pid != "" && (config.EnclaveMode || IsSEVSNPMode()) {
+			if client, cerr := logging.NewClient(context.Background(), pid); cerr == nil {
+				zapLogger = zap.New(&gcpCore{
+					logger:      client.Logger(config.ServiceName),
 					serviceName: config.ServiceName,
 					enclaveMode: config.EnclaveMode,
-				}
-
-				zapLogger = zap.New(core)
+					level:       level,
+				})
 			}
-		} else {
-			// No project ID, fall back to console
-			zapConfig := zap.NewProductionConfig()
-			zapConfig.EncoderConfig.TimeKey = "timestamp"
-			zapConfig.EncoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder
-			zapLogger, err = zapConfig.Build()
 		}
-	} else if config.EnclaveMode {
-		zapConfig := zap.NewProductionConfig()
-		// Use human-readable timestamp format
-		zapConfig.EncoderConfig.TimeKey = "timestamp"
-		zapConfig.EncoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder
-		zapLogger, err = zapConfig.Build()
-	} else if config.Development {
-		// Development mode: console logging with debug level and human-readable timestamps
-		zapConfig := zap.NewDevelopmentConfig()
-		zapConfig.Level = zap.NewAtomicLevelAt(zap.DebugLevel)
-		// Use human-readable timestamp format
-		zapConfig.EncoderConfig.TimeKey = "timestamp"
-		zapConfig.EncoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder
-		zapLogger, err = zapConfig.Build()
-	} else {
-		// Standalone production mode: structured JSON logging with human-readable timestamps
-		zapConfig := zap.NewProductionConfig()
-		zapConfig.Level = zap.NewAtomicLevelAt(zap.DebugLevel)
-		// Use human-readable timestamp format
-		zapConfig.EncoderConfig.TimeKey = "timestamp"
-		zapConfig.EncoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder
-		zapLogger, err = zapConfig.Build()
 	}
 
-	if err != nil {
-		return nil, err
+	// Console fallback (also the default off-cloud / standalone path).
+	if zapLogger == nil {
+		zapConfig := zap.NewProductionConfig()
+		if config.Development {
+			zapConfig = zap.NewDevelopmentConfig()
+		}
+		zapConfig.Level = zap.NewAtomicLevelAt(level)
+		zapConfig.EncoderConfig.TimeKey = "timestamp"
+		zapConfig.EncoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder
+		zapLogger, err = zapConfig.Build()
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	// Add service-specific fields

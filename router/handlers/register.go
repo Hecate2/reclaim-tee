@@ -5,7 +5,6 @@ import (
 	"crypto/ecdsa"
 	"crypto/sha256"
 	"crypto/x509"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +12,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/reclaimprotocol/reclaim-tee/router/auth"
 	"github.com/reclaimprotocol/reclaim-tee/router/store"
 	"github.com/reclaimprotocol/reclaim-tee/shared"
 
@@ -25,10 +25,11 @@ type registerRequest struct {
 	Role           string `json:"role"`
 	SelfAddr       string `json:"self_addr"`
 	PeerAddrClaim  string `json:"peer_addr_claim"`
-	ImageDigest    string `json:"image_digest"`
-	AttestationJWT string `json:"attestation_jwt"`
-	SPKIDer        []byte `json:"spki_der,omitempty"`
-	BodySignature  []byte `json:"body_signature,omitempty"`
+	ImageDigest     string `json:"image_digest"`
+	AttestationType string `json:"attestation_type,omitempty"`
+	AttestationJWT  string `json:"attestation_jwt"`
+	SPKIDer         []byte `json:"spki_der,omitempty"`
+	BodySignature   []byte `json:"body_signature,omitempty"`
 }
 
 type registerResponse struct {
@@ -55,17 +56,6 @@ func (s *Server) HandleRegister(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	log := s.Logger
 
-	var saEmail string
-	if !s.Config.Standalone {
-		saClaims, err := s.authenticateSA(r)
-		if err != nil {
-			log.Warn("register: SA token invalid", zap.Error(err))
-			writeErr(w, http.StatusUnauthorized, "invalid SA token")
-			return
-		}
-		saEmail = saClaims.Email
-	}
-
 	var req registerRequest
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, "decode body: "+err.Error())
@@ -76,9 +66,27 @@ func (s *Server) HandleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// SEV-SNP TEEs (e.g. on AWS) hold no GCP service account, so they can't mint
+	// an SA identity token. For them the AMD-rooted attestation + allowlisted
+	// measurement + SPKI body-binding IS the credential, so the SA token is
+	// skipped. Confidential Space TEEs still present one. Setting
+	// attestation_type=sev-snp can't downgrade-bypass: the attestation must
+	// then verify as a real SEV-SNP report bound to the body-signing key.
+	isSEVSNP := req.AttestationType == auth.AttestationTypeSEVSNP
+	var saEmail string
+	if !s.Config.Standalone && !isSEVSNP {
+		saClaims, err := s.authenticateSA(r)
+		if err != nil {
+			log.Warn("register: SA token invalid", zap.Error(err))
+			writeErr(w, http.StatusUnauthorized, "invalid SA token")
+			return
+		}
+		saEmail = saClaims.Email
+	}
+
 	digest := req.ImageDigest
 	if !s.Config.Standalone {
-		validated, err := s.AttestValidator.Validate([]byte(req.AttestationJWT))
+		validated, spkiHash, err := s.AttestValidator.Validate(req.AttestationType, req.Role, []byte(req.AttestationJWT), req.SPKIDer)
 		if err != nil {
 			log.Warn("register: attestation invalid",
 				zap.String("pair_id", req.PairID), zap.Error(err))
@@ -96,11 +104,11 @@ func (s *Server) HandleRegister(w http.ResponseWriter, r *http.Request) {
 		}
 		digest = validated
 
-		// Bind the request body to the attestation. The SPKI committed in
-		// the attestation's eat_nonce must hash the key that signed this
-		// body. Without this, anyone holding a valid allowlisted attestation
-		// could register an arbitrary pair_id/self_addr (registry takeover).
-		if err := verifyRegistrationBinding(req, digest); err != nil {
+		// Bind the request body to the attestation: the SPKI hash the
+		// attestation commits to (CS eat_nonce / SEV-SNP report_data) must hash
+		// the key that signed this body. Without this, anyone holding a valid
+		// allowlisted attestation could register an arbitrary pair (takeover).
+		if err := verifyRegistrationBinding(req, digest, spkiHash); err != nil {
 			log.Warn("register: attestation binding failed",
 				zap.String("pair_id", req.PairID), zap.Error(err))
 			writeErr(w, http.StatusForbidden, "registration not bound to attestation")
@@ -121,7 +129,9 @@ func (s *Server) HandleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Per-role SA binding: each role has one expected SA email (config-pinned).
-	if !s.Config.Standalone {
+	// SEV-SNP has no SA to pin; role/identity binding for those comes from the
+	// attestation + allowlisted measurement instead.
+	if !s.Config.Standalone && !isSEVSNP {
 		expected := s.Config.TEEKSAEmail
 		if store.Role(req.Role) == store.RoleT {
 			expected = s.Config.TEETSAEmail
@@ -145,6 +155,13 @@ func (s *Server) HandleRegister(w http.ResponseWriter, r *http.Request) {
 			// never sees a zero-time field while one side races to register.
 			p.LastHeartbeatK = now
 			p.LastHeartbeatT = now
+		}
+		// Record the pair's attestation type (idempotent across both halves) so
+		// /allocate matches it only to clients that can verify it.
+		if isSEVSNP {
+			p.AttestationType = auth.AttestationTypeSEVSNP
+		} else {
+			p.AttestationType = auth.AttestationTypeCS
 		}
 		switch store.Role(req.Role) {
 		case store.RoleK:
@@ -242,26 +259,17 @@ func (s *Server) sweepOrphansForAddr(ctx context.Context, keepID string, role st
 }
 
 // verifyRegistrationBinding confirms the register body was signed by the
-// enclave whose attestation this is. The attestation's eat_nonce commits to
-// sha256(SPKI) of the TEE's RA-TLS key; we recover the key from req.SPKIDer,
-// confirm its hash matches the nonce, then verify req.BodySignature over the
-// canonical body. The RA-TLS private key never leaves the enclave, so a
-// stolen attestation JWT alone can't produce a valid signature.
-func verifyRegistrationBinding(req registerRequest, imageDigest string) error {
+// enclave whose attestation this is. The attestation commits to sha256(SPKI) of
+// the TEE's RA-TLS key (the validator returns it); we recover the key from
+// req.SPKIDer, confirm its hash matches, then verify req.BodySignature over the
+// canonical body. The RA-TLS private key never leaves the enclave, so a stolen
+// attestation alone can't produce a valid signature.
+func verifyRegistrationBinding(req registerRequest, imageDigest string, spkiHash [32]byte) error {
 	if len(req.SPKIDer) == 0 || len(req.BodySignature) == 0 {
 		return errors.New("missing spki_der or body_signature")
 	}
-	nonceRole := "tee_k"
-	if store.Role(req.Role) == store.RoleT {
-		nonceRole = "tee_t"
-	}
-	expectedHex, err := shared.FindNonceValue([]byte(req.AttestationJWT), shared.SPKINoncePrefix(nonceRole))
-	if err != nil {
-		return fmt.Errorf("find SPKI nonce: %w", err)
-	}
-	gotHash := sha256.Sum256(req.SPKIDer)
-	if hex.EncodeToString(gotHash[:]) != expectedHex {
-		return errors.New("SPKI does not match attestation nonce")
+	if sha256.Sum256(req.SPKIDer) != spkiHash {
+		return errors.New("SPKI does not match attestation")
 	}
 	pub, err := x509.ParsePKIXPublicKey(req.SPKIDer)
 	if err != nil {

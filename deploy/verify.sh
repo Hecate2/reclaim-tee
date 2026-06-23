@@ -42,28 +42,30 @@ if [[ ! -f "${HISTORY}" ]]; then
     exit 1
 fi
 
-# Check for empty history
-ENTRY_COUNT=$(python3 -c "import json; print(len(json.load(open('${HISTORY}'))))")
-if [[ "${ENTRY_COUNT}" == "0" ]]; then
-    log "No images in history to verify, skipping."
+# image-history.json is { base_images, app_images }. This script verifies the
+# latest CS app entry per role (SNP base/app verification is separate). Check
+# for an empty CS app set.
+CS_COUNT=$(python3 -c "import json; d=json.load(open('${HISTORY}')); print(sum(1 for e in d.get('app_images',[]) if e.get('type','cs')=='cs'))")
+if [[ "${CS_COUNT}" == "0" ]]; then
+    log "No CS images in history to verify, skipping."
     exit 0
 fi
 
-# Extract expected digests and build metadata from image-history.json
+# Extract the latest CS tee-k / tee-t app entry + build metadata.
 read -r EXPECTED_TK SOURCE_COMMIT_TK SOURCE_EPOCH_TK < <(python3 -c "
 import json
-history = json.load(open('${HISTORY}'))
-for e in reversed(history):
-    if '/tee-k' in e['package']:
+d = json.load(open('${HISTORY}'))
+for e in reversed(d.get('app_images', [])):
+    if e.get('type','cs')=='cs' and '/tee-k' in e.get('package',''):
         print(e['version'], e.get('sourceCommit',''), e.get('sourceDateEpoch',''))
         break
 ")
 
 read -r EXPECTED_TT SOURCE_COMMIT_TT SOURCE_EPOCH_TT < <(python3 -c "
 import json
-history = json.load(open('${HISTORY}'))
-for e in reversed(history):
-    if '/tee-t' in e['package']:
+d = json.load(open('${HISTORY}'))
+for e in reversed(d.get('app_images', [])):
+    if e.get('type','cs')=='cs' and '/tee-t' in e.get('package',''):
         print(e['version'], e.get('sourceCommit',''), e.get('sourceDateEpoch',''))
         break
 ")
@@ -189,6 +191,57 @@ else
 fi
 
 echo "============================================="
+
+# ---------------------------------------------------------------------------
+# SEV-SNP verification. Identity-only builds (SNP_BUILD_ONLY=1) skip systemd-
+# repart, so they need no --privileged, no /dev, and no cloud creds (GCP_PROJECT
+# is unused once packaging is skipped). base_images are commit-independent ->
+# rebuilt from the CURRENT pins.env. sev-snp app_images track their sourceCommit
+# -> rebuilt in a worktree of that commit. App is cross-cloud, so we use gcp.
+# ---------------------------------------------------------------------------
+SNP_BUILD="${REPO_ROOT}/deploy/snp-build.sh"
+if [[ -x "${SNP_BUILD}" ]]; then
+    while read -r CLOUD EXP_UKI; do
+        [[ -z "${CLOUD}" ]] && continue
+        log "Verifying SNP base (${CLOUD}) from pins.env..."
+        BASE_LOG="${TMPDIR}/snp-base-${CLOUD}.log"
+        GCP_PROJECT=verify SNP_BUILD_ONLY=1 SNP_ALLOW_DIRTY=1 "${SNP_BUILD}" t "${CLOUD}" >"${BASE_LOG}" 2>&1 || true
+        ACT_UKI=$(sed -n 's/.*base UKI *= *\([0-9a-f]\{64\}\).*/\1/p' "${BASE_LOG}" | tail -1)
+        echo "SNP base ${CLOUD}: expected ${EXP_UKI:0:16}… actual ${ACT_UKI:0:16}…"
+        if [[ "${ACT_UKI}" != "${EXP_UKI}" ]]; then
+            echo "  Result:   MISMATCH — snp-build.sh output (tail):"
+            tail -25 "${BASE_LOG}" | sed 's/^/    /'
+            PASS=false
+        else echo "  Result:   MATCH"; fi
+    done < <(python3 -c "
+import json
+for b in json.load(open('${HISTORY}')).get('base_images', []):
+    print(b['cloud'], b['base_uki_sha256'])
+")
+    while read -r ROLE COMMIT EXP_APP; do
+        [[ -z "${ROLE}" ]] && continue
+        log "Verifying SNP app (tee_${ROLE} @ ${COMMIT:0:12})..."
+        git -C "${REPO_ROOT}" rev-parse --verify "${COMMIT}^{commit}" >/dev/null 2>&1 || { log "ERROR: sourceCommit ${COMMIT} not in repo"; PASS=false; continue; }
+        WT="${TMPDIR}/snp-${ROLE}-${COMMIT}"
+        git -C "${REPO_ROOT}" worktree add --detach "${WT}" "${COMMIT}" >/dev/null
+        APP_LOG="${TMPDIR}/snp-app-${ROLE}.log"
+        ( cd "${WT}" && GCP_PROJECT=verify SNP_BUILD_ONLY=1 ./deploy/snp-build.sh "${ROLE}" gcp ) >"${APP_LOG}" 2>&1 || true
+        ACT_APP=$(sed -n 's/.*app digest *= *\(snp-app:[0-9a-f]*\).*/\1/p' "${APP_LOG}" | tail -1)
+        git -C "${REPO_ROOT}" worktree remove --force "${WT}" 2>/dev/null || true
+        echo "SNP app tee_${ROLE}: expected ${EXP_APP:0:24}… actual ${ACT_APP:0:24}…"
+        if [[ "${ACT_APP}" != "${EXP_APP}" ]]; then
+            echo "  Result:   MISMATCH — snp-build.sh output (tail):"
+            tail -25 "${APP_LOG}" | sed 's/^/    /'
+            PASS=false
+        else echo "  Result:   MATCH"; fi
+    done < <(python3 -c "
+import json
+for a in json.load(open('${HISTORY}')).get('app_images', []):
+    if a.get('type')=='sev-snp':
+        print(a['role'], a['sourceCommit'], a['version'])
+")
+    echo "============================================="
+fi
 
 if [[ "${PASS}" == "true" ]]; then
     echo "VERIFICATION PASSED: Images match source code"

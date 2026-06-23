@@ -36,10 +36,16 @@ type FirestoreStore struct {
 	client *firestore.Client
 }
 
-// NewFirestoreStore builds a FirestoreStore bound to the named GCP project's
-// default Firestore database.
-func NewFirestoreStore(ctx context.Context, projectID string) (*FirestoreStore, error) {
-	client, err := firestore.NewClient(ctx, projectID)
+// NewFirestoreStore builds a FirestoreStore bound to the named GCP project.
+// databaseID selects a named Firestore database; empty means "(default)".
+func NewFirestoreStore(ctx context.Context, projectID, databaseID string) (*FirestoreStore, error) {
+	var client *firestore.Client
+	var err error
+	if databaseID == "" {
+		client, err = firestore.NewClient(ctx, projectID)
+	} else {
+		client, err = firestore.NewClientWithDatabase(ctx, projectID, databaseID)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("firestore client: %w", err)
 	}
@@ -220,6 +226,7 @@ type pairDoc struct {
 	TEEKImageDigest string `firestore:"teek_image_digest"`
 	TEETImageDigest string `firestore:"teet_image_digest"`
 	Region          string `firestore:"region"`
+	AttestationType string `firestore:"attestation_type"`
 
 	LastHeartbeatK         time.Time `firestore:"last_heartbeat_k"`
 	LastHeartbeatT         time.Time `firestore:"last_heartbeat_t"`
@@ -245,6 +252,7 @@ func fromPair(p *Pair) pairDoc {
 		TEEKImageDigest:        p.TEEKImageDigest,
 		TEETImageDigest:        p.TEETImageDigest,
 		Region:                 p.Region,
+		AttestationType:        p.AttestationType,
 		LastHeartbeatK:         p.LastHeartbeatK,
 		LastHeartbeatT:         p.LastHeartbeatT,
 		ControlHealthyK:        p.ControlHealthyK,
@@ -270,6 +278,7 @@ func (d pairDoc) toPair(id string) *Pair {
 		TEEKImageDigest:        d.TEEKImageDigest,
 		TEETImageDigest:        d.TEETImageDigest,
 		Region:                 d.Region,
+		AttestationType:        d.AttestationType,
 		LastHeartbeatK:         d.LastHeartbeatK,
 		LastHeartbeatT:         d.LastHeartbeatT,
 		ControlHealthyK:        d.ControlHealthyK,
@@ -286,7 +295,6 @@ func (d pairDoc) toPair(id string) *Pair {
 		ReadyAt:                d.ReadyAt,
 	}
 }
-
 
 func (s *FirestoreStore) Tombstone(ctx context.Context, pairID string, until time.Time) error {
 	_, err := s.client.Collection(firestoreTombstoneCollection).Doc(pairID).Set(ctx, tombstoneDoc{Expiry: until})

@@ -26,7 +26,19 @@ func (t *TEEK) getCurrentCertRaw() ([]byte, error) {
 // generateAttestationDoc produces a fresh GCP attestation token bound to
 // the supplied nonces, against the launcher socket on the host.
 func (t *TEEK) generateAttestationDoc(ctx context.Context, nonces ...string) ([]byte, error) {
+	if shared.IsSEVSNPMode() {
+		return shared.GenerateSEVSNPNonceAttestation(nonces)
+	}
 	return shared.GenerateGCPAttestation(ctx, nonces...)
+}
+
+// attestationReportType labels the app-layer attestation by platform so the
+// peer verifier picks the right validation path.
+func attestationReportType() string {
+	if shared.IsSEVSNPMode() {
+		return "sev-snp"
+	}
+	return "gcp"
 }
 
 // refreshAttestation generates a new attestation and caches it
@@ -58,19 +70,44 @@ func (t *TEEK) refreshAttestation() error {
 
 	// Create structured report
 	attestationReport := &teeproto.AttestationReport{
-		Type:   "gcp",
+		Type:   attestationReportType(),
 		Report: attestationDoc,
 	}
 
 	// Cache the new attestation
 	t.attestationMutex.Lock()
 	t.cachedAttestation = attestationReport
-	t.attestationExpiry = time.Now().Add(5 * time.Minute) // Cache valid for 5 minutes
+	// Expiry tracks the real NitroTPM leaf (AWS) so we stop serving / refresh
+	// before it expires, instead of a fixed guess; falls back to the cache TTL
+	// for GCP/CS. A cache miss regenerates, so this self-heals if AWS shortens
+	// the leaf.
+	t.attestationExpiry = shared.SNPAttestationExpiry(attestationDoc)
 	t.attestationMutex.Unlock()
 
 	t.logger.Debug("Cached new attestation")
 
 	return nil
+}
+
+// nextRATLSRefresh is the adaptive cadence passed to RunRATLSRefresh: for
+// SEV-SNP, refresh when the cached attestation is due to go stale (the
+// NitroTPM leaf expiry minus margin), clamped to a floor (avoid churn) and the
+// RATLSRefreshIntervalSNP ceiling. Returns 0 for CS so the fixed cadence applies.
+func (t *TEEK) nextRATLSRefresh() time.Duration {
+	if !shared.IsSEVSNPMode() {
+		return 0
+	}
+	t.attestationMutex.RLock()
+	exp := t.attestationExpiry
+	t.attestationMutex.RUnlock()
+	d := time.Until(exp)
+	if d > shared.RATLSRefreshIntervalSNP {
+		d = shared.RATLSRefreshIntervalSNP
+	}
+	if d < 10*time.Minute {
+		d = 10 * time.Minute
+	}
+	return d
 }
 
 // getCachedAttestation returns the cached attestation if valid, otherwise
@@ -156,7 +193,7 @@ func (t *TEEK) generateAttestationForTEET() (*teeproto.AttestationReport, error)
 	}
 
 	return &teeproto.AttestationReport{
-		Type:   "gcp",
+		Type:   attestationReportType(),
 		Report: attestationDoc,
 	}, nil
 }
@@ -194,6 +231,31 @@ func (t *TEEK) verifyTEETAttestation(msgBytes []byte, tlsCert []byte) error {
 		return fmt.Errorf("mode mismatch: received GCP attestation but in standalone mode")
 	}
 
+	expectedSPKI, err := shared.SPKIHashFromCertDER(tlsCert)
+	if err != nil {
+		return fmt.Errorf("compute TEE_T SPKI hash: %w", err)
+	}
+	expectedSPKIHex := fmt.Sprintf("%x", expectedSPKI[:])
+
+	// SEV-SNP: the attestation binds a presentable nonce list; verify it against
+	// AMD+vTPM hardware, then confirm the tee_t SPKI nonce matches the mTLS peer.
+	if attestation.Type == "sev-snp" {
+		nonces, _, _, err := shared.VerifyCombinedSEVSNPNonceAttestation(attestation.Report)
+		if err != nil {
+			return fmt.Errorf("validate TEE_T SEV-SNP attestation: %w", err)
+		}
+		gotHex, err := shared.FindNonceInList(nonces, shared.SPKINoncePrefix("tee_t"))
+		if err != nil {
+			return fmt.Errorf("find tee_t_spki_hash nonce: %w", err)
+		}
+		if gotHex != expectedSPKIHex {
+			t.logger.Error("SPKI hash mismatch", zap.String("expected", expectedSPKIHex), zap.String("got", gotHex))
+			return fmt.Errorf("TEE_T SPKI hash mismatch")
+		}
+		t.logger.Debug("TEE_T SEV-SNP attestation verified")
+		return nil
+	}
+
 	// Verify the SPKI hash in the attestation against TEE_T's TLS keypair.
 	// Binding to SPKI (not the full cert DER) means the check is stable
 	// across cert refreshes — the keypair is invariant.
@@ -208,17 +270,12 @@ func (t *TEEK) verifyTEETAttestation(msgBytes []byte, tlsCert []byte) error {
 		return fmt.Errorf("validate TEE_T attestation: %w", err)
 	}
 
-	expectedSPKI, err := shared.SPKIHashFromCertDER(tlsCert)
-	if err != nil {
-		return fmt.Errorf("compute TEE_T SPKI hash: %w", err)
-	}
-	expectedHex := fmt.Sprintf("%x", expectedSPKI[:])
 	gotHex, err := shared.FindNonceValue(attestation.Report, shared.SPKINoncePrefix("tee_t"))
 	if err != nil {
 		return fmt.Errorf("find tee_t_spki_hash nonce: %w", err)
 	}
-	if gotHex != expectedHex {
-		t.logger.Error("SPKI hash mismatch", zap.String("expected", expectedHex), zap.String("got", gotHex))
+	if gotHex != expectedSPKIHex {
+		t.logger.Error("SPKI hash mismatch", zap.String("expected", expectedSPKIHex), zap.String("got", gotHex))
 		return fmt.Errorf("TEE_T SPKI hash mismatch")
 	}
 

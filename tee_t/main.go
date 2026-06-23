@@ -28,6 +28,13 @@ func main() {
 	go shared.RunRuntimeStatsLogger(context.Background(), logger)
 	go shared.RunDeadlockWatchdog(context.Background(), logger)
 
+	// SEV-SNP attestation self-test (env SNP_ATTEST_DUMP=1): emit + self-verify
+	// the combined attestation, log app/base identities, then hold.
+	if os.Getenv("SNP_ATTEST_DUMP") == "1" {
+		dumpSEVSNPAttestation(logger)
+		return
+	}
+
 	// Router mode is the production path (multi-pair, RA-TLS, router-mediated).
 	// Standalone mode remains for local dev only — no TLS, no attestation.
 	if config.RouterMode() {
@@ -109,4 +116,36 @@ func setupRoutes(teet *TEET) *http.ServeMux {
 		fmt.Fprint(w, "TEE_T Healthy")
 	})
 	return mux
+}
+
+// dumpSEVSNPAttestation is a hardware self-test (env SNP_ATTEST_DUMP=1) mirroring
+// tee_k: build RA-TLS, emit the combined SEV-SNP attestation, self-verify it, and
+// log the app + base identities. Holds afterward (PID 1 must not exit).
+func dumpSEVSNPAttestation(logger *shared.Logger) {
+	ctx := context.Background()
+	ratls, err := shared.NewRATLSManager(ctx, "tee_t", nil)
+	if err != nil {
+		logger.Critical("SNP-ATTEST-DUMP ratls init failed", zap.Error(err))
+		select {}
+	}
+	cert := ratls.Certificate()
+	if cert == nil || cert.Leaf == nil {
+		logger.Critical("SNP-ATTEST-DUMP no RA-TLS cert")
+		select {}
+	}
+	var ext []byte
+	for _, e := range cert.Leaf.Extensions {
+		if e.Id.Equal(shared.AttestationOIDSEVSNP) {
+			ext = e.Value
+		}
+	}
+	spki, _ := ratls.PublicKeyDER()
+	logger.Info("SNP-ATTEST-DUMP", zap.Int("ext_len", len(ext)), zap.String("app_hash_env", os.Getenv("SNP_APP_HASH")))
+	app, base, verr := shared.VerifyCombinedSEVSNPAttestation(ext, spki)
+	if verr != nil {
+		logger.Critical("SNP-ATTEST-VERIFY FAILED", zap.Error(verr))
+	} else {
+		logger.Info("SNP-ATTEST-VERIFY OK", zap.String("app", app), zap.String("base", base))
+	}
+	select {}
 }

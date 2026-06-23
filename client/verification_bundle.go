@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/fxamacker/cbor/v2"
 	"github.com/gorilla/websocket"
 	"github.com/reclaimprotocol/reclaim-tee/minitls"
 	teeproto "github.com/reclaimprotocol/reclaim-tee/proto"
@@ -324,9 +325,37 @@ func stripUnsignedFields(msg *teeproto.SignedMessage) *teeproto.SignedMessage {
 // The JWT's eat_nonce claim may be a string or array; this searches for a nonce matching
 // the given prefix (e.g. "tee_k_cert_hash:") and returns the hex hash value.
 // Returns "" if no cert hash nonce is found (e.g. older TEE without cert hash support).
+// extractSEVSNPNonce reads the presentable nonce list from a SEV-SNP combined
+// attestation (1-byte cloud tag + CBOR envelope) and returns the value after
+// prefix. Decode-only — the attestor verifies the binding.
+func extractSEVSNPNonce(report []byte, prefix string) string {
+	if len(report) < 2 {
+		return ""
+	}
+	var env struct {
+		Nonces []string `cbor:"nonces"`
+	}
+	if err := cbor.Unmarshal(report[1:], &env); err != nil {
+		return ""
+	}
+	for _, n := range env.Nonces {
+		if v, ok := strings.CutPrefix(n, prefix); ok {
+			return v
+		}
+	}
+	return ""
+}
+
 func extractCertHashFromAttestation(attestation *teeproto.AttestationReport, prefix string) string {
 	if attestation == nil || len(attestation.Report) == 0 {
 		return ""
+	}
+
+	// SEV-SNP attestations carry the nonces in a CBOR envelope (tag byte +
+	// {nonces:[...]}) rather than a CS JWT eat_nonce. Read them directly; like
+	// the JWT path, this does not verify the attestation (the attestor does).
+	if attestation.Type == "sev-snp" {
+		return extractSEVSNPNonce(attestation.Report, prefix)
 	}
 
 	// Parse JWT payload (second segment) without full validation --

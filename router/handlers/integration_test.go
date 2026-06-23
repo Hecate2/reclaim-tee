@@ -55,7 +55,7 @@ func newIntegrationServer(t *testing.T) *integrationServer {
 				RegisteredClaims: jwt.RegisteredClaims{},
 			},
 		},
-		AttestValidator: &fakeAttestValidator{digest: approvedDigest},
+		AttestValidator: &fakeAttestValidator{digest: approvedDigest, spkiHash: testRegSPKIHash},
 		Allowlist:       allowlist,
 		Signer:          ls,
 		Logger:          zap.NewNop(),

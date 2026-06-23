@@ -52,7 +52,7 @@ func TestFirestore_Integration(t *testing.T) {
 		t.Skip("FIRESTORE_EMULATOR_HOST not set; skipping integration test")
 	}
 	ctx := t.Context()
-	store, err := NewFirestoreStore(ctx, "test-project")
+	store, err := NewFirestoreStore(ctx, "test-project", "")
 	if err != nil {
 		t.Fatalf("new firestore store: %v", err)
 	}

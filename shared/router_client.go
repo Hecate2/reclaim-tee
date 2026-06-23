@@ -43,19 +43,27 @@ func NewRouterClient(baseURL string, tokens TokenSource) *RouterClient {
 	}
 }
 
+// Attestation types carried in the /register body. The router dispatches its
+// validator on this; empty means CS for backward compatibility.
+const (
+	AttestationTypeCS     = "cs"
+	AttestationTypeSEVSNP = "sev-snp"
+)
+
 // RegisterRequest is the body of POST /register. SPKIDer + BodySignature
 // bind the body to the attestation: the TEE signs RegistrationSigningDigest
 // with the RA-TLS private key whose public half's hash is committed in the
-// attestation's eat_nonce. Empty in standalone (no-attestation) mode.
+// attestation (CS eat_nonce / SEV-SNP report_data). Empty in standalone mode.
 type RegisterRequest struct {
-	PairID         string `json:"pair_id"`
-	Role           string `json:"role"`
-	SelfAddr       string `json:"self_addr"`
-	PeerAddrClaim  string `json:"peer_addr_claim"`
-	ImageDigest    string `json:"image_digest"`
-	AttestationJWT string `json:"attestation_jwt"`
-	SPKIDer        []byte `json:"spki_der,omitempty"`
-	BodySignature  []byte `json:"body_signature,omitempty"`
+	PairID          string `json:"pair_id"`
+	Role            string `json:"role"`
+	SelfAddr        string `json:"self_addr"`
+	PeerAddrClaim   string `json:"peer_addr_claim"`
+	ImageDigest     string `json:"image_digest"`
+	AttestationType string `json:"attestation_type,omitempty"`
+	AttestationJWT  string `json:"attestation_jwt"`
+	SPKIDer         []byte `json:"spki_der,omitempty"`
+	BodySignature   []byte `json:"body_signature,omitempty"`
 }
 
 // RegistrationSigningDigest is the message a TEE signs with its RA-TLS

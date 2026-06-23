@@ -1,7 +1,9 @@
 package main
 
 import (
+	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -65,9 +67,16 @@ func (t *TEET) handleClientWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	for {
 
+		conn.SetReadDeadline(time.Now().Add(SessionReadTimeout))
 		_, msgBytes, err := conn.ReadMessage()
 		if err != nil {
-			if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
+			var ne net.Error
+			if errors.As(err, &ne) && ne.Timeout() {
+				t.logger.Warn("Client session read timeout", zap.Duration("timeout", SessionReadTimeout))
+				if sessionID != "" {
+					t.terminateSessionWithError(sessionID, shared.ReasonTimeoutExceeded, err, "client session idle timeout")
+				}
+			} else if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
 				t.logger.Debug("Client connection closed")
 			} else if !isNetworkShutdownError(err) {
 				t.logger.Error("Client connection error", zap.Error(err))

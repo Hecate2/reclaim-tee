@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -350,9 +351,14 @@ func (t *TEEK) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	// shared.Message handling loop
 	for {
+		conn.SetReadDeadline(time.Now().Add(SessionReadTimeout))
 		_, msgBytes, err := conn.ReadMessage()
 		if err != nil {
-			if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
+			var ne net.Error
+			if errors.As(err, &ne) && ne.Timeout() {
+				t.logger.WithSession(sessionID).Warn("Client session read timeout", zap.Duration("timeout", SessionReadTimeout))
+				t.terminateSessionWithError(sessionID, shared.ReasonTimeoutExceeded, err, "client session idle timeout")
+			} else if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
 				t.logger.WithSession(sessionID).Debug("Client disconnected")
 			} else if !isNetworkShutdownError(err) {
 				t.logger.WithSession(sessionID).Error("Failed to read websocket message", zap.Error(err))

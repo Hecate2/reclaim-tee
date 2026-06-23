@@ -4,9 +4,11 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/reclaimprotocol/reclaim-tee/router/store"
+	"github.com/reclaimprotocol/reclaim-tee/shared"
 
 	"github.com/google/uuid"
 	"go.uber.org/zap"
@@ -37,17 +39,6 @@ func (s *Server) HandleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	log := s.Logger
 
-	var saEmail string
-	if !s.Config.Standalone {
-		saClaims, err := s.authenticateSA(r)
-		if err != nil {
-			log.Warn("heartbeat: SA token invalid", zap.Error(err))
-			writeErr(w, http.StatusUnauthorized, "invalid SA token")
-			return
-		}
-		saEmail = saClaims.Email
-	}
-
 	var req heartbeatRequest
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, "decode body: "+err.Error())
@@ -58,11 +49,36 @@ func (s *Server) HandleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// SEV-SNP pairs hold no GCP SA (same as /register). Detect them by the
+	// role's already-registered, allowlisted snp-app: digest and skip the SA
+	// token; the allowlist re-check below still gates them. NOTE: heartbeats
+	// for SEV-SNP pairs are not yet individually authenticated — a signed
+	// heartbeat (RA-TLS key) is the pre-prod follow-up.
+	isSEVSNP := false
+	if existing, gerr := s.Store.GetPair(ctx, req.PairID); gerr == nil && existing != nil {
+		roleDigest := existing.TEEKImageDigest
+		if store.Role(req.Role) == store.RoleT {
+			roleDigest = existing.TEETImageDigest
+		}
+		isSEVSNP = strings.HasPrefix(roleDigest, shared.SEVSNPAppPrefix)
+	}
+
+	var saEmail string
+	if !s.Config.Standalone && !isSEVSNP {
+		saClaims, err := s.authenticateSA(r)
+		if err != nil {
+			log.Warn("heartbeat: SA token invalid", zap.Error(err))
+			writeErr(w, http.StatusUnauthorized, "invalid SA token")
+			return
+		}
+		saEmail = saClaims.Email
+	}
+
 	expectedSAEmail := s.Config.TEEKSAEmail
 	if store.Role(req.Role) == store.RoleT {
 		expectedSAEmail = s.Config.TEETSAEmail
 	}
-	if !s.Config.Standalone && expectedSAEmail != "" && expectedSAEmail != saEmail {
+	if !s.Config.Standalone && !isSEVSNP && expectedSAEmail != "" && expectedSAEmail != saEmail {
 		log.Warn("heartbeat: SA email not approved for role",
 			zap.String("role", req.Role),
 			zap.String("expected", expectedSAEmail),

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/reclaimprotocol/reclaim-tee/router/store"
+	"github.com/reclaimprotocol/reclaim-tee/shared"
 
 	"go.uber.org/zap"
 )
@@ -115,15 +116,36 @@ func (s *Server) evictPairsByDigest(ctx context.Context, digest string) {
 	}
 }
 
-// validateDigestFormat enforces the sha256:<64-hex-char> shape so a
-// typo can't pollute the allowlist with junk that no real attestation
-// would ever match anyway. Cheap, catches operator mistakes early.
+// validateDigestFormat enforces one of the supported allowlist identity
+// shapes so a typo can't pollute the allowlist with junk no real attestation
+// would ever match. Cheap, catches operator mistakes early.
+//
+//   - Confidential Space: sha256:<64-hex>     (container image digest)
+//   - SEV-SNP app:        snp-app:<64-hex>     (sha256(app bundle), cross-cloud)
+//   - SEV-SNP base:       snp-base:<N-hex>     (PCR 11 UKI, per-cloud; SHA256/384)
 func validateDigestFormat(d string) error {
-	rest, ok := strings.CutPrefix(d, "sha256:")
-	if !ok {
-		return errBadDigestPrefix
+	if rest, ok := strings.CutPrefix(d, "sha256:"); ok {
+		return validateHexLen(rest, 64)
 	}
-	if len(rest) != 64 {
+	if rest, ok := strings.CutPrefix(d, shared.SEVSNPAppPrefix); ok {
+		return validateHexLen(rest, 64)
+	}
+	if rest, ok := strings.CutPrefix(d, shared.SEVSNPBasePrefix); ok {
+		return validateHexBase(rest)
+	}
+	return errBadDigestPrefix
+}
+
+// validateHexBase accepts a SHA-256 (64) or SHA-384 (96) hex PCR 11 value.
+func validateHexBase(rest string) error {
+	if len(rest) != 64 && len(rest) != 96 {
+		return errBadDigestLength
+	}
+	return validateHexLen(rest, len(rest))
+}
+
+func validateHexLen(rest string, want int) error {
+	if len(rest) != want {
 		return errBadDigestLength
 	}
 	for _, c := range rest {
@@ -138,8 +160,8 @@ func validateDigestFormat(d string) error {
 }
 
 var (
-	errBadDigestPrefix = &simpleErr{"digest must start with sha256:"}
-	errBadDigestLength = &simpleErr{"digest hex portion must be exactly 64 chars"}
+	errBadDigestPrefix = &simpleErr{"digest must start with sha256:, snp-app:, or snp-base:"}
+	errBadDigestLength = &simpleErr{"digest hex portion has wrong length (sha256:/snp-app: 64, snp-base: 64 or 96)"}
 	errBadDigestHex    = &simpleErr{"digest hex portion must be lowercase [0-9a-f]"}
 )
 

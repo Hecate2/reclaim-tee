@@ -31,7 +31,7 @@ func startRouterMode(parent context.Context, config *TEETConfig, logger *shared.
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
 
-	devMode := !shared.IsEnclaveMode()
+	devMode := !shared.IsProductionTEE()
 	logger.Info("=== TEE_T Router Mode ===",
 		zap.String("router_url", config.RouterURL),
 		zap.String("self_addr", config.SelfAddr),
@@ -71,9 +71,9 @@ func startRouterMode(parent context.Context, config *TEETConfig, logger *shared.
 	}
 
 	tokenSource := shared.MetadataServerTokenSource
-	if devMode {
-		// Local dev: router-standalone skips SA token validation, and the
-		// laptop has no metadata server to mint one anyway.
+	if devMode || shared.IsSEVSNPMode() {
+		// Local dev has no metadata server; SEV-SNP TEEs hold no GCP SA and
+		// the router skips the SA token for them. Either way, send no token.
 		tokenSource = shared.NoopTokenSource
 	}
 	router := shared.NewRouterClient(config.RouterURL, tokenSource)
@@ -96,11 +96,11 @@ func startRouterMode(parent context.Context, config *TEETConfig, logger *shared.
 		if pid == "" {
 			return errors.New("register: pair_id not yet known")
 		}
-		var imageDigest string
-		var attestationJWT []byte
+		var imageDigest, attestationType string
+		var attestation []byte
 		if teet.ratls != nil {
 			var err error
-			imageDigest, attestationJWT, err = shared.ExtractIdentityFromRATLS(teet.ratls, logger)
+			imageDigest, attestationType, attestation, err = shared.ExtractIdentityFromRATLS(teet.ratls, logger)
 			if err != nil {
 				return fmt.Errorf("extract identity: %w", err)
 			}
@@ -108,12 +108,13 @@ func startRouterMode(parent context.Context, config *TEETConfig, logger *shared.
 			imageDigest = "local-dev"
 		}
 		regReq := shared.RegisterRequest{
-			PairID:         pid,
-			Role:           "T",
-			SelfAddr:       config.SelfAddr,
-			PeerAddrClaim:  config.PeerAddr,
-			ImageDigest:    imageDigest,
-			AttestationJWT: string(attestationJWT),
+			PairID:          pid,
+			Role:            "T",
+			SelfAddr:        config.SelfAddr,
+			PeerAddrClaim:   config.PeerAddr,
+			ImageDigest:     imageDigest,
+			AttestationType: attestationType,
+			AttestationJWT:  string(attestation),
 		}
 		// Bind the body to the attestation by signing it with the RA-TLS key.
 		if teet.ratls != nil {
@@ -139,20 +140,16 @@ func startRouterMode(parent context.Context, config *TEETConfig, logger *shared.
 		return nil
 	}
 
-	// The pair_id arrives on the wire from TEE_K, not the env. When it does,
-	// register + spin up the heartbeat. TEE_K may reconnect over the life
-	// of the process, firing this hook each time; sync.Once guarantees we
-	// register + start the heartbeat exactly once. The pair_id never
-	// changes for the life of this process.
-	// onPairAssigned must return fast — it's called synchronously from the
-	// peer-link read path, and blocking here stalls every subsequent
-	// envelope from TEE_K. Push the (potentially long) register+retry +
-	// heartbeat goroutine off to its own goroutine so the read loop
-	// proceeds to the TEEKAttestation handshake immediately. startOnce
-	// guarantees we only spawn ONE such goroutine even if K reconnects.
+	// Register + heartbeat once on the first pair_id; re-register if TEE_K
+	// reconnects under a new pair_id. Each register runs off the read path.
 	var startOnce sync.Once
+	var pairMu sync.Mutex
+	var registeredPair string
 	teet.onPairAssigned = func(pairID string) {
 		startOnce.Do(func() {
+			pairMu.Lock()
+			registeredPair = pairID
+			pairMu.Unlock()
 			go func() {
 				if err := shared.RegisterWithRetry(ctx, register, logger); err != nil {
 					logger.Critical("router registration failed after retries", zap.Error(err))
@@ -161,13 +158,31 @@ func startRouterMode(parent context.Context, config *TEETConfig, logger *shared.
 				shared.RunHeartbeats(ctx, teet, "T", logger, register, shared.RouterHeartbeatInterval)
 			}()
 		})
+
+		pairMu.Lock()
+		changed := registeredPair != "" && registeredPair != pairID
+		if changed {
+			registeredPair = pairID
+		}
+		pairMu.Unlock()
+		if !changed {
+			return
+		}
+		// peer reconnected under a new pair_id -> give the new pair its T half
+		go func() {
+			if err := shared.RegisterWithRetry(ctx, register, logger); err != nil {
+				logger.Error("re-register after peer pair_id change failed", zap.Error(err))
+				return
+			}
+			logger.Info("re-registered after peer pair_id change", zap.String("pair_id", pairID))
+		}()
 	}
 
 	if teet.ratls != nil {
 		// Regenerate per-session cached attestation on every cert rotation
 		// — single ticker drives both so cert_hash nonce can't drift from
 		// the live cert.
-		go shared.RunRATLSRefresh(ctx, teet.ratls, teet.refreshAttestation, logger)
+		go shared.RunRATLSRefresh(ctx, teet.ratls, teet.refreshAttestation, teet.nextRATLSRefresh, logger)
 	}
 
 	// Build the mux once; choose whether to wrap it with the peer-mTLS
@@ -263,7 +278,10 @@ func validateRouterConfig(c *TEETConfig) error {
 		{"JWT_PUBLIC_KEY", c.JWTPublicKey},
 		{"EXPECTED_JWT_ISSUER", c.ExpectedJWTIssuer},
 	}
-	if shared.IsEnclaveMode() {
+	if shared.IsProductionTEE() {
+		// An attested TEE (SEV-SNP or enclave) must use the real KMS-backed OPRF
+		// share, never the world-known static dev share. No test exemption: the
+		// static path is local-dev-only (see initializeOPRFKeyShare).
 		required = append(required,
 			struct{ name, value string }{"EXPECTED_PEER_IMAGE_DIGEST", c.ExpectedPeerImageDigest},
 			struct{ name, value string }{"KMS_ENCLAVE_DOMAIN_KEY", c.KMSEnclaveDomainKey},

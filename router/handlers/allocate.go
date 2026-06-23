@@ -8,6 +8,7 @@ import (
 
 	"github.com/reclaimprotocol/reclaim-tee/router/selector"
 	"github.com/reclaimprotocol/reclaim-tee/router/signer"
+	"github.com/reclaimprotocol/reclaim-tee/shared"
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
@@ -16,6 +17,10 @@ import (
 
 type allocateRequest struct {
 	ClientNonce string `json:"client_nonce"`
+	// Accepts lists the attestation types the client can verify ("cs",
+	// "sev-snp"). Empty/absent (legacy clients) => CS only, so an old client is
+	// never handed an SEV-SNP pair it cannot verify.
+	Accepts []string `json:"accepts,omitempty"`
 }
 
 // allocateResponse is what the client gets back from /allocate. It
@@ -57,6 +62,12 @@ func (s *Server) HandleAllocate(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "client_nonce is required")
 		return
 	}
+	// Default a missing/empty accepts to CS only: a client that doesn't announce
+	// SEV-SNP support must never be allocated an SEV-SNP pair.
+	accepts := req.Accepts
+	if len(accepts) == 0 {
+		accepts = []string{shared.AttestationTypeCS}
+	}
 
 	pairs, err := s.Store.ListPairs(ctx)
 	if err != nil {
@@ -66,7 +77,7 @@ func (s *Server) HandleAllocate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	now := time.Now()
-	picked, err := selector.PickReadyPair(pairs, now,
+	picked, err := selector.PickReadyPair(pairs, accepts, now,
 		s.Config.HeartbeatStaleness, s.Config.ControlUnhealthy, s.Config.OTNotReady)
 	switch {
 	case errors.Is(err, selector.ErrNoReadyPairs):

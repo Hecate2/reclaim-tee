@@ -43,3 +43,13 @@ kms_cache.json
 /js_sdk/node_modules/
 /js_sdk/dist/
 /js_sdk/.idea/
+
+# SEV-SNP (snp branch) image build artifacts — large, regenerable, machine-specific.
+# Build recipe SOURCE (Go, Dockerfile, build scripts, service units) is committed.
+deploy/snp-image/*.raw
+deploy/snp-image/*.efi
+deploy/snp-image/*.zst
+deploy/snp-image/*.blob
+deploy/snp-image/app-bundle.tar
+deploy/snp-image/mkosi.extra/usr/local/bin/
+snp-poc/snp-poc

@@ -31,6 +31,13 @@ func main() {
 
 	StartRootCAUpdater(logger)
 
+	// Hardware attestation self-test: bring up RA-TLS, emit the SEV-SNP combined
+	// attestation, self-verify (loader PCR 8 + producer + verifier agree), then hold.
+	if os.Getenv("SNP_ATTEST_DUMP") == "1" {
+		dumpSEVSNPAttestation(logger)
+		return
+	}
+
 	config := LoadTEEKConfig()
 
 	if config.RouterMode() {
@@ -123,4 +130,40 @@ func setupRoutes(teek *TEEK) *http.ServeMux {
 		fmt.Fprint(w, "TEE_K Healthy")
 	})
 	return mux
+}
+
+// dumpSEVSNPAttestation is a hardware self-test (env SNP_ATTEST_DUMP=1): it
+// builds the RA-TLS identity (which generates the combined SEV-SNP attestation),
+// extracts the attestation extension + SPKI, verifies them with the same code
+// the router uses, and logs the resulting app + base identities to the serial
+// console. It holds afterward (PID 1 in the minimal image must not exit).
+func dumpSEVSNPAttestation(logger *shared.Logger) {
+	ctx := context.Background()
+	ratls, err := shared.NewRATLSManager(ctx, "tee_k", nil)
+	if err != nil {
+		logger.Critical("SNP-ATTEST-DUMP ratls init failed", zap.Error(err))
+		select {}
+	}
+	cert := ratls.Certificate()
+	if cert == nil || cert.Leaf == nil {
+		logger.Critical("SNP-ATTEST-DUMP no RA-TLS cert")
+		select {}
+	}
+	var ext []byte
+	for _, e := range cert.Leaf.Extensions {
+		if e.Id.Equal(shared.AttestationOIDSEVSNP) {
+			ext = e.Value
+		}
+	}
+	spki, _ := ratls.PublicKeyDER()
+	logger.Info("SNP-ATTEST-DUMP",
+		zap.Int("ext_len", len(ext)),
+		zap.String("app_hash_env", os.Getenv("SNP_APP_HASH")))
+	app, base, verr := shared.VerifyCombinedSEVSNPAttestation(ext, spki)
+	if verr != nil {
+		logger.Critical("SNP-ATTEST-VERIFY FAILED", zap.Error(verr))
+	} else {
+		logger.Info("SNP-ATTEST-VERIFY OK", zap.String("app", app), zap.String("base", base))
+	}
+	select {}
 }

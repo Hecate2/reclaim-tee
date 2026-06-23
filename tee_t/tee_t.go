@@ -155,9 +155,16 @@ func NewTEETForRouter(
 func initializeOPRFKeyShare(logger *shared.Logger) []byte {
 	deploymentKey := shared.GetEnvOrDefault("KMS_ENCLAVE_DOMAIN_KEY", "")
 	if deploymentKey == "" {
+		// The static share is a world-known dev constant. An attested TEE
+		// (SEV-SNP / enclave) must NEVER use it — that would make nullifiers
+		// forgeable, and the env isn't measured so attestation can't detect it.
+		// Defense in depth behind validateRouterConfig's KMS requirement.
+		if shared.IsProductionTEE() {
+			log.Fatalf("[TEE_T] CRITICAL: attested TEE requires KMS_ENCLAVE_DOMAIN_KEY (real OPRF); refusing the static dev share")
+		}
 		keyShare := []byte{0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x20}
 		if logger != nil {
-			logger.Info("Using static OPRF key share (KMS_ENCLAVE_DOMAIN_KEY unset)")
+			logger.Info("Using static OPRF key share (KMS_ENCLAVE_DOMAIN_KEY unset; local dev only)")
 		}
 		return keyShare
 	}

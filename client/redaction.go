@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"go.uber.org/zap"
-	"google.golang.org/protobuf/proto"
 )
 
 // analyzeResponseRedaction is the main entry point for response redaction analysis
@@ -443,11 +442,11 @@ func (c *Client) sendRedactionSpec() error {
 	env := &teeproto.Envelope{SessionId: c.sessionID, TimestampMs: time.Now().UnixMilli(),
 		Payload: &teeproto.Envelope_ResponseRedactionSpec{ResponseRedactionSpec: &teeproto.ResponseRedactionSpec{Ranges: pr}},
 	}
-	data, err := proto.Marshal(env)
-	if err != nil {
-		return fmt.Errorf("failed to marshal redaction spec envelope: %v", err)
-	}
-	if err := shared.WriteWSBinary(c.wsConn, data); err != nil {
+	// Use the wsWriteMutex-guarded sender (NOT raw WriteWSBinary): the wsConn
+	// read-loop writes TCPData acks concurrently, and an unsynchronized write
+	// here interleaves TLS records -> TEE_K reads a bad MAC, stalls (never sends
+	// "finished"), and the session times out. Cross-cloud latency widens the race.
+	if err := c.sendEnvelope(env); err != nil {
 		return fmt.Errorf("failed to send redaction spec: %v", err)
 	}
 

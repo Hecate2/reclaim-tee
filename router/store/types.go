@@ -40,6 +40,11 @@ type Pair struct {
 	TEETImageDigest string
 	Region          string
 
+	// AttestationType is "cs" or "sev-snp", set at /register. Empty on pairs
+	// registered before the field existed -> treated as CS. Used by /allocate
+	// to match a pair only to clients that can verify its attestation.
+	AttestationType string
+
 	// Per-side observations updated by /heartbeat (and seeded by /register).
 	LastHeartbeatK         time.Time
 	LastHeartbeatT         time.Time

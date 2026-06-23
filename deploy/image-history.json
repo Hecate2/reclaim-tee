@@ -1,156 +1,184 @@
-[
-  {
-    "package": "gcr.io/new-reclaim-architecture/tee-k",
-    "tags": [
-      "v2"
-    ],
-    "version": "sha256:9105c72d09f7a9a3b7a60020e803453c347f5d99d25daeaa8fc642c0ee205f11",
-    "createTime": "2026-04-19 16:35:21+05:00",
-    "updateTime": "2026-04-19 16:35:21+05:00",
-    "sourceCommit": "b7d66715d72c9532b2f91e639c327d64b672c4b7",
-    "sourceDateEpoch": 1776598521
-  },
-  {
-    "package": "gcr.io/new-reclaim-architecture/tee-t",
-    "tags": [
-      "v2"
-    ],
-    "version": "sha256:b43ddd6609774c2ef257a6a04dd9d95934816609d550fd77b41761fca87b31cf",
-    "createTime": "2026-04-19 16:35:21+05:00",
-    "updateTime": "2026-04-19 16:35:21+05:00",
-    "sourceCommit": "b7d66715d72c9532b2f91e639c327d64b672c4b7",
-    "sourceDateEpoch": 1776598521
-  },
-  {
-    "package": "gcr.io/new-reclaim-architecture/tee-k",
-    "tags": [
-      "v2"
-    ],
-    "version": "sha256:d1b55e5c1e31c290a83e4c2e50a79e3e101f13d059d415af5ebb331be0454c81",
-    "createTime": "2026-04-19 17:26:11+05:00",
-    "updateTime": "2026-04-19 17:26:11+05:00",
-    "sourceCommit": "85812fb5ddb263fa30c114628536bfed2e059134",
-    "sourceDateEpoch": 1776601571
-  },
-  {
-    "package": "gcr.io/new-reclaim-architecture/tee-t",
-    "tags": [
-      "v2"
-    ],
-    "version": "sha256:cef6989684657e26162865aeb9fe3828435fcce5914807d4f25c197f05e87857",
-    "createTime": "2026-04-19 17:26:11+05:00",
-    "updateTime": "2026-04-19 17:26:11+05:00",
-    "sourceCommit": "85812fb5ddb263fa30c114628536bfed2e059134",
-    "sourceDateEpoch": 1776601571
-  },
-  {
-    "package": "gcr.io/new-reclaim-architecture/tee-k",
-    "tags": [
-      "v2"
-    ],
-    "version": "sha256:092a7774545f878f96e7dcee91352e74d926a104e44b87498540304fc2891eb2",
-    "createTime": "2026-05-23 10:49:07+05:00",
-    "updateTime": "2026-05-23 10:49:07+05:00",
-    "sourceCommit": "e619bcebb79847621cdf7e1c82cded6062a762f0",
-    "sourceDateEpoch": 1779515347
-  },
-  {
-    "package": "gcr.io/new-reclaim-architecture/tee-t",
-    "tags": [
-      "v2"
-    ],
-    "version": "sha256:00634cb95f15b363ce7cfc13d20fd59f666a404b4a9cc3099baa74ee2cbc0cf3",
-    "createTime": "2026-05-23 10:49:07+05:00",
-    "updateTime": "2026-05-23 10:49:07+05:00",
-    "sourceCommit": "e619bcebb79847621cdf7e1c82cded6062a762f0",
-    "sourceDateEpoch": 1779515347
-  },
-  {
-    "package": "gcr.io/new-reclaim-architecture/tee-k",
-    "tags": [
-      "v2"
-    ],
-    "version": "sha256:36d7a59d72da9abd9404f5d272ecc6a5c1807769553a1799f6b29e30a953cdb5",
-    "createTime": "2026-06-05 18:56:07+05:00",
-    "updateTime": "2026-06-05 18:56:07+05:00",
-    "sourceCommit": "425269150973ca8be8ed60521994b67cb52c804e",
-    "sourceDateEpoch": 1780667767
-  },
-  {
-    "package": "gcr.io/new-reclaim-architecture/tee-t",
-    "tags": [
-      "v2"
-    ],
-    "version": "sha256:f92e5919c784fa9d9cf059952cb6609236c190dbf1bf906bfc2b010c6bb4b971",
-    "createTime": "2026-06-05 18:56:07+05:00",
-    "updateTime": "2026-06-05 18:56:07+05:00",
-    "sourceCommit": "425269150973ca8be8ed60521994b67cb52c804e",
-    "sourceDateEpoch": 1780667767
-  },
-  {
-    "package": "asia-south2-docker.pkg.dev/new-reclaim-architecture/tees-v2/tee-k",
-    "tags": [
-      "bc9bf02"
-    ],
-    "version": "sha256:e0715d6f967cc69c378a1d5cf4c55f30ab8b54d996671646ed02a36e015278d3",
-    "createTime": "2026-06-15T17:02:40+05:00",
-    "updateTime": "2026-06-15T17:02:40+05:00",
-    "sourceCommit": "bc9bf0278376fbfa19f77caf36a52e683e28984d",
-    "sourceDateEpoch": 1781524960
-  },
-  {
-    "package": "asia-south2-docker.pkg.dev/new-reclaim-architecture/tees-v2/tee-t",
-    "tags": [
-      "bc9bf02"
-    ],
-    "version": "sha256:8ec334f557f37fe6e0263355a36c57e86e4df2bd5db462891c34695909eb87b8",
-    "createTime": "2026-06-15T17:02:40+05:00",
-    "updateTime": "2026-06-15T17:02:40+05:00",
-    "sourceCommit": "bc9bf0278376fbfa19f77caf36a52e683e28984d",
-    "sourceDateEpoch": 1781524960
-  },
-  {
-    "package": "asia-south2-docker.pkg.dev/new-reclaim-architecture/tees-v2/tee-k",
-    "tags": [
-      "93fd780"
-    ],
-    "version": "sha256:683b0bbd29c0bcd7e42ae8304613af077e379eb491963b76f692eaa32ef67b60",
-    "createTime": "2026-06-16T18:42:04+05:00",
-    "updateTime": "2026-06-16T18:42:04+05:00",
-    "sourceCommit": "93fd78080ff9fa6977774b793d881a162d285fd2",
-    "sourceDateEpoch": 1781617324
-  },
-  {
-    "package": "asia-south2-docker.pkg.dev/new-reclaim-architecture/tees-v2/tee-t",
-    "tags": [
-      "93fd780"
-    ],
-    "version": "sha256:fac86e1b6ec3221c00f628b960fe03e26c10d90ef9a1839e0b8b81818d00f04c",
-    "createTime": "2026-06-16T18:42:04+05:00",
-    "updateTime": "2026-06-16T18:42:04+05:00",
-    "sourceCommit": "93fd78080ff9fa6977774b793d881a162d285fd2",
-    "sourceDateEpoch": 1781617324
-  },
-  {
-    "package": "asia-south2-docker.pkg.dev/new-reclaim-architecture/tees-v2/tee-k",
-    "tags": [
-      "7f39664"
-    ],
-    "version": "sha256:0c47c52c887803688358fe33467e1f436749d9314608fb4f9b0d10dcba62cc7e",
-    "createTime": "2026-06-16T18:44:40+05:00",
-    "updateTime": "2026-06-16T18:44:40+05:00",
-    "sourceCommit": "7f39664867bfdb50fadaa228d641a0265a3de4c7",
-    "sourceDateEpoch": 1781617480
-  },
-  {
-    "package": "asia-south2-docker.pkg.dev/new-reclaim-architecture/tees-v2/tee-t",
-    "tags": [
-      "7f39664"
-    ],
-    "version": "sha256:b34835bf4c29195b4123b0a8e3595cd2980aedf63f4691d8a8656c610cc8770b",
-    "createTime": "2026-06-16T18:44:40+05:00",
-    "updateTime": "2026-06-16T18:44:40+05:00",
-    "sourceCommit": "7f39664867bfdb50fadaa228d641a0265a3de4c7",
-    "sourceDateEpoch": 1781617480
-  }
-]
+{
+  "base_images": [
+    {
+      "cloud": "gcp",
+      "base": "snp-base:e51ea77d7a1a7b435e1141e1f8de1cf3cbbabf9602cad6e060b80c4029f36ff6",
+      "base_uki_sha256": "8d947bf1dce3f3ae1274eafb83c75ebe8906d3f6a32eff111c527ecd71dd9094"
+    },
+    {
+      "cloud": "aws",
+      "base": "snp-base:4832908152fc6619b45bdfe6cddb3399c73101cb323983f10923c6c871b19cd92cd08c6d54064840e108566f4d84f6d7",
+      "base_uki_sha256": "18a21d844be343785a25840cbe8b3a5a81e80c2b304d8ba10d836658d1ce1fa8"
+    }
+  ],
+  "app_images": [
+    {
+      "type": "cs",
+      "package": "gcr.io/new-reclaim-architecture/tee-k",
+      "tags": [
+        "v2"
+      ],
+      "version": "sha256:9105c72d09f7a9a3b7a60020e803453c347f5d99d25daeaa8fc642c0ee205f11",
+      "createTime": "2026-04-19 16:35:21+05:00",
+      "updateTime": "2026-04-19 16:35:21+05:00",
+      "sourceCommit": "b7d66715d72c9532b2f91e639c327d64b672c4b7",
+      "sourceDateEpoch": 1776598521
+    },
+    {
+      "type": "cs",
+      "package": "gcr.io/new-reclaim-architecture/tee-t",
+      "tags": [
+        "v2"
+      ],
+      "version": "sha256:b43ddd6609774c2ef257a6a04dd9d95934816609d550fd77b41761fca87b31cf",
+      "createTime": "2026-04-19 16:35:21+05:00",
+      "updateTime": "2026-04-19 16:35:21+05:00",
+      "sourceCommit": "b7d66715d72c9532b2f91e639c327d64b672c4b7",
+      "sourceDateEpoch": 1776598521
+    },
+    {
+      "type": "cs",
+      "package": "gcr.io/new-reclaim-architecture/tee-k",
+      "tags": [
+        "v2"
+      ],
+      "version": "sha256:d1b55e5c1e31c290a83e4c2e50a79e3e101f13d059d415af5ebb331be0454c81",
+      "createTime": "2026-04-19 17:26:11+05:00",
+      "updateTime": "2026-04-19 17:26:11+05:00",
+      "sourceCommit": "85812fb5ddb263fa30c114628536bfed2e059134",
+      "sourceDateEpoch": 1776601571
+    },
+    {
+      "type": "cs",
+      "package": "gcr.io/new-reclaim-architecture/tee-t",
+      "tags": [
+        "v2"
+      ],
+      "version": "sha256:cef6989684657e26162865aeb9fe3828435fcce5914807d4f25c197f05e87857",
+      "createTime": "2026-04-19 17:26:11+05:00",
+      "updateTime": "2026-04-19 17:26:11+05:00",
+      "sourceCommit": "85812fb5ddb263fa30c114628536bfed2e059134",
+      "sourceDateEpoch": 1776601571
+    },
+    {
+      "type": "cs",
+      "package": "gcr.io/new-reclaim-architecture/tee-k",
+      "tags": [
+        "v2"
+      ],
+      "version": "sha256:092a7774545f878f96e7dcee91352e74d926a104e44b87498540304fc2891eb2",
+      "createTime": "2026-05-23 10:49:07+05:00",
+      "updateTime": "2026-05-23 10:49:07+05:00",
+      "sourceCommit": "e619bcebb79847621cdf7e1c82cded6062a762f0",
+      "sourceDateEpoch": 1779515347
+    },
+    {
+      "type": "cs",
+      "package": "gcr.io/new-reclaim-architecture/tee-t",
+      "tags": [
+        "v2"
+      ],
+      "version": "sha256:00634cb95f15b363ce7cfc13d20fd59f666a404b4a9cc3099baa74ee2cbc0cf3",
+      "createTime": "2026-05-23 10:49:07+05:00",
+      "updateTime": "2026-05-23 10:49:07+05:00",
+      "sourceCommit": "e619bcebb79847621cdf7e1c82cded6062a762f0",
+      "sourceDateEpoch": 1779515347
+    },
+    {
+      "type": "cs",
+      "package": "gcr.io/new-reclaim-architecture/tee-k",
+      "tags": [
+        "v2"
+      ],
+      "version": "sha256:36d7a59d72da9abd9404f5d272ecc6a5c1807769553a1799f6b29e30a953cdb5",
+      "createTime": "2026-06-05 18:56:07+05:00",
+      "updateTime": "2026-06-05 18:56:07+05:00",
+      "sourceCommit": "425269150973ca8be8ed60521994b67cb52c804e",
+      "sourceDateEpoch": 1780667767
+    },
+    {
+      "type": "cs",
+      "package": "gcr.io/new-reclaim-architecture/tee-t",
+      "tags": [
+        "v2"
+      ],
+      "version": "sha256:f92e5919c784fa9d9cf059952cb6609236c190dbf1bf906bfc2b010c6bb4b971",
+      "createTime": "2026-06-05 18:56:07+05:00",
+      "updateTime": "2026-06-05 18:56:07+05:00",
+      "sourceCommit": "425269150973ca8be8ed60521994b67cb52c804e",
+      "sourceDateEpoch": 1780667767
+    },
+    {
+      "type": "cs",
+      "package": "asia-south2-docker.pkg.dev/new-reclaim-architecture/tees-v2/tee-k",
+      "tags": [
+        "bc9bf02"
+      ],
+      "version": "sha256:e0715d6f967cc69c378a1d5cf4c55f30ab8b54d996671646ed02a36e015278d3",
+      "createTime": "2026-06-15T17:02:40+05:00",
+      "updateTime": "2026-06-15T17:02:40+05:00",
+      "sourceCommit": "bc9bf0278376fbfa19f77caf36a52e683e28984d",
+      "sourceDateEpoch": 1781524960
+    },
+    {
+      "type": "cs",
+      "package": "asia-south2-docker.pkg.dev/new-reclaim-architecture/tees-v2/tee-t",
+      "tags": [
+        "bc9bf02"
+      ],
+      "version": "sha256:8ec334f557f37fe6e0263355a36c57e86e4df2bd5db462891c34695909eb87b8",
+      "createTime": "2026-06-15T17:02:40+05:00",
+      "updateTime": "2026-06-15T17:02:40+05:00",
+      "sourceCommit": "bc9bf0278376fbfa19f77caf36a52e683e28984d",
+      "sourceDateEpoch": 1781524960
+    },
+    {
+      "type": "cs",
+      "package": "asia-south2-docker.pkg.dev/new-reclaim-architecture/tees-v2/tee-k",
+      "tags": [
+        "93fd780"
+      ],
+      "version": "sha256:683b0bbd29c0bcd7e42ae8304613af077e379eb491963b76f692eaa32ef67b60",
+      "createTime": "2026-06-16T18:42:04+05:00",
+      "updateTime": "2026-06-16T18:42:04+05:00",
+      "sourceCommit": "93fd78080ff9fa6977774b793d881a162d285fd2",
+      "sourceDateEpoch": 1781617324
+    },
+    {
+      "type": "cs",
+      "package": "asia-south2-docker.pkg.dev/new-reclaim-architecture/tees-v2/tee-t",
+      "tags": [
+        "93fd780"
+      ],
+      "version": "sha256:fac86e1b6ec3221c00f628b960fe03e26c10d90ef9a1839e0b8b81818d00f04c",
+      "createTime": "2026-06-16T18:42:04+05:00",
+      "updateTime": "2026-06-16T18:42:04+05:00",
+      "sourceCommit": "93fd78080ff9fa6977774b793d881a162d285fd2",
+      "sourceDateEpoch": 1781617324
+    },
+    {
+      "type": "cs",
+      "package": "asia-south2-docker.pkg.dev/new-reclaim-architecture/tees-v2/tee-k",
+      "tags": [
+        "7f39664"
+      ],
+      "version": "sha256:0c47c52c887803688358fe33467e1f436749d9314608fb4f9b0d10dcba62cc7e",
+      "createTime": "2026-06-16T18:44:40+05:00",
+      "updateTime": "2026-06-16T18:44:40+05:00",
+      "sourceCommit": "7f39664867bfdb50fadaa228d641a0265a3de4c7",
+      "sourceDateEpoch": 1781617480
+    },
+    {
+      "type": "cs",
+      "package": "asia-south2-docker.pkg.dev/new-reclaim-architecture/tees-v2/tee-t",
+      "tags": [
+        "7f39664"
+      ],
+      "version": "sha256:b34835bf4c29195b4123b0a8e3595cd2980aedf63f4691d8a8656c610cc8770b",
+      "createTime": "2026-06-16T18:44:40+05:00",
+      "updateTime": "2026-06-16T18:44:40+05:00",
+      "sourceCommit": "7f39664867bfdb50fadaa228d641a0265a3de4c7",
+      "sourceDateEpoch": 1781617480
+    }
+  ]
+}

@@ -14,6 +14,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -79,16 +80,27 @@ func (f *fakeSAValidator) Validate(_ context.Context, _ string) (*auth.SAClaims,
 	return f.claims, nil
 }
 
+// testRegSPKIHash is sha256(SPKI) of testRegKey — the value the attestation
+// commits to, returned by the fake validator so the binding check passes.
+var testRegSPKIHash = func() [32]byte {
+	spki, err := x509.MarshalPKIXPublicKey(&testRegKey.PublicKey)
+	if err != nil {
+		panic(err)
+	}
+	return sha256.Sum256(spki)
+}()
+
 type fakeAttestValidator struct {
-	digest string
-	err    error
+	digest   string
+	spkiHash [32]byte
+	err      error
 }
 
-func (f *fakeAttestValidator) Validate(_ []byte) (string, error) {
+func (f *fakeAttestValidator) Validate(_, _ string, _, _ []byte) (string, [32]byte, error) {
 	if f.err != nil {
-		return "", f.err
+		return "", [32]byte{}, f.err
 	}
-	return f.digest, nil
+	return f.digest, f.spkiHash, nil
 }
 
 const (
@@ -114,7 +126,7 @@ func newTestServer(t *testing.T) *Server {
 				RegisteredClaims: jwt.RegisteredClaims{},
 			},
 		},
-		AttestValidator: &fakeAttestValidator{digest: approvedDigest},
+		AttestValidator: &fakeAttestValidator{digest: approvedDigest, spkiHash: testRegSPKIHash},
 		Allowlist:       allowlist,
 		Logger:          zap.NewNop(),
 		Config: &config.Config{
@@ -275,6 +287,33 @@ func TestRegisterRejectsDigestNotInAllowlist(t *testing.T) {
 	w := doRegister(t, s, body, teekIP+":12345", "Bearer x")
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("expected 403, got %d body=%s", w.Code, w.Body.String())
+	}
+}
+
+// SEV-SNP TEEs (no GCP SA) register WITHOUT an SA token: the AMD-rooted
+// attestation + allowlisted measurement + SPKI binding is the credential.
+func TestRegisterSEVSNPSkipsSAToken(t *testing.T) {
+	s := newTestServer(t)
+	snpID := "snp-pcr:" + strings.Repeat("ab", 32)
+	if err := s.Allowlist.Add(t.Context(), snpID); err != nil {
+		t.Fatalf("seed allowlist: %v", err)
+	}
+	s.AttestValidator = &fakeAttestValidator{digest: snpID, spkiHash: testRegSPKIHash}
+
+	body := registerRequest{
+		PairID:          pairID,
+		Role:            "T",
+		SelfAddr:        teetIP + ":443",
+		PeerAddrClaim:   teekIP + ":443",
+		ImageDigest:     snpID,
+		AttestationType: "sev-snp",
+	}
+	signRegisterBody(&body)
+
+	// No Authorization header — must still succeed on the SEV-SNP path.
+	w := doRegister(t, s, body, teetIP+":12345", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 for SEV-SNP without SA token, got %d body=%s", w.Code, w.Body.String())
 	}
 }
 

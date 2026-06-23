@@ -4,6 +4,7 @@ package shared
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"time"
@@ -43,6 +44,50 @@ const InitialRegisterRetryWindow = 2 * time.Minute
 // cert. GCP Confidential Space attestations expire in ~5 minutes;
 // refreshing every 4 keeps new handshakes validating cleanly.
 const RATLSRefreshInterval = 4 * time.Minute
+
+// SEV-SNP attestations are bounded by cert validity (AWS NitroTPM leaf), not a
+// short TTL, and regenerating them is CPU-heavy. This is now a CEILING: the
+// actual cadence is driven by the real leaf NotAfter (SNPAttestationExpiry),
+// refreshing SNPRefreshMargin before it expires. The ceiling caps churn when
+// the leaf is long-lived; a shorter-than-expected leaf refreshes faster.
+const RATLSRefreshIntervalSNP = 2 * time.Hour
+
+// SNPRefreshMargin is how long before the NitroTPM leaf's NotAfter a TEE stops
+// serving / regenerates its attestation, so a verifier (peer or attestor) never
+// sees a leaf within this window of expiry.
+const SNPRefreshMargin = 30 * time.Minute
+
+// ratlsRefreshInterval picks the cert-refresh cadence for the active TEE mode.
+func ratlsRefreshInterval() time.Duration {
+	if IsSEVSNPMode() {
+		return RATLSRefreshIntervalSNP
+	}
+
+	return RATLSRefreshInterval
+}
+
+// AttestationCacheTTL is how long a TEE may serve a cached attestation before
+// regenerating. Kept above the refresh cadence so the periodic postRefresh
+// (not a lazy cache-miss) drives regeneration.
+func AttestationCacheTTL() time.Duration {
+	if IsSEVSNPMode() {
+		return RATLSRefreshIntervalSNP + 10*time.Minute
+	}
+
+	return 5 * time.Minute
+}
+
+// SNPAttestationExpiry returns when a just-generated attestation should be
+// considered stale. For AWS it's the real NitroTPM leaf NotAfter minus
+// SNPRefreshMargin — so the cadence tracks AWS's actual leaf TTL instead of a
+// hardcoded guess. For GCP/CS (no short-lived NitroTPM leaf) it falls back to
+// now + AttestationCacheTTL().
+func SNPAttestationExpiry(attestation []byte) time.Time {
+	if notAfter, ok := SNPNitroLeafNotAfter(attestation); ok {
+		return notAfter.Add(-SNPRefreshMargin)
+	}
+	return time.Now().Add(AttestationCacheTTL())
+}
 
 // RunHeartbeats fires a heartbeat to the router every `interval` until
 // ctx is cancelled. On ErrRouterNotFound (router lost our pair_id, e.g.
@@ -133,7 +178,11 @@ func RegisterWithRetry(ctx context.Context, register func(context.Context) error
 // the cached attestation atomically in sync from any consumer's point
 // of view (no window where the cert is new but the cached attestation
 // still references the old hash). Pass nil if not needed.
-func RunRATLSRefresh(ctx context.Context, ratls *RATLSManager, postRefresh func() error, logger *Logger) {
+// nextInterval, when non-nil, is consulted after each refresh to pick the delay
+// until the next one — letting SEV-SNP track the actual NitroTPM leaf expiry
+// (refresh SNPRefreshMargin before NotAfter) instead of a fixed cadence. A nil
+// callback (or a non-positive return) falls back to the fixed ratlsRefreshInterval().
+func RunRATLSRefresh(ctx context.Context, ratls *RATLSManager, postRefresh func() error, nextInterval func() time.Duration, logger *Logger) {
 	// Run postRefresh once immediately so the per-session attestation
 	// cache is populated before the server starts accepting traffic.
 	// Without this, the cache sits empty for the first RATLSRefreshInterval
@@ -149,13 +198,25 @@ func RunRATLSRefresh(ctx context.Context, ratls *RATLSManager, postRefresh func(
 		}
 	}
 
-	ticker := time.NewTicker(RATLSRefreshInterval)
-	defer ticker.Stop()
 	for {
+		d := ratlsRefreshInterval()
+		if nextInterval != nil {
+			if n := nextInterval(); n > 0 {
+				d = n
+			}
+		}
+		// Emit as strings: the GCP logging core doesn't serialize zap.Duration
+		// or zap.Time (they render as null / {} in jsonPayload).
+		nextAt := time.Now().Add(d)
+		logger.Info("next RA-TLS attestation refresh scheduled",
+			zap.String("in", d.Round(time.Second).String()),
+			zap.String("at", nextAt.UTC().Format(time.RFC3339)))
+		timer := time.NewTimer(d)
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			return
-		case <-ticker.C:
+		case <-timer.C:
 			if err := ratls.Refresh(ctx); err != nil {
 				logger.Error("RA-TLS refresh failed", zap.Error(err))
 				continue
@@ -166,7 +227,7 @@ func RunRATLSRefresh(ctx context.Context, ratls *RATLSManager, postRefresh func(
 					continue
 				}
 			}
-			logger.Debug("RA-TLS refreshed")
+			logger.Debug("RA-TLS attestation refreshed")
 		}
 	}
 }
@@ -175,20 +236,35 @@ func RunRATLSRefresh(ctx context.Context, ratls *RATLSManager, postRefresh func(
 // attestation JWT + container image digest out of it. The same JWT goes
 // into the router registration body; the digest is the router's
 // allowlist key.
-func ExtractIdentityFromRATLS(ratls *RATLSManager, logger *Logger) (imageDigest string, attestationJWT []byte, err error) {
+func ExtractIdentityFromRATLS(ratls *RATLSManager, logger *Logger) (imageDigest, attestationType string, attestation []byte, err error) {
 	cert := ratls.Certificate()
 	if cert == nil || cert.Leaf == nil {
-		return "", nil, errors.New("RA-TLS manager has no current cert")
+		return "", "", nil, errors.New("RA-TLS manager has no current cert")
 	}
-	attestationJWT, err = ExtractAttestationFromCert(cert.Leaf)
+	leaf := cert.Leaf
+	// SEV-SNP (OID .2) takes precedence when present. The report is binary, so
+	// it travels base64-encoded in the JSON register body; the router decodes it.
+	if report := findExtension(leaf, AttestationOIDSEVSNP); report != nil {
+		spki, serr := ratls.PublicKeyDER()
+		if serr != nil {
+			return "", "", nil, fmt.Errorf("marshal SPKI: %w", serr)
+		}
+		app, _, verr := VerifyCombinedSEVSNPAttestation(report, spki)
+		if verr != nil {
+			return "", "", nil, fmt.Errorf("verify SEV-SNP attestation: %w", verr)
+		}
+		enc := base64.StdEncoding.EncodeToString(report)
+		return app, AttestationTypeSEVSNP, []byte(enc), nil
+	}
+	attestation, err = ExtractAttestationFromCert(leaf)
 	if err != nil {
-		return "", nil, fmt.Errorf("extract attestation: %w", err)
+		return "", "", nil, fmt.Errorf("extract attestation: %w", err)
 	}
-	imageDigest, err = ExtractImageDigestFromGCPAttestation(attestationJWT, logger)
+	imageDigest, err = ExtractImageDigestFromGCPAttestation(attestation, logger)
 	if err != nil {
-		return "", nil, fmt.Errorf("extract image digest: %w", err)
+		return "", "", nil, fmt.Errorf("extract image digest: %w", err)
 	}
-	return imageDigest, attestationJWT, nil
+	return imageDigest, AttestationTypeCS, attestation, nil
 }
 
 // LoadOPRFShare reads (or creates) this side's persistent MPC OPRF key
@@ -197,6 +273,28 @@ func ExtractIdentityFromRATLS(ratls *RATLSManager, logger *Logger) (imageDigest 
 // disambiguates the secret name. Requires GOOGLE_PROJECT_ID, GOOGLE_KMS_
 // LOCATION, GOOGLE_KMS_KEYRING, GOOGLE_KMS_KEY to be set.
 func LoadOPRFShare(role, deploymentKey string, logger *Logger) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// On AWS SEV-SNP the share lives in AWS Secrets Manager (same secret name,
+	// seeded from the GCP-exported share); GCP keeps using Secret Manager + KMS.
+	if IsAWSSEVSNP() {
+		store, err := NewAWSSecretStore(ctx, GetEnvOrDefault("AWS_OPRF_KMS_KEY_ID", ""))
+		if err != nil {
+			return nil, fmt.Errorf("new aws secret store: %w", err)
+		}
+		share, err := store.LoadOrCreateOPRFShare(ctx, role, deploymentKey)
+		if err != nil {
+			return nil, fmt.Errorf("LoadOrCreateOPRFShare (aws): %w", err)
+		}
+		if logger != nil {
+			logger.Info("Loaded OPRF share from AWS Secrets Manager",
+				zap.String("role", role),
+				zap.String("deployment_key", deploymentKey))
+		}
+		return share, nil
+	}
+
 	required := []struct {
 		name, value string
 	}{
@@ -210,9 +308,6 @@ func LoadOPRFShare(role, deploymentKey string, logger *Logger) ([]byte, error) {
 			return nil, fmt.Errorf("%s required when KMS_ENCLAVE_DOMAIN_KEY is set", r.name)
 		}
 	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
 
 	store, err := NewSecretStore(ctx, required[0].value, required[1].value, required[2].value, required[3].value)
 	if err != nil {

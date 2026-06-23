@@ -2,11 +2,16 @@ package main
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/x509"
+	"encoding/pem"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -60,7 +65,7 @@ func main() {
 			cfg.ApprovedSAPattern,
 			cfg.SATokenAudience,
 		)
-		srv.AttestValidator = auth.NewCSAttestationValidator(logger)
+		srv.AttestValidator = auth.NewDispatchingValidator(logger)
 		allowlist, err := auth.NewAllowlist(ctx, pairStore, cfg.ApprovedDigests, logger)
 		if err != nil {
 			logger.Fatal("allowlist init failed", zap.Error(err))
@@ -104,12 +109,17 @@ func buildStore(ctx context.Context, cfg *config.Config, logger *zap.Logger) (st
 			zap.String("hint", "set FIRESTORE_PROJECT_ID for production"))
 		return store.NewMemoryStore(), noopCloser{}, nil
 	}
-	fs, err := store.NewFirestoreStore(ctx, cfg.FirestoreProjectID)
+	fs, err := store.NewFirestoreStore(ctx, cfg.FirestoreProjectID, cfg.FirestoreDatabaseID)
 	if err != nil {
 		return nil, nil, err
 	}
+	db := cfg.FirestoreDatabaseID
+	if db == "" {
+		db = "(default)"
+	}
 	logger.Info("using Firestore pair store",
 		zap.String("project_id", cfg.FirestoreProjectID),
+		zap.String("database", db),
 		zap.String("collection", store.FirestoreCollection))
 	return fs, fs, nil
 }
@@ -121,13 +131,22 @@ func buildSigner(ctx context.Context, cfg *config.Config, logger *zap.Logger) (s
 	var s signer.Signer
 	var closer io.Closer
 	if cfg.KMSKeyName == "" {
-		logger.Warn("using local in-process signer — pub key will change on restart",
-			zap.String("hint", "set KMS_KEY_NAME for production"))
-		ls, err := signer.NewLocalSigner()
-		if err != nil {
-			return nil, nil, err
+		if pemKey := os.Getenv("JWT_SIGNING_KEY"); pemKey != "" {
+			priv, err := parseECPrivateKeyPEM(pemKey)
+			if err != nil {
+				return nil, nil, fmt.Errorf("parse JWT_SIGNING_KEY: %w", err)
+			}
+			logger.Info("using persistent local signer from JWT_SIGNING_KEY (stable across restarts)")
+			s, closer = signer.NewLocalSignerFromKey(priv), noopCloser{}
+		} else {
+			logger.Warn("using local in-process signer — pub key will change on restart",
+				zap.String("hint", "set KMS_KEY_NAME or JWT_SIGNING_KEY for a stable key"))
+			ls, err := signer.NewLocalSigner()
+			if err != nil {
+				return nil, nil, err
+			}
+			s, closer = ls, noopCloser{}
 		}
-		s, closer = ls, noopCloser{}
 	} else {
 		ks, err := signer.NewKMSSigner(ctx, cfg.KMSKeyName)
 		if err != nil {
@@ -144,6 +163,31 @@ func buildSigner(ctx context.Context, cfg *config.Config, logger *zap.Logger) (s
 	logger.Info("signer public key (embed into TEE metadata as JWT_PUBLIC_KEY)",
 		zap.String("pem", string(pem)))
 	return s, closer, nil
+}
+
+// parseECPrivateKeyPEM parses an ECDSA P-256 private key from PEM (SEC1
+// "EC PRIVATE KEY" or PKCS#8 "PRIVATE KEY"). Used by the test router to load a
+// stable JWT signing key so its public key survives restarts.
+func parseECPrivateKeyPEM(pemStr string) (*ecdsa.PrivateKey, error) {
+	// Allow a single-line value with literal \n escapes so the multi-line PEM
+	// fits a Cloud Run env var without delimiter headaches.
+	pemStr = strings.ReplaceAll(pemStr, `\n`, "\n")
+	block, _ := pem.Decode([]byte(pemStr))
+	if block == nil {
+		return nil, errors.New("no PEM block")
+	}
+	if k, err := x509.ParseECPrivateKey(block.Bytes); err == nil {
+		return k, nil
+	}
+	k, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+	if err != nil {
+		return nil, err
+	}
+	ec, ok := k.(*ecdsa.PrivateKey)
+	if !ok {
+		return nil, errors.New("not an ECDSA key")
+	}
+	return ec, nil
 }
 
 type noopCloser struct{}

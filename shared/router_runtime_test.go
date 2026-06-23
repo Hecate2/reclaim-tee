@@ -210,7 +210,7 @@ func TestExtractIdentityFromRATLS_StandaloneMode(t *testing.T) {
 	logger := GetTEEKLogger()
 	defer logger.Sync()
 
-	_, _, err = ExtractIdentityFromRATLS(ratls, logger)
+	_, _, _, err = ExtractIdentityFromRATLS(ratls, logger)
 	if err == nil {
 		t.Fatal("expected error in standalone mode (no attestation extension)")
 	}
