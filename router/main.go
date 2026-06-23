@@ -17,6 +17,7 @@ import (
 
 	"github.com/reclaimprotocol/reclaim-tee/router/auth"
 	"github.com/reclaimprotocol/reclaim-tee/router/config"
+	"github.com/reclaimprotocol/reclaim-tee/router/geo"
 	"github.com/reclaimprotocol/reclaim-tee/router/handlers"
 	"github.com/reclaimprotocol/reclaim-tee/router/signer"
 	"github.com/reclaimprotocol/reclaim-tee/router/store"
@@ -50,6 +51,16 @@ func main() {
 		logger.Fatal("signer init failed", zap.Error(err))
 	}
 	defer func() { _ = signerCloser.Close() }()
+
+	// Load cloud IP ranges for geo-affinity routing. Best-effort: on failure,
+	// /allocate falls back to uniform-random pair selection.
+	geoCtx, geoCancel := context.WithTimeout(ctx, 15*time.Second)
+	if err := geo.Load(geoCtx, &http.Client{Timeout: 15 * time.Second}); err != nil {
+		logger.Warn("geo IP ranges not loaded; allocation falls back to random", zap.Error(err))
+	} else {
+		logger.Info("geo IP ranges loaded for region-aware allocation")
+	}
+	geoCancel()
 
 	srv := &handlers.Server{
 		Store:  pairStore,

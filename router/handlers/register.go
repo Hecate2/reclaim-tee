@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/reclaimprotocol/reclaim-tee/router/auth"
+	"github.com/reclaimprotocol/reclaim-tee/router/geo"
 	"github.com/reclaimprotocol/reclaim-tee/router/store"
 	"github.com/reclaimprotocol/reclaim-tee/shared"
 
@@ -166,12 +167,14 @@ func (s *Server) HandleRegister(w http.ResponseWriter, r *http.Request) {
 		switch store.Role(req.Role) {
 		case store.RoleK:
 			p.TEEKAddr = req.SelfAddr
+			p.TEEKRegion = geo.RegionForIP(req.SelfAddr)
 			p.TEEKImageDigest = digest
 			p.LastHeartbeatK = now
 			p.ControlUnhealthySinceK = now
 			p.OTUnreadySinceK = now
 		case store.RoleT:
 			p.TEETAddr = req.SelfAddr
+			p.TEETRegion = geo.RegionForIP(req.SelfAddr)
 			p.TEETImageDigest = digest
 			p.LastHeartbeatT = now
 			p.ControlUnhealthySinceT = now

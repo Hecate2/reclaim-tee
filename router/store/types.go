@@ -40,6 +40,13 @@ type Pair struct {
 	TEETImageDigest string
 	Region          string
 
+	// TEEKRegion/TEETRegion are the cloud regions resolved from each TEE's IP at
+	// /register (e.g. "us-central1", "ap-south-1"). Empty when geo isn't loaded
+	// or the IP is unknown -> the pair is geo-unlocated and the selector treats
+	// it as a random-fallback candidate.
+	TEEKRegion string
+	TEETRegion string
+
 	// AttestationType is "cs" or "sev-snp", set at /register. Empty on pairs
 	// registered before the field existed -> treated as CS. Used by /allocate
 	// to match a pair only to clients that can verify its attestation.

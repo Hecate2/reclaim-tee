@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/reclaimprotocol/reclaim-tee/router/geo"
 	"github.com/reclaimprotocol/reclaim-tee/router/store"
 )
 
@@ -31,7 +32,7 @@ func readyPair(id string) *store.Pair {
 }
 
 func TestPickReadyPair_EmptyPool(t *testing.T) {
-	_, err := PickReadyPair(nil, acceptAll, now, staleness, controlUnhealthy, otNotReady)
+	_, err := PickReadyPair(nil, acceptAll, now, staleness, controlUnhealthy, otNotReady, nil)
 	if !errors.Is(err, ErrNoReadyPairs) {
 		t.Fatalf("expected ErrNoReadyPairs, got %v", err)
 	}
@@ -50,7 +51,7 @@ func TestPickReadyPair_NoReady(t *testing.T) {
 			LastHeartbeatK: now, LastHeartbeatT: now,
 		},
 	}
-	_, err := PickReadyPair(pairs, acceptAll, now, staleness, controlUnhealthy, otNotReady)
+	_, err := PickReadyPair(pairs, acceptAll, now, staleness, controlUnhealthy, otNotReady, nil)
 	if !errors.Is(err, ErrNoReadyPairs) {
 		t.Fatalf("expected ErrNoReadyPairs, got %v", err)
 	}
@@ -58,7 +59,7 @@ func TestPickReadyPair_NoReady(t *testing.T) {
 
 func TestPickReadyPair_SingleReady(t *testing.T) {
 	p := readyPair("only")
-	picked, err := PickReadyPair([]*store.Pair{p}, acceptAll, now, staleness, controlUnhealthy, otNotReady)
+	picked, err := PickReadyPair([]*store.Pair{p}, acceptAll, now, staleness, controlUnhealthy, otNotReady, nil)
 	if err != nil {
 		t.Fatalf("pick: %v", err)
 	}
@@ -82,7 +83,7 @@ func TestPickReadyPair_SkipsNonReady(t *testing.T) {
 		},
 	}
 	for range 20 {
-		picked, err := PickReadyPair(pairs, acceptAll, now, staleness, controlUnhealthy, otNotReady)
+		picked, err := PickReadyPair(pairs, acceptAll, now, staleness, controlUnhealthy, otNotReady, nil)
 		if err != nil {
 			t.Fatalf("pick: %v", err)
 		}
@@ -100,7 +101,7 @@ func TestPickReadyPair_MultipleReady_DistributesOverTime(t *testing.T) {
 	}
 	seen := map[string]int{}
 	for range 200 {
-		picked, err := PickReadyPair(pairs, acceptAll, now, staleness, controlUnhealthy, otNotReady)
+		picked, err := PickReadyPair(pairs, acceptAll, now, staleness, controlUnhealthy, otNotReady, nil)
 		if err != nil {
 			t.Fatalf("pick: %v", err)
 		}
@@ -120,7 +121,7 @@ func TestPickReadyPair_DoesNotMutateInput(t *testing.T) {
 	}
 	originalLen := len(pairs)
 	originalIDs := []string{pairs[0].ID, pairs[1].ID, pairs[2].ID}
-	_, _ = PickReadyPair(pairs, acceptAll, now, staleness, controlUnhealthy, otNotReady)
+	_, _ = PickReadyPair(pairs, acceptAll, now, staleness, controlUnhealthy, otNotReady, nil)
 	if len(pairs) != originalLen {
 		t.Fatalf("input slice length changed: %d -> %d", originalLen, len(pairs))
 	}
@@ -147,7 +148,7 @@ func TestPickReadyPair_GatesByAttestationType(t *testing.T) {
 
 	// CS-only client must never be handed the SEV-SNP pair.
 	for range 50 {
-		picked, err := PickReadyPair(pairs, []string{"cs"}, now, staleness, controlUnhealthy, otNotReady)
+		picked, err := PickReadyPair(pairs, []string{"cs"}, now, staleness, controlUnhealthy, otNotReady, nil)
 		if err != nil {
 			t.Fatalf("pick: %v", err)
 		}
@@ -158,7 +159,7 @@ func TestPickReadyPair_GatesByAttestationType(t *testing.T) {
 
 	// SEV-SNP-only client gets only the SEV-SNP pair.
 	for range 50 {
-		picked, err := PickReadyPair(pairs, []string{"sev-snp"}, now, staleness, controlUnhealthy, otNotReady)
+		picked, err := PickReadyPair(pairs, []string{"sev-snp"}, now, staleness, controlUnhealthy, otNotReady, nil)
 		if err != nil {
 			t.Fatalf("pick: %v", err)
 		}
@@ -168,8 +169,45 @@ func TestPickReadyPair_GatesByAttestationType(t *testing.T) {
 	}
 
 	// CS-only client with only SEV-SNP pairs available => nothing allocatable.
-	_, err := PickReadyPair([]*store.Pair{snp}, []string{"cs"}, now, staleness, controlUnhealthy, otNotReady)
+	_, err := PickReadyPair([]*store.Pair{snp}, []string{"cs"}, now, staleness, controlUnhealthy, otNotReady, nil)
 	if !errors.Is(err, ErrNoReadyPairs) {
 		t.Fatalf("expected ErrNoReadyPairs for CS client vs SNP-only pool, got %v", err)
+	}
+}
+
+func TestPickReadyPair_GeoAffinity(t *testing.T) {
+	near := readyPair("near")
+	near.TEEKRegion, near.TEETRegion = "asia-south1", "asia-south1"
+	far := readyPair("far")
+	far.TEEKRegion, far.TEETRegion = "us-central1", "us-east-2"
+	pairs := []*store.Pair{far, near}
+	mumbai := &geo.LatLon{Lat: 19.0, Lon: 72.8}
+
+	// A located client must always get the nearer (asia-south1) pair.
+	for range 50 {
+		picked, err := PickReadyPair(pairs, acceptAll, now, staleness, controlUnhealthy, otNotReady, mumbai)
+		if err != nil {
+			t.Fatalf("pick: %v", err)
+		}
+		if picked.ID != "near" {
+			t.Fatalf("located client got %q, want near", picked.ID)
+		}
+	}
+
+	// No client location => random fallback; must still return a ready pair.
+	if _, err := PickReadyPair(pairs, acceptAll, now, staleness, controlUnhealthy, otNotReady, nil); err != nil {
+		t.Fatalf("nil-geo fallback: %v", err)
+	}
+
+	// A geo-located pair is preferred over a pair whose regions are unknown.
+	unloc := readyPair("unloc")
+	for range 50 {
+		picked, err := PickReadyPair([]*store.Pair{unloc, near}, acceptAll, now, staleness, controlUnhealthy, otNotReady, mumbai)
+		if err != nil {
+			t.Fatalf("pick: %v", err)
+		}
+		if picked.ID != "near" {
+			t.Fatalf("located client got %q, want the geo-located pair", picked.ID)
+		}
 	}
 }

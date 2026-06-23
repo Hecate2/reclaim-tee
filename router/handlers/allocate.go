@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/reclaimprotocol/reclaim-tee/router/geo"
 	"github.com/reclaimprotocol/reclaim-tee/router/selector"
 	"github.com/reclaimprotocol/reclaim-tee/router/signer"
 	"github.com/reclaimprotocol/reclaim-tee/shared"
@@ -76,9 +77,16 @@ func (s *Server) HandleAllocate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Client location from the LB-injected geo header (lat,long or a region
+	// code); nil keeps uniform-random selection.
+	var clientLoc *geo.LatLon
+	if lat, lon, ok := geo.ClientLatLon(r.Header.Get("X-Client-Region")); ok {
+		clientLoc = &geo.LatLon{Lat: lat, Lon: lon}
+	}
+
 	now := time.Now()
 	picked, err := selector.PickReadyPair(pairs, accepts, now,
-		s.Config.HeartbeatStaleness, s.Config.ControlUnhealthy, s.Config.OTNotReady)
+		s.Config.HeartbeatStaleness, s.Config.ControlUnhealthy, s.Config.OTNotReady, clientLoc)
 	switch {
 	case errors.Is(err, selector.ErrNoReadyPairs):
 		writeErr(w, http.StatusServiceUnavailable, "no ready pairs available")

@@ -226,6 +226,8 @@ type pairDoc struct {
 	TEEKImageDigest string `firestore:"teek_image_digest"`
 	TEETImageDigest string `firestore:"teet_image_digest"`
 	Region          string `firestore:"region"`
+	TEEKRegion      string `firestore:"teek_region"`
+	TEETRegion      string `firestore:"teet_region"`
 	AttestationType string `firestore:"attestation_type"`
 
 	LastHeartbeatK         time.Time `firestore:"last_heartbeat_k"`
@@ -252,6 +254,8 @@ func fromPair(p *Pair) pairDoc {
 		TEEKImageDigest:        p.TEEKImageDigest,
 		TEETImageDigest:        p.TEETImageDigest,
 		Region:                 p.Region,
+		TEEKRegion:             p.TEEKRegion,
+		TEETRegion:             p.TEETRegion,
 		AttestationType:        p.AttestationType,
 		LastHeartbeatK:         p.LastHeartbeatK,
 		LastHeartbeatT:         p.LastHeartbeatT,
@@ -278,6 +282,8 @@ func (d pairDoc) toPair(id string) *Pair {
 		TEEKImageDigest:        d.TEEKImageDigest,
 		TEETImageDigest:        d.TEETImageDigest,
 		Region:                 d.Region,
+		TEEKRegion:             d.TEEKRegion,
+		TEETRegion:             d.TEETRegion,
 		AttestationType:        d.AttestationType,
 		LastHeartbeatK:         d.LastHeartbeatK,
 		LastHeartbeatT:         d.LastHeartbeatT,
