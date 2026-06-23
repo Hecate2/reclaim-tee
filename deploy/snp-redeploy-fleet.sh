@@ -46,9 +46,24 @@ if [[ -f "${SCRIPT_DIR}/.env" ]]; then set -a; source "${SCRIPT_DIR}/.env"; set 
 source "${SCRIPT_DIR}/_lib.sh"
 
 GCP_PROJECT="${GCP_PROJECT:?set GCP_PROJECT in deploy/.env}"
-ROUTER="${SNP_ROUTER_URL:?set SNP_ROUTER_URL in deploy/.env}"
-ADMIN_TOKEN="${SNP_ADMIN_TOKEN:-$(cat "${SCRIPT_DIR}/.test-router-admin-token" 2>/dev/null || true)}"
-[[ -n "${ADMIN_TOKEN}" ]] || { echo "no admin token (set SNP_ADMIN_TOKEN or provide deploy/.test-router-admin-token)" >&2; exit 1; }
+# SNP_TARGET (test|prod) picks the router this fleet redeploy talks to AND is
+# inherited by the snp-pair.sh up/down calls below (which then default to
+# 443/info for prod, 8081/debug for test). Keep it consistent across both.
+TARGET="${SNP_TARGET:-test}"
+export SNP_TARGET="${TARGET}"
+case "${TARGET}" in
+test)
+	ROUTER="${SNP_ROUTER_URL:?set SNP_ROUTER_URL in deploy/.env}"
+	ADMIN_TOKEN="${SNP_ADMIN_TOKEN:-$(cat "${SCRIPT_DIR}/.test-router-admin-token" 2>/dev/null || true)}"
+	;;
+prod)
+	ROUTER="${ROUTER_URL:?set ROUTER_URL in deploy/.env}"
+	ADMIN_TOKEN="${ROUTER_ADMIN_TOKEN:?set ROUTER_ADMIN_TOKEN in deploy/.env}"
+	;;
+*)
+	echo "SNP_TARGET must be 'test' or 'prod' (got '${TARGET}')" >&2; exit 1 ;;
+esac
+[[ -n "${ADMIN_TOKEN}" ]] || { echo "no admin token for target '${TARGET}'" >&2; exit 1; }
 
 PREFIX="${SNP_FLEET_PREFIX:-snp}"
 K_CLOUD="${SNP_K_CLOUD:-gcp}"

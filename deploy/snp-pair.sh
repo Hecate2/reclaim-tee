@@ -35,8 +35,10 @@ prod)
 *)
 	echo "SNP_TARGET must be 'test' or 'prod' (got '${TARGET}')" >&2; exit 1 ;;
 esac
-PORT="${SNP_PORT:-8081}"
-LOG_LEVEL="${SNP_LOG_LEVEL:-debug}"
+# Prod defaults to the standard HTTPS port + info logging; test keeps 8081/debug.
+# Explicit SNP_PORT / SNP_LOG_LEVEL still override either way.
+PORT="${SNP_PORT:-$([[ "${TARGET}" == prod ]] && echo 443 || echo 8081)}"
+LOG_LEVEL="${SNP_LOG_LEVEL:-$([[ "${TARGET}" == prod ]] && echo info || echo debug)}"
 STATIC_OPRF="${SNP_TEST_STATIC_OPRF:-1}"
 AWS_TYPE="${SNP_PAIR_AWS_TYPE:-c6a.large}"
 AWS_IAM_PROFILE="${SNP_AWS_IAM_PROFILE:-snp-tee-logger}"
