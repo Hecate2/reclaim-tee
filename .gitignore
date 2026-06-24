@@ -53,3 +53,12 @@ deploy/snp-image/*.blob
 deploy/snp-image/app-bundle.tar
 deploy/snp-image/mkosi.extra/usr/local/bin/
 snp-poc/snp-poc
+
+# SEV-SNP deploy secrets + regenerable digest caches (never tracked; an
+# untracked file flips Go's vcs.modified and poisons the reproducible app digest).
+deploy/.test-router-admin-token
+deploy/.test-router-signing-key
+deploy/.test-router-signing-key.pem
+deploy/snp-img-key*
+deploy/snp-digests.env
+deploy/snp-fleet-digests.env
