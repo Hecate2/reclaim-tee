@@ -92,12 +92,21 @@ func (t *TEET) checkFinishedCondition(sessionID string) error {
 			// This is not an error - just means no response data to sign
 			return nil
 		}
-		if t.signingKeyPair == nil {
-			err := fmt.Errorf("no signing key pair available")
+		// Snapshot the signing keypair together with its attestation. Both
+		// rotate on every refresh, so they must be read as one epoch — the
+		// bundle is signed by keyPair and carries attestationReport, which
+		// binds keyPair's ETH address.
+		keyPair, attestationReport, err := t.signingEpoch(sessionID)
+		if err != nil {
+			t.terminateSessionWithError(sessionID, shared.ReasonAttestationVerificationFailed, err, "Failed to snapshot signing epoch")
+			return err
+		}
+		if keyPair == nil {
+			err = fmt.Errorf("no signing key pair available")
 			t.terminateSessionWithError(sessionID, shared.ReasonCryptoKeyGenerationFailed, err, "No signing key pair available for transcript signing")
 			return err
 		}
-		ethAddress := t.signingKeyPair.GetEthAddress()
+		ethAddress := keyPair.GetEthAddress()
 
 		// teetState already obtained above for consolidated ciphertext check
 
@@ -126,7 +135,7 @@ func (t *TEET) checkFinishedCondition(sessionID string) error {
 			t.terminateSessionWithError(sessionID, shared.ReasonMessageParsingFailed, err, "Failed to marshal TOutputPayload")
 			return err
 		}
-		signature, err := t.signingKeyPair.SignData(body)
+		signature, err := keyPair.SignData(body)
 		if err != nil {
 			t.terminateSessionWithError(sessionID, shared.ReasonCryptoKeyGenerationFailed, err, "Failed to sign protobuf body")
 			return err
@@ -135,13 +144,13 @@ func (t *TEET) checkFinishedCondition(sessionID string) error {
 			zap.String("session_id", sessionID),
 			zap.Int("body_bytes", len(body)),
 			zap.Int("signature_bytes", len(signature)))
-		var attestationReport *teeproto.AttestationReport
+		// attestationReport (router mode) was snapshotted with keyPair above so
+		// the two stay in the same epoch; standalone uses the ETH address.
 		var publicKeyForStandalone []byte
 		if t.ratls != nil {
-			var err error
-			attestationReport, err = t.generateAttestationReport(sessionID)
-			if err != nil {
-				t.terminateSessionWithError(sessionID, shared.ReasonAttestationVerificationFailed, err, "Failed to generate attestation report")
+			if attestationReport == nil {
+				err = fmt.Errorf("no attestation available for SignedMessage")
+				t.terminateSessionWithError(sessionID, shared.ReasonAttestationVerificationFailed, err, "No attestation available")
 				return err
 			}
 			t.logger.Debug("Including attestation report in SignedMessage", zap.String("session_id", sessionID))

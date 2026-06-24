@@ -498,7 +498,7 @@ func (c *Client) getResponseRedactions(response *HTTPResponse) ([]shared.Respons
 		return []shared.ResponseRedactionRange{}, nil
 	}
 
-	ctx := &providers.ProviderCtx{Version: providers.ATTESTOR_VERSION_3_0_0}
+	ctx := &providers.ProviderCtx{Version: providers.ATTESTOR_VERSION_3_2_0}
 
 	ranges, err := providers.GetResponseRedactions(response.FullResponse, c.providerParams, ctx, c.requestId)
 	if err != nil {

@@ -66,6 +66,8 @@ const (
 	ATTESTOR_VERSION_2_0_0   AttestorVersion = 3
 	ATTESTOR_VERSION_2_0_1   AttestorVersion = 4
 	ATTESTOR_VERSION_3_0_0   AttestorVersion = 5
+	ATTESTOR_VERSION_3_1_0   AttestorVersion = 6
+	ATTESTOR_VERSION_3_2_0   AttestorVersion = 7
 )
 
 type ProviderCtx struct {
@@ -74,6 +76,12 @@ type ProviderCtx struct {
 
 func shouldRevealCrlf(ctx *ProviderCtx) bool {
 	return ctx.Version >= ATTESTOR_VERSION_2_0_1
+}
+
+// revealing chunk framing (instead of redacting it) + dechunking on the
+// verifier is a breaking change; older clients still redact framing
+func shouldRevealChunkFraming(ctx *ProviderCtx) bool {
+	return ctx.Version >= ATTESTOR_VERSION_3_2_0
 }
 
 type ProviderSchemas struct {

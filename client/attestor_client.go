@@ -104,7 +104,7 @@ func (ac *AttestorClient) initializeConnection() error {
 	// Create InitRequest
 	initRequest := &teeproto.RPCMessage_InitRequest{
 		InitRequest: &teeproto.InitRequest{
-			ClientVersion: teeproto.AttestorVersion_ATTESTOR_VERSION_3_1_0, // Latest version
+			ClientVersion: teeproto.AttestorVersion_ATTESTOR_VERSION_3_2_0, // Latest version
 			SignatureType: teeproto.ServiceSignatureType_SERVICE_SIGNATURE_TYPE_ETH,
 			Auth:          nil, // No authentication for now
 		},

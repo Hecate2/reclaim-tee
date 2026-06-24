@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"fmt"
 	"log"
@@ -44,6 +45,11 @@ type TEET struct {
 
 	// Single Session Mode: ECDSA signing keys
 	signingKeyPair *shared.SigningKeyPair // ECDSA key pair for signing transcripts
+
+	// genAttestationDocFn, when non-nil, overrides the platform attestation
+	// call in generateAttestationDoc. Production leaves it nil; tests set it
+	// to stub the launcher/SEV-guest dependency.
+	genAttestationDocFn func(ctx context.Context, nonces ...string) ([]byte, error)
 
 	// Attestation caching for performance optimization
 	cachedAttestation *teeproto.AttestationReport

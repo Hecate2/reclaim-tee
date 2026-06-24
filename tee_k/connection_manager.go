@@ -99,10 +99,10 @@ func deriveEndpointURL(baseURL, endpoint string) string {
 	rest := strings.TrimPrefix(strings.TrimPrefix(baseURL, "ws://"), "wss://")
 
 	// Find first slash (end of host:port)
-	slashIdx := strings.Index(rest, "/")
+	before, _, ok := strings.Cut(rest, "/")
 	var hostPort string
-	if slashIdx >= 0 {
-		hostPort = rest[:slashIdx]
+	if ok {
+		hostPort = before
 	} else {
 		hostPort = rest
 	}

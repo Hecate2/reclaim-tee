@@ -8,6 +8,7 @@ import (
 	"errors"
 	"math"
 	"math/big"
+	"slices"
 	"time"
 
 	"github.com/reclaimprotocol/reclaim-tee/router/geo"
@@ -103,10 +104,5 @@ func pickRandom(pairs []*store.Pair) (*store.Pair, error) {
 }
 
 func accepted(accepts []string, t string) bool {
-	for _, a := range accepts {
-		if a == t {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(accepts, t)
 }

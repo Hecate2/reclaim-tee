@@ -98,9 +98,15 @@ func startRouterMode(parent context.Context, config *TEETConfig, logger *shared.
 		}
 		var imageDigest, attestationType string
 		var attestation []byte
-		if teet.ratls != nil {
+		var snap shared.RATLSSnapshot
+		ratlsActive := teet.ratls != nil
+		if ratlsActive {
+			// One snapshot for the whole body: attestation, SPKI and body
+			// signature must all come from the same RA-TLS epoch, since the
+			// keypair rotates on every refresh.
+			snap = teet.ratls.Snapshot()
 			var err error
-			imageDigest, attestationType, attestation, err = shared.ExtractIdentityFromRATLS(teet.ratls, logger)
+			imageDigest, attestationType, attestation, err = shared.ExtractIdentityFromRATLS(snap, logger)
 			if err != nil {
 				return fmt.Errorf("extract identity: %w", err)
 			}
@@ -116,14 +122,15 @@ func startRouterMode(parent context.Context, config *TEETConfig, logger *shared.
 			AttestationType: attestationType,
 			AttestationJWT:  string(attestation),
 		}
-		// Bind the body to the attestation by signing it with the RA-TLS key.
-		if teet.ratls != nil {
-			spki, err := teet.ratls.PublicKeyDER()
+		// Bind the body to the attestation by signing it with the RA-TLS key
+		// from the SAME snapshot used for the attestation above.
+		if ratlsActive {
+			spki, err := snap.PublicKeyDER()
 			if err != nil {
 				return fmt.Errorf("marshal SPKI: %w", err)
 			}
 			digest := shared.RegistrationSigningDigest(regReq.PairID, regReq.Role, regReq.SelfAddr, regReq.PeerAddrClaim, regReq.ImageDigest)
-			sig, err := teet.ratls.SignRegistration(digest)
+			sig, err := snap.SignRegistration(digest)
 			if err != nil {
 				return fmt.Errorf("sign registration: %w", err)
 			}
@@ -201,7 +208,9 @@ func startRouterMode(parent context.Context, config *TEETConfig, logger *shared.
 		// Production: RA-TLS-protected HTTPS, RequestClientCert so peers
 		// can present an attested client cert (gated on the peer routes
 		// by enforcePeerMTLS) while anonymous clients hit /ws.
-		srvTLS := ratls.ServerTLSConfig()
+		// Deref teet.ratls (the guarded value), not the local alias, so the
+		// non-nil guard and the use are provably the same pointer.
+		srvTLS := teet.ratls.ServerTLSConfig()
 		srvTLS.ClientAuth = tls.RequestClientCert
 		// VerifyPeerCertificate fires for every handshake — including
 		// anonymous /ws clients who send no cert. Skip the RA-TLS check

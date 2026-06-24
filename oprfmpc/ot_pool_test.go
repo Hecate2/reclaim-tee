@@ -49,7 +49,7 @@ func TestOTPool_Reserve(t *testing.T) {
 	curve := elliptic.P256()
 
 	// Add 10 entries
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		setup, err := ot.GenerateCOSenderSetup(rand.Reader, curve)
 		if err != nil {
 			t.Fatalf("failed to create sender setup: %v", err)
@@ -108,7 +108,7 @@ func TestOTPool_NeedsExtend(t *testing.T) {
 
 	// Add entries above watermark (we'll add 15000 to be above 10000 watermark)
 	testSize := OTPoolWatermark + 5000
-	for i := 0; i < testSize; i++ {
+	for i := range testSize {
 		setup, err := ot.GenerateCOSenderSetup(rand.Reader, curve)
 		if err != nil {
 			t.Fatalf("failed to create sender setup: %v", err)
@@ -144,7 +144,7 @@ func TestOTPool_Clear(t *testing.T) {
 	curve := elliptic.P256()
 
 	// Add entries
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		setup, err := ot.GenerateCOSenderSetup(rand.Reader, curve)
 		if err != nil {
 			t.Fatalf("failed to create sender setup: %v", err)

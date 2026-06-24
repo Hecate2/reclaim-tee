@@ -130,6 +130,7 @@ const (
 	AttestorVersion_ATTESTOR_VERSION_2_0_1   AttestorVersion = 4
 	AttestorVersion_ATTESTOR_VERSION_3_0_0   AttestorVersion = 5
 	AttestorVersion_ATTESTOR_VERSION_3_1_0   AttestorVersion = 6
+	AttestorVersion_ATTESTOR_VERSION_3_2_0   AttestorVersion = 7
 )
 
 // Enum value maps for AttestorVersion.
@@ -142,6 +143,7 @@ var (
 		4: "ATTESTOR_VERSION_2_0_1",
 		5: "ATTESTOR_VERSION_3_0_0",
 		6: "ATTESTOR_VERSION_3_1_0",
+		7: "ATTESTOR_VERSION_3_2_0",
 	}
 	AttestorVersion_value = map[string]int32{
 		"ATTESTOR_VERSION_UNKNOWN": 0,
@@ -151,6 +153,7 @@ var (
 		"ATTESTOR_VERSION_2_0_1":   4,
 		"ATTESTOR_VERSION_3_0_0":   5,
 		"ATTESTOR_VERSION_3_1_0":   6,
+		"ATTESTOR_VERSION_3_2_0":   7,
 	}
 )
 
@@ -3396,7 +3399,7 @@ const file_attestor_api_proto_rawDesc = "" +
 	"%TRANSCRIPT_MESSAGE_SENDER_TYPE_SERVER\x10\x02*Z\n" +
 	"\x14ServiceSignatureType\x12\"\n" +
 	"\x1eSERVICE_SIGNATURE_TYPE_UNKNOWN\x10\x00\x12\x1e\n" +
-	"\x1aSERVICE_SIGNATURE_TYPE_ETH\x10\x01*\xd7\x01\n" +
+	"\x1aSERVICE_SIGNATURE_TYPE_ETH\x10\x01*\xf3\x01\n" +
 	"\x0fAttestorVersion\x12\x1c\n" +
 	"\x18ATTESTOR_VERSION_UNKNOWN\x10\x00\x12\x1a\n" +
 	"\x16ATTESTOR_VERSION_1_0_0\x10\x01\x12\x1a\n" +
@@ -3404,7 +3407,8 @@ const file_attestor_api_proto_rawDesc = "" +
 	"\x16ATTESTOR_VERSION_2_0_0\x10\x03\x12\x1a\n" +
 	"\x16ATTESTOR_VERSION_2_0_1\x10\x04\x12\x1a\n" +
 	"\x16ATTESTOR_VERSION_3_0_0\x10\x05\x12\x1a\n" +
-	"\x16ATTESTOR_VERSION_3_1_0\x10\x06*\xba\x02\n" +
+	"\x16ATTESTOR_VERSION_3_1_0\x10\x06\x12\x1a\n" +
+	"\x16ATTESTOR_VERSION_3_2_0\x10\a*\xba\x02\n" +
 	"\tErrorCode\x12\x12\n" +
 	"\x0eERROR_NO_ERROR\x10\x00\x12\x12\n" +
 	"\x0eERROR_INTERNAL\x10\x01\x12\x15\n" +

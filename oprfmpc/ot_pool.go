@@ -92,7 +92,7 @@ func (p *OTPool) GenerateEntries(rng io.Reader, curve elliptic.Curve, count int)
 	defer p.mu.Unlock()
 
 	startIdx := p.totalCount
-	for i := 0; i < count; i++ {
+	for i := range count {
 		setup, err := ot.GenerateCOSenderSetup(rng, curve)
 		if err != nil {
 			return fmt.Errorf("failed to generate OT setup at index %d: %w", startIdx+i, err)
@@ -124,7 +124,7 @@ func (p *OTPool) Reserve(count int) (startIndex int, entries []*OTPoolEntry, err
 	startIndex = p.nextIndex
 	entries = make([]*OTPoolEntry, count)
 
-	for i := 0; i < count; i++ {
+	for i := range count {
 		entry := p.entries[p.nextIndex+i]
 		if entry.Used {
 			return 0, nil, fmt.Errorf("OT entry %d already used (corruption detected)", p.nextIndex+i)
@@ -270,14 +270,14 @@ func (p *OTReceiverPool) Consume(startIndex int, count int) ([]*OTReceiverEntry,
 
 	// Validate all entries are unused BEFORE mutating any — keeps the pool
 	// consistent if a partial range is already used (no half-consumed state).
-	for i := 0; i < count; i++ {
+	for i := range count {
 		if p.entries[startIndex+i].Used {
 			return nil, fmt.Errorf("OT entry %d already used (replay)", startIndex+i)
 		}
 	}
 
 	entries := make([]*OTReceiverEntry, count)
-	for i := 0; i < count; i++ {
+	for i := range count {
 		entry := p.entries[startIndex+i]
 		entry.Used = true
 		entries[i] = entry
@@ -361,7 +361,7 @@ func DeserializeBulkCOSenderSetup(data []byte) ([]SenderPublicSetup, error) {
 
 	setups := make([]SenderPublicSetup, count)
 
-	for i := uint32(0); i < count; i++ {
+	for i := range count {
 		if offset+2 > len(data) {
 			return nil, fmt.Errorf("data too short for curve name length at entry %d", i)
 		}
@@ -463,7 +463,7 @@ func DeserializeBulkOTReceiverData(data []byte) (*OTReceiverData, error) {
 	}
 
 	points := make([]ot.ECPoint, pointCount)
-	for i := uint32(0); i < pointCount; i++ {
+	for i := range pointCount {
 		px, py, err := decompressPoint(data[offset : offset+compressedPointLen])
 		if err != nil {
 			return nil, fmt.Errorf("point %d: %w", i, err)
@@ -528,7 +528,7 @@ func DeserializeDualMasks(data []byte) ([]DualMask, error) {
 	masks := make([]DualMask, count)
 	offset := 4
 
-	for i := uint32(0); i < count; i++ {
+	for i := range count {
 		masks[i] = DualMask{
 			M0: ot.Label{
 				D0: binary.BigEndian.Uint64(data[offset : offset+8]),

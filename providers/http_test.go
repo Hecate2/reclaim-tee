@@ -381,6 +381,49 @@ func TestShouldHideChunkedPartsFromResponse(t *testing.T) {
 	}
 }
 
+func TestShouldRevealChunkFramingForNewClients(t *testing.T) {
+	simpleChunk := []byte("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n9\r\nchunk 1, \r\n7\r\nchunk 2\r\n0\r\n")
+
+	params := HTTPProviderParams{
+		URL:    "https://test.com",
+		Method: "GET",
+		ResponseRedactions: []ResponseRedaction{
+			{Regex: "chunk 1, chunk 2"},
+		},
+	}
+	ctx := ProviderCtx{Version: ATTESTOR_VERSION_3_2_0}
+
+	redactions, err := GetResponseRedactions(simpleChunk, &params, &ctx, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// apply redactions: asterisk the redacted ranges
+	redacted := make([]byte, len(simpleChunk))
+	copy(redacted, simpleChunk)
+	for _, r := range redactions {
+		for i := r.Start; i < r.Start+r.Length && i < len(redacted); i++ {
+			redacted[i] = '*'
+		}
+	}
+	out := string(redacted)
+
+	// chunk framing + transfer-encoding header are revealed verbatim
+	if !strings.Contains(out, "Transfer-Encoding: chunked") {
+		t.Errorf("transfer-encoding header should be revealed, got: %s", out)
+	}
+	if !strings.Contains(out, "9\r\nchunk 1, \r\n7\r\nchunk 2\r\n0\r\n") {
+		t.Errorf("chunk framing should be revealed, got: %s", out)
+	}
+	// other headers stay redacted
+	if strings.Contains(out, "Content-Type") {
+		t.Errorf("content-type header should be redacted")
+	}
+	if strings.Contains(out, "Connection") {
+		t.Errorf("connection header should be redacted")
+	}
+}
+
 // ADDITIONAL ERROR TESTS (missing from Go)
 
 func TestShouldThrowOnInvalidURL(t *testing.T) {
@@ -787,10 +830,7 @@ func TestCreateRequest_HostAndConnectionAreFirstTwoHeaders(t *testing.T) {
 		"Host: example.com\r\n" +
 		"Connection: close\r\n"
 	if !strings.HasPrefix(string(res.Data), want) {
-		clip := len(want) + 50
-		if clip > len(res.Data) {
-			clip = len(res.Data)
-		}
+		clip := min(len(want)+50, len(res.Data))
 		t.Errorf("request did not start with required prefix.\nwant:\n%q\ngot:\n%q",
 			want, string(res.Data[:clip]))
 	}

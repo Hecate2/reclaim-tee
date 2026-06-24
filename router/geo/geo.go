@@ -66,13 +66,6 @@ func Load(ctx context.Context, client *http.Client) error {
 	return nil
 }
 
-// IsLoaded reports whether the IP-range index is populated.
-func IsLoaded() bool {
-	mu.RLock()
-	defer mu.RUnlock()
-	return loaded
-}
-
 // RegionForIP resolves a cloud IP to its provider region ("" if unknown or the
 // index isn't loaded). ipStr may be a bare IP or host:port.
 func RegionForIP(ipStr string) string {
@@ -190,9 +183,9 @@ func ClientLatLon(v string) (lat, lon float64, ok bool) {
 	if v == "" {
 		return 0, 0, false
 	}
-	if i := strings.IndexByte(v, ','); i >= 0 {
-		la, e1 := strconv.ParseFloat(strings.TrimSpace(v[:i]), 64)
-		lo, e2 := strconv.ParseFloat(strings.TrimSpace(v[i+1:]), 64)
+	if before, after, ok0 := strings.Cut(v, ","); ok0 {
+		la, e1 := strconv.ParseFloat(strings.TrimSpace(before), 64)
+		lo, e2 := strconv.ParseFloat(strings.TrimSpace(after), 64)
 		if e1 == nil && e2 == nil {
 			return la, lo, true
 		}

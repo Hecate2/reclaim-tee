@@ -92,11 +92,10 @@ func TestSPKIHashFromCertDER_MatchesManager(t *testing.T) {
 	}
 }
 
-// TestSPKIHashFromCertDER_StableAcrossRefresh is the property we're
-// betting the world on: the SPKI hash computed from any cert this
-// manager has ever produced must be identical, because the keypair is
-// stable. If this test fails, the in-flight-refresh race is back.
-func TestSPKIHashFromCertDER_StableAcrossRefresh(t *testing.T) {
+// TestSPKIHashFromCertDER_RotatesAcrossRefresh verifies the keypair (and thus
+// the SPKI hash) is regenerated on every Refresh — the forward-secrecy property
+// that bounds a key-extraction's blast radius to one refresh interval.
+func TestSPKIHashFromCertDER_RotatesAcrossRefresh(t *testing.T) {
 	m, err := NewRATLSManager(t.Context(), "tee_k", nil)
 	if err != nil {
 		t.Fatalf("new manager: %v", err)
@@ -118,8 +117,8 @@ func TestSPKIHashFromCertDER_StableAcrossRefresh(t *testing.T) {
 	if err != nil {
 		t.Fatalf("hash after: %v", err)
 	}
-	if hashBefore != hashAfter {
-		t.Fatalf("SPKI hash CHANGED across refresh:\n  before: %x\n  after:  %x", hashBefore, hashAfter)
+	if hashBefore == hashAfter {
+		t.Fatalf("SPKI hash did NOT change across refresh; keypair should rotate:\n  before: %x\n  after:  %x", hashBefore, hashAfter)
 	}
 }
 
@@ -133,9 +132,8 @@ func TestSPKINoncePrefix(t *testing.T) {
 }
 
 // TestRATLSManager_RefreshRotatesCert verifies that Refresh produces a
-// different cert (new serial number) while keeping the same keypair. This
-// is the property that makes attestation rotation work without breaking
-// in-flight TLS sessions.
+// different cert (new serial) AND a fresh keypair (new SPKI). In-flight TLS
+// sessions keep their handshake-time cert; new handshakes get the new one.
 func TestRATLSManager_RefreshRotatesCert(t *testing.T) {
 	m, err := NewRATLSManager(t.Context(), "tee_k", nil)
 	if err != nil {
@@ -156,8 +154,8 @@ func TestRATLSManager_RefreshRotatesCert(t *testing.T) {
 	if before.Leaf.SerialNumber.Cmp(after.Leaf.SerialNumber) == 0 {
 		t.Fatal("expected new serial after Refresh")
 	}
-	if beforeSPKI != afterSPKI {
-		t.Fatal("SPKI hash must NOT change across Refresh (keypair is stable)")
+	if beforeSPKI == afterSPKI {
+		t.Fatal("SPKI hash must change across Refresh (keypair rotates)")
 	}
 }
 

@@ -86,9 +86,15 @@ func startRouterMode(parent context.Context, config *TEEKConfig, logger *shared.
 	register := func(ctx context.Context) error {
 		var imageDigest, attestationType string
 		var attestation []byte
-		if teek.ratls != nil {
+		var snap shared.RATLSSnapshot
+		ratlsActive := teek.ratls != nil
+		if ratlsActive {
+			// One snapshot for the whole body: attestation, SPKI and body
+			// signature must all come from the same RA-TLS epoch, since the
+			// keypair rotates on every refresh.
+			snap = teek.ratls.Snapshot()
 			var err error
-			imageDigest, attestationType, attestation, err = shared.ExtractIdentityFromRATLS(teek.ratls, logger)
+			imageDigest, attestationType, attestation, err = shared.ExtractIdentityFromRATLS(snap, logger)
 			if err != nil {
 				return fmt.Errorf("extract identity: %w", err)
 			}
@@ -105,14 +111,15 @@ func startRouterMode(parent context.Context, config *TEEKConfig, logger *shared.
 			AttestationType: attestationType,
 			AttestationJWT:  string(attestation),
 		}
-		// Bind the body to the attestation by signing it with the RA-TLS key.
-		if teek.ratls != nil {
-			spki, err := teek.ratls.PublicKeyDER()
+		// Bind the body to the attestation by signing it with the RA-TLS key
+		// from the SAME snapshot used for the attestation above.
+		if ratlsActive {
+			spki, err := snap.PublicKeyDER()
 			if err != nil {
 				return fmt.Errorf("marshal SPKI: %w", err)
 			}
 			digest := shared.RegistrationSigningDigest(regReq.PairID, regReq.Role, regReq.SelfAddr, regReq.PeerAddrClaim, regReq.ImageDigest)
-			sig, err := teek.ratls.SignRegistration(digest)
+			sig, err := snap.SignRegistration(digest)
 			if err != nil {
 				return fmt.Errorf("sign registration: %w", err)
 			}

@@ -205,7 +205,7 @@ func CMACGarblerOnline(rng io.Reader, curve elliptic.Curve, garblerInput [80]byt
 	// One scratch shared across 640 iterations, mutated in place.
 	dualMasks := make([]DualMask, cmacInputBitCount)
 	scratch := newNistecScratch()
-	for i := 0; i < cmacInputBitCount; i++ {
+	for i := range cmacInputBitCount {
 		entry := otEntries[i]
 		wire := evaluatorWires[i]
 		r0, r1, err := deriveRandomLabelsFromSetup(entry.SenderSetup, entry.ReceiverPoint, i, scratch)
@@ -274,7 +274,7 @@ func CMACEvaluatorOnline(curve elliptic.Curve, payload *CMACOnlinePayload, evalu
 	// for the rationale.
 	evaluatorLabels := make([]ot.Label, cmacInputBitCount)
 	scratch := newNistecScratch()
-	for i := 0; i < cmacInputBitCount; i++ {
+	for i := range cmacInputBitCount {
 		entry := receiverEntries[i]
 		mask := payload.DualMasks[i]
 
@@ -524,14 +524,6 @@ func deriveReceivedLabelFromEntry(entry *OTReceiverEntry, index int, s *nistecSc
 
 // Serialization helpers for wire protocol
 
-// serializeLabel serializes a Label (two uint64s) to 16 bytes
-func serializeLabel(l ot.Label) []byte {
-	buf := make([]byte, 16)
-	binary.BigEndian.PutUint64(buf[0:8], l.D0)
-	binary.BigEndian.PutUint64(buf[8:16], l.D1)
-	return buf
-}
-
 // deserializeLabel deserializes 16 bytes to a Label
 func deserializeLabel(data []byte) ot.Label {
 	return ot.Label{
@@ -724,7 +716,7 @@ func DeserializeOutputLabels(data []byte) ([]ot.Label, error) {
 
 	labels := make([]ot.Label, count)
 	offset := 4
-	for i := uint32(0); i < count; i++ {
+	for i := range count {
 		labels[i] = ot.Label{
 			D0: binary.BigEndian.Uint64(data[offset : offset+8]),
 			D1: binary.BigEndian.Uint64(data[offset+8 : offset+16]),

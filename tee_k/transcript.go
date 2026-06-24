@@ -49,7 +49,15 @@ func (t *TEEK) generateComprehensiveSignatureAndSendTranscript(sessionID string)
 		return fmt.Errorf("session %s not found: %v", sessionID, err)
 	}
 
-	if t.signingKeyPair == nil {
+	// Snapshot the signing keypair together with its attestation. Both rotate
+	// on every refresh, so they must be read as one consistent epoch — the
+	// bundle is signed by keyPair and carries attestationReport, which binds
+	// keyPair's ETH address.
+	keyPair, attestationReport, err := t.signingEpoch(sessionID)
+	if err != nil {
+		return fmt.Errorf("get signing epoch: %v", err)
+	}
+	if keyPair == nil {
 		return fmt.Errorf("no signing key pair available")
 	}
 
@@ -93,7 +101,7 @@ func (t *TEEK) generateComprehensiveSignatureAndSendTranscript(sessionID string)
 	}
 
 	// Get ETH address for this key pair
-	ethAddress := t.signingKeyPair.GetEthAddress()
+	ethAddress := keyPair.GetEthAddress()
 
 	timestampMs := time.Now().UnixMilli()
 	kPayload := &teeproto.KOutputPayload{
@@ -135,7 +143,7 @@ func (t *TEEK) generateComprehensiveSignatureAndSendTranscript(sessionID string)
 	}
 
 	// Sign the exact protobuf body bytes
-	comprehensiveSignature, err := t.signingKeyPair.SignData(body)
+	comprehensiveSignature, err := keyPair.SignData(body)
 	if err != nil {
 		return fmt.Errorf("failed to generate comprehensive signature: %v", err)
 	}
@@ -144,20 +152,15 @@ func (t *TEEK) generateComprehensiveSignatureAndSendTranscript(sessionID string)
 		zap.Int("body_bytes", len(body)),
 		zap.Int("signature_bytes", len(comprehensiveSignature)))
 
-	// Generate attestation report for enclave mode, or use public key for standalone
-	var attestationReport *teeproto.AttestationReport
+	// Attestation report (router mode) was snapshotted with keyPair above so the
+	// two stay in the same epoch; standalone uses the ETH address instead.
 	var publicKeyForStandalone []byte
-
 	if t.ratls != nil {
-		// Router mode: include attestation report
-		var err error
-		attestationReport, err = t.generateAttestationReport(sessionID)
-		if err != nil {
-			return fmt.Errorf("failed to generate attestation report: %v", err)
+		if attestationReport == nil {
+			return fmt.Errorf("no attestation available for SignedMessage")
 		}
 		t.logger.WithSession(sessionID).Debug("Including attestation report in SignedMessage")
 	} else {
-		// Standalone mode: include ETH address as public key
 		publicKeyForStandalone = []byte(ethAddress.String())
 		t.logger.WithSession(sessionID).Debug("Including ETH address in SignedMessage (standalone mode)")
 	}

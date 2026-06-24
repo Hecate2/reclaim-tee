@@ -26,6 +26,9 @@ func (t *TEEK) getCurrentCertRaw() ([]byte, error) {
 // generateAttestationDoc produces a fresh GCP attestation token bound to
 // the supplied nonces, against the launcher socket on the host.
 func (t *TEEK) generateAttestationDoc(ctx context.Context, nonces ...string) ([]byte, error) {
+	if t.genAttestationDocFn != nil {
+		return t.genAttestationDocFn(ctx, nonces...)
+	}
 	if shared.IsSEVSNPMode() {
 		return shared.GenerateSEVSNPNonceAttestation(nonces)
 	}
@@ -48,16 +51,20 @@ func (t *TEEK) refreshAttestation() error {
 		return nil
 	}
 
-	// Get ETH address for this key pair
-	ethAddress := t.signingKeyPair.GetEthAddress()
+	// Rotate the signing keypair on every refresh (forward secrecy): a key
+	// extracted via a TEE compromise is only useful until the next refresh.
+	// The fresh attestation below binds this new key's ETH address, and the
+	// bundle path snapshots {signingKeyPair, cachedAttestation} together, so a
+	// bundle is always signed by the key its embedded attestation vouches for.
+	newKeyPair, err := shared.GenerateSigningKeyPair()
+	if err != nil {
+		return fmt.Errorf("rotate signing key: %v", err)
+	}
+	ethAddress := newKeyPair.GetEthAddress()
 
-	// Bind the attestation to the TLS *keypair* via SPKI hash — invariant
-	// across cert refreshes. The cert envelope (DER bytes) changes every
-	// 4 minutes when the cert rotates, but the keypair (and therefore the
-	// SPKI) is generated once and never rotates. A previous version used
-	// sha256(cert.DER) here; that produced mismatches when a session
-	// straddled a cert refresh because the client's TLS conn was frozen
-	// on the old DER while this cached attestation moved to the new one.
+	// Bind the attestation to the current TLS keypair's SPKI hash. The RA-TLS
+	// key also rotates on refresh; ratls.Refresh runs immediately before this
+	// callback, so SPKIHash() already reflects the new key.
 	spkiHash := t.ratls.SPKIHash()
 
 	publicKeyNonce := fmt.Sprintf("tee_k_public_key:%s", ethAddress.Hex())
@@ -74,8 +81,10 @@ func (t *TEEK) refreshAttestation() error {
 		Report: attestationDoc,
 	}
 
-	// Cache the new attestation
+	// Publish the new signing key + its attestation atomically so no bundle
+	// observes a key from one epoch with an attestation from another.
 	t.attestationMutex.Lock()
+	t.signingKeyPair = newKeyPair
 	t.cachedAttestation = attestationReport
 	// Expiry tracks the real NitroTPM leaf (AWS) so we stop serving / refresh
 	// before it expires, instead of a fixed guess; falls back to the cache TTL
@@ -100,10 +109,7 @@ func (t *TEEK) nextRATLSRefresh() time.Duration {
 	t.attestationMutex.RLock()
 	exp := t.attestationExpiry
 	t.attestationMutex.RUnlock()
-	d := time.Until(exp)
-	if d > shared.RATLSRefreshIntervalSNP {
-		d = shared.RATLSRefreshIntervalSNP
-	}
+	d := min(time.Until(exp), shared.RATLSRefreshIntervalSNP)
 	if d < 10*time.Minute {
 		d = 10 * time.Minute
 	}
@@ -166,6 +172,22 @@ func (t *TEEK) generateAttestationReport(sessionID string) (*teeproto.Attestatio
 	return t.getCachedAttestation(sessionID)
 }
 
+// signingEpoch returns a consistent snapshot of {signing keypair, attestation}
+// for building a bundle. The keypair rotates on every attestation refresh, so
+// the two MUST be read together under one lock — otherwise a bundle could be
+// signed by a key from one epoch while carrying an attestation from another.
+// It first ensures the attestation is fresh (refreshing+rotating if stale).
+func (t *TEEK) signingEpoch(sessionID string) (*shared.SigningKeyPair, *teeproto.AttestationReport, error) {
+	if t.ratls != nil {
+		if _, err := t.getCachedAttestation(sessionID); err != nil {
+			return nil, nil, err
+		}
+	}
+	t.attestationMutex.RLock()
+	defer t.attestationMutex.RUnlock()
+	return t.signingKeyPair, t.cachedAttestation, nil
+}
+
 // generateAttestationForTEET generates attestation for mutual auth with TEE_T
 func (t *TEEK) generateAttestationForTEET() (*teeproto.AttestationReport, error) {
 	// Standalone (local-dev) mode: TEE_T won't run a real attestation
@@ -179,9 +201,10 @@ func (t *TEEK) generateAttestationForTEET() (*teeproto.AttestationReport, error)
 	}
 
 	// Router mode: generate attestation with eth address and SPKI hash.
-	// SPKI is invariant across cert refreshes; binding to it eliminates
-	// the mid-session-refresh race that cert-DER hashing introduced.
+	// Read the signing key under the lock since it rotates on refresh.
+	t.attestationMutex.RLock()
 	ethAddress := t.signingKeyPair.GetEthAddress()
+	t.attestationMutex.RUnlock()
 	spkiHash := t.ratls.SPKIHash()
 
 	publicKeyNonce := fmt.Sprintf("tee_k_public_key:%s", ethAddress.Hex())

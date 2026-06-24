@@ -192,6 +192,8 @@ func GetResponseRedactions(response []byte, rawParams *HTTPProviderParams, ctx *
 		return nil, errors.New("Failed to find response body")
 	}
 
+	revealFraming := shouldRevealChunkFraming(ctx)
+
 	reveals := []shared.ResponseRedactionRange{{Start: 0, Length: headerEndIndex}}
 
 	// CRLF boundary: only verify and reveal when client supports it
@@ -212,13 +214,20 @@ func GetResponseRedactions(response []byte, rawParams *HTTPProviderParams, ctx *
 		reveals = append(reveals, rng)
 	}
 
+	// reveal transfer-encoding header so the verifier can dechunk the body
+	if revealFraming {
+		if rng, ok := res.HeaderLowerToRanges["transfer-encoding"]; ok && rng.Length > 0 {
+			reveals = append(reveals, rng)
+		}
+	}
+
 	logger.Info("Step 4/4: Processing redaction requests", zap.String("component", "HTTP"), zap.String("operation", "GetResponseRedactions"), zap.Int("step", 4), zap.Int("total", 4))
 	bodyStr := uint8ArrayToStr(res.Body)
 	redactions := []shared.ResponseRedactionRange{}
 
 	for i, rs := range params.ResponseRedactions {
 
-		proc, err := processRedactionRequest(bodyStr, &rs, bodyStartIdx, res.Chunks)
+		proc, err := processRedactionRequest(bodyStr, &rs, bodyStartIdx, res.Chunks, revealFraming)
 		if err != nil {
 			logger.Error("Redaction failed", zap.String("component", "HTTP"), zap.String("operation", "GetResponseRedactions"), zap.Int("redaction_index", i+1), zap.Error(err))
 			return nil, err
@@ -230,39 +239,63 @@ func GetResponseRedactions(response []byte, rawParams *HTTPProviderParams, ctx *
 		}
 	}
 
-	sort.Slice(reveals, func(i, j int) bool { return reveals[i].Start+reveals[i].Length < reveals[j].Start+reveals[j].Length })
-
-	if len(reveals) > 1 {
-		currentIndex := 0
-		for i, r := range reveals {
-			if currentIndex < r.Start {
-				redactions = append(redactions, shared.ResponseRedactionRange{Start: currentIndex, Length: r.Start - currentIndex})
+	// reveal all chunk framing (size lines + terminator) so the verifier can
+	// dechunk; chunk data stays redacted unless a redaction reveals it
+	if revealFraming && len(res.Chunks) > 0 {
+		prev := res.HeaderEndIdx + 4
+		for _, chunk := range res.Chunks {
+			if chunk.Start > prev {
+				reveals = append(reveals, shared.ResponseRedactionRange{Start: prev, Length: chunk.Start - prev})
 			}
-			currentIndex = r.Start + r.Length
+			prev = chunk.Start + chunk.Length
+		}
+		if len(response) > prev {
+			reveals = append(reveals, shared.ResponseRedactionRange{Start: prev, Length: len(response) - prev})
+		}
+	}
 
-			// For chunked responses, check if this is the final reveal that spans the entire body
-			// This matches TypeScript behavior which includes chunked termination sequences
-			if len(res.Chunks) > 0 && i == len(reveals)-1 {
-				// Check if this reveal ends at the exact end of the body content
-				// by checking if it maps to the end of the last chunk
-				if len(res.Chunks) > 0 {
+	if revealFraming {
+		// reveals can overlap (a redaction reveal spanning chunk framing), so
+		// redact the complement of their union
+		sort.Slice(reveals, func(i, j int) bool { return reveals[i].Start < reveals[j].Start })
+		if len(reveals) > 1 {
+			currentIndex := 0
+			for _, r := range reveals {
+				if currentIndex < r.Start {
+					redactions = append(redactions, shared.ResponseRedactionRange{Start: currentIndex, Length: r.Start - currentIndex})
+				}
+				if end := r.Start + r.Length; end > currentIndex {
+					currentIndex = end
+				}
+			}
+			if currentIndex < len(response) {
+				redactions = append(redactions, shared.ResponseRedactionRange{Start: currentIndex, Length: len(response) - currentIndex})
+			}
+		}
+	} else {
+		sort.Slice(reveals, func(i, j int) bool { return reveals[i].Start+reveals[i].Length < reveals[j].Start+reveals[j].Length })
+
+		if len(reveals) > 1 {
+			currentIndex := 0
+			for i, r := range reveals {
+				if currentIndex < r.Start {
+					redactions = append(redactions, shared.ResponseRedactionRange{Start: currentIndex, Length: r.Start - currentIndex})
+				}
+				currentIndex = r.Start + r.Length
+
+				// legacy: extend the final chunked reveal to EOF to match old TS
+				if len(res.Chunks) > 0 && i == len(reveals)-1 {
 					lastChunk := res.Chunks[len(res.Chunks)-1]
 					lastChunkEnd := lastChunk.Start + lastChunk.Length
-
-					// If the final reveal ends exactly where the last chunk ends,
-					// and there's trailing data, extend to include it (like TypeScript)
 					if currentIndex == lastChunkEnd && currentIndex < len(response) {
-						logger.Debug("Extending final chunked reveal to match TypeScript behavior", zap.String("component", "HTTP"), zap.String("operation", "GetResponseRedactions"), zap.Int("from_position", currentIndex), zap.Int("to_position", len(response)))
 						currentIndex = len(response)
 					}
 				}
 			}
-		}
-		// Always use the full response length to match TypeScript behavior
-		// TypeScript includes all data including chunked termination sequences
-		endIndex := len(response)
-		if currentIndex < endIndex {
-			redactions = append(redactions, shared.ResponseRedactionRange{Start: currentIndex, Length: endIndex - currentIndex})
+			endIndex := len(response)
+			if currentIndex < endIndex {
+				redactions = append(redactions, shared.ResponseRedactionRange{Start: currentIndex, Length: endIndex - currentIndex})
+			}
 		}
 	}
 

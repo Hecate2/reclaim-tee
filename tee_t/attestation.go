@@ -25,6 +25,9 @@ func (t *TEET) getCurrentCertRaw() ([]byte, error) {
 // generateAttestationDoc produces a fresh GCP attestation token bound to
 // the supplied nonces, against the launcher socket on the host.
 func (t *TEET) generateAttestationDoc(ctx context.Context, nonces ...string) ([]byte, error) {
+	if t.genAttestationDocFn != nil {
+		return t.genAttestationDocFn(ctx, nonces...)
+	}
 	if shared.IsSEVSNPMode() {
 		return shared.GenerateSEVSNPNonceAttestation(nonces)
 	}
@@ -44,11 +47,19 @@ func (t *TEET) refreshAttestation() error {
 	if t.ratls == nil {
 		return nil
 	}
-	ethAddress := t.signingKeyPair.GetEthAddress()
 
-	// Bind to SPKI (stable across cert refreshes), not cert DER (changes
-	// every 4 min). See tee_k/attestation.go's refreshAttestation for the
-	// full rationale.
+	// Rotate the signing keypair on every refresh (forward secrecy), mirroring
+	// TEE_K. The fresh attestation binds this new key's ETH address, and the
+	// bundle path snapshots {signingKeyPair, cachedAttestation} together.
+	newKeyPair, err := shared.GenerateSigningKeyPair()
+	if err != nil {
+		return fmt.Errorf("rotate signing key: %v", err)
+	}
+	ethAddress := newKeyPair.GetEthAddress()
+
+	// Bind to the current keypair's SPKI hash. The RA-TLS key also rotates on
+	// refresh; ratls.Refresh runs immediately before this callback, so
+	// SPKIHash() already reflects the new key.
 	spkiHash := t.ratls.SPKIHash()
 
 	publicKeyNonce := fmt.Sprintf("tee_t_public_key:%s", ethAddress.Hex())
@@ -60,7 +71,9 @@ func (t *TEET) refreshAttestation() error {
 	}
 
 	attestationReport := &teeproto.AttestationReport{Type: attestationReportType(), Report: raw}
+	// Publish the new signing key + its attestation atomically.
 	t.attestationMutex.Lock()
+	t.signingKeyPair = newKeyPair
 	t.cachedAttestation = attestationReport
 	// Expiry tracks the real NitroTPM leaf (AWS) so we stop serving / refresh
 	// before it expires, instead of a fixed guess; falls back to the cache TTL
@@ -85,10 +98,7 @@ func (t *TEET) nextRATLSRefresh() time.Duration {
 	t.attestationMutex.RLock()
 	exp := t.attestationExpiry
 	t.attestationMutex.RUnlock()
-	d := time.Until(exp)
-	if d > shared.RATLSRefreshIntervalSNP {
-		d = shared.RATLSRefreshIntervalSNP
-	}
+	d := min(time.Until(exp), shared.RATLSRefreshIntervalSNP)
 	if d < 10*time.Minute {
 		d = 10 * time.Minute
 	}
@@ -142,6 +152,22 @@ func (t *TEET) getCachedAttestation(sessionID string) (*teeproto.AttestationRepo
 
 func (t *TEET) generateAttestationReport(sessionID string) (*teeproto.AttestationReport, error) {
 	return t.getCachedAttestation(sessionID)
+}
+
+// signingEpoch returns a consistent snapshot of {signing keypair, attestation}
+// for building a bundle. The keypair rotates on every attestation refresh, so
+// the two MUST be read together under one lock — otherwise a bundle could be
+// signed by a key from one epoch while carrying an attestation from another.
+// It first ensures the attestation is fresh (refreshing+rotating if stale).
+func (t *TEET) signingEpoch(sessionID string) (*shared.SigningKeyPair, *teeproto.AttestationReport, error) {
+	if t.ratls != nil {
+		if _, err := t.getCachedAttestation(sessionID); err != nil {
+			return nil, nil, err
+		}
+	}
+	t.attestationMutex.RLock()
+	defer t.attestationMutex.RUnlock()
+	return t.signingKeyPair, t.cachedAttestation, nil
 }
 
 // generateAttestationForTEEK generates attestation with cert hash for mutual auth

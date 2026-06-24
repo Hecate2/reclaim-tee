@@ -2,20 +2,15 @@ package client
 
 import (
 	"bytes"
-	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"slices"
 	"sort"
-	"strings"
 
-	"github.com/fxamacker/cbor/v2"
-	"github.com/gorilla/websocket"
 	"github.com/reclaimprotocol/reclaim-tee/minitls"
 	teeproto "github.com/reclaimprotocol/reclaim-tee/proto"
 	"github.com/reclaimprotocol/reclaim-tee/providers"
-	"github.com/reclaimprotocol/reclaim-tee/shared"
 
 	"github.com/mr-tron/base58"
 	prover "github.com/reclaimprotocol/zk-symmetric-crypto/gnark/libraries/prover/impl"
@@ -324,181 +319,6 @@ func stripUnsignedFields(msg *teeproto.SignedMessage) *teeproto.SignedMessage {
 // extractCertHashFromAttestation extracts a cert hash nonce from a GCP attestation JWT.
 // The JWT's eat_nonce claim may be a string or array; this searches for a nonce matching
 // the given prefix (e.g. "tee_k_cert_hash:") and returns the hex hash value.
-// Returns "" if no cert hash nonce is found (e.g. older TEE without cert hash support).
-// extractSEVSNPNonce reads the presentable nonce list from a SEV-SNP combined
-// attestation (1-byte cloud tag + CBOR envelope) and returns the value after
-// prefix. Decode-only — the attestor verifies the binding.
-func extractSEVSNPNonce(report []byte, prefix string) string {
-	if len(report) < 2 {
-		return ""
-	}
-	var env struct {
-		Nonces []string `cbor:"nonces"`
-	}
-	if err := cbor.Unmarshal(report[1:], &env); err != nil {
-		return ""
-	}
-	for _, n := range env.Nonces {
-		if v, ok := strings.CutPrefix(n, prefix); ok {
-			return v
-		}
-	}
-	return ""
-}
-
-func extractCertHashFromAttestation(attestation *teeproto.AttestationReport, prefix string) string {
-	if attestation == nil || len(attestation.Report) == 0 {
-		return ""
-	}
-
-	// SEV-SNP attestations carry the nonces in a CBOR envelope (tag byte +
-	// {nonces:[...]}) rather than a CS JWT eat_nonce. Read them directly; like
-	// the JWT path, this does not verify the attestation (the attestor does).
-	if attestation.Type == "sev-snp" {
-		return extractSEVSNPNonce(attestation.Report, prefix)
-	}
-
-	// Parse JWT payload (second segment) without full validation --
-	// signature verification is the attestor's responsibility.
-	tokenStr := strings.TrimSpace(string(attestation.Report))
-	parts := strings.Split(tokenStr, ".")
-	if len(parts) != 3 {
-		return ""
-	}
-
-	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
-	if err != nil {
-		return ""
-	}
-
-	var claims map[string]any
-	if err := json.Unmarshal(payload, &claims); err != nil {
-		return ""
-	}
-
-	eatNonceRaw, ok := claims["eat_nonce"]
-	if !ok {
-		return ""
-	}
-
-	// Collect nonces from either string or array format
-	var nonces []string
-	switch v := eatNonceRaw.(type) {
-	case string:
-		nonces = []string{v}
-	case []any:
-		for _, item := range v {
-			if s, ok := item.(string); ok {
-				nonces = append(nonces, s)
-			}
-		}
-	}
-
-	for _, nonce := range nonces {
-		if strings.HasPrefix(nonce, prefix) {
-			return strings.TrimPrefix(nonce, prefix)
-		}
-	}
-
-	return ""
-}
-
-// peerSPKIHash extracts sha256(MarshalPKIXPublicKey(peer.PublicKey)) from
-// the peer TLS certificate on a WebSocket connection.
-//
-// The attestation nonce binds to the SPKI hash rather than the cert DER
-// because the TEE rotates the cert envelope (new serial, NotBefore,
-// attestation extension) every ~4 minutes while keeping the same TLS
-// keypair. Binding to the cert DER would mismatch whenever a session
-// straddled a refresh — the client's TLS state holds whatever DER was
-// presented at handshake, but the TEE's cached attestation would by
-// then bind to the next DER. The SPKI never changes for the manager's
-// lifetime, so this binding is race-free.
-//
-// Returns "", nil if the connection is not TLS (standalone ws:// or
-// mobile native bridge).
-func peerSPKIHash(conn *websocket.Conn) (string, error) {
-	if conn == nil {
-		return "", nil
-	}
-
-	tlsConn, ok := conn.NetConn().(*tls.Conn)
-	if !ok {
-		return "", nil
-	}
-
-	state := tlsConn.ConnectionState()
-	if len(state.PeerCertificates) == 0 {
-		return "", fmt.Errorf("TLS connection has no peer certificates")
-	}
-
-	hash, err := shared.SPKIHashFromCertDER(state.PeerCertificates[0].Raw)
-	if err != nil {
-		return "", fmt.Errorf("compute SPKI hash: %w", err)
-	}
-	return fmt.Sprintf("%x", hash[:]), nil
-}
-
-// verifyAttestationSPKIBinding checks that the SPKI hash in each TEE's
-// attestation matches the SPKI of the cert the client saw on its WS
-// connections. SPKI (not the full cert DER) because the TEE's cert
-// envelope rotates ~every 4 minutes while the keypair is stable — the
-// only race-free binding is to the keypair.
-//
-// Skipped when: no attestation reports (standalone mode), or no TLS
-// state available (mobile native networking, ws://).
-func (c *Client) verifyAttestationSPKIBinding() error {
-	if err := c.verifyOneSPKIBinding(
-		c.teekSignedMessage.GetAttestationReport(),
-		c.wsConn,
-		shared.SPKINoncePrefix("tee_k"),
-		"TEE_K",
-	); err != nil {
-		return err
-	}
-	if err := c.verifyOneSPKIBinding(
-		c.teetSignedMessage.GetAttestationReport(),
-		c.teetConn,
-		shared.SPKINoncePrefix("tee_t"),
-		"TEE_T",
-	); err != nil {
-		return err
-	}
-	return nil
-}
-
-// verifyOneSPKIBinding verifies a single TEE's attestation SPKI hash
-// against the connection's peer cert SPKI.
-func (c *Client) verifyOneSPKIBinding(attestation *teeproto.AttestationReport, conn *websocket.Conn, noncePrefix string, teeName string) error {
-	// No attestation report means standalone mode -- skip
-	if attestation == nil {
-		c.logger.Debug("No attestation report, skipping SPKI check", zap.String("tee", teeName))
-		return nil
-	}
-
-	attestedHash := extractCertHashFromAttestation(attestation, noncePrefix)
-	if attestedHash == "" {
-		return fmt.Errorf("%s attestation missing %q nonce", teeName, noncePrefix)
-	}
-
-	connHash, err := peerSPKIHash(conn)
-	if err != nil {
-		return fmt.Errorf("%s SPKI hash verification failed: %v", teeName, err)
-	}
-	if connHash == "" {
-		// No TLS state available (mobile native networking or ws://) -- skip
-		c.logger.Debug("No TLS state available, skipping SPKI check", zap.String("tee", teeName))
-		return nil
-	}
-
-	if attestedHash != connHash {
-		return fmt.Errorf("%s SPKI mismatch: attestation says %q, TLS conn SPKI hashes to %q", teeName, attestedHash, connHash)
-	}
-
-	c.logger.Info("Attestation SPKI binding verified", zap.String("tee", teeName))
-	return nil
-}
-
 // buildVerificationBundle creates the actual verification bundle
 // SECURITY: This function validates that required data is present before creating bundle
 func (c *Client) buildVerificationBundle() ([]byte, error) {
@@ -512,12 +332,10 @@ func (c *Client) buildVerificationBundle() ([]byte, error) {
 		return nil, fmt.Errorf("SECURITY ERROR: missing TEE_T signed message - protocol incomplete")
 	}
 
-	// SECURITY: Verify attestation cert hashes match the TLS certificates on our connections.
-	// This binds the attestation to the specific TLS channel, preventing certificate substitution.
-	// Skipped in standalone mode (no attestation reports) and on mobile (no access to TLS state).
-	if err := c.verifyAttestationSPKIBinding(); err != nil {
-		return nil, fmt.Errorf("SECURITY ERROR: %v", err)
-	}
+	// Channel<->attestation SPKI binding intentionally NOT checked here: TEE keys
+	// rotate on every attestation refresh, so a session can outlive the cert its
+	// channel froze on. Genuineness is covered by the RA-TLS handshake check and
+	// the attestor's independent attestation+signature verification on the bundle.
 
 	// TEE_K signed message (K_OUTPUT) - strip unsigned metadata fields before sending to attestor
 	// The unsigned fields (ResponsePackets, ServerAppKey, CipherSuite) are only used client-side

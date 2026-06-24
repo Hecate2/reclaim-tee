@@ -65,13 +65,10 @@ func TestCleanupSession_DifferentSessions_NoCrossEffect(t *testing.T) {
 	// Each session gets several concurrent cleanup attempts.
 	var wg sync.WaitGroup
 	for _, sid := range sids {
-		sid := sid
 		for range 3 {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
+			wg.Go(func() {
 				teek.cleanupSession(sid)
-			}()
+			})
 		}
 	}
 	wg.Wait()

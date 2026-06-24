@@ -114,7 +114,7 @@ func verifyCombinedGCP(env combinedEnvelope, bound []byte) (app, base string, er
 // verifiedPCRs finds the SHA-256 quote, verifies its signature + nonce + PCR
 // digest under akPub (via go-tpm-tools' quote.Verify), and returns the trusted
 // PCR 8 and PCR 11 values.
-func verifiedPCRs(att *tpmpb.Attestation, akPub interface{}, nonce []byte) (pcr8, pcr11 []byte, err error) {
+func verifiedPCRs(att *tpmpb.Attestation, akPub any, nonce []byte) (pcr8, pcr11 []byte, err error) {
 	for _, q := range att.GetQuotes() {
 		if q.GetPcrs().GetHash() != tpmprotopb.HashAlgo_SHA256 {
 			continue

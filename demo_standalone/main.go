@@ -143,13 +143,6 @@ func zkInitCallback(algorithmID uint8) bool {
 	return true
 }
 
-// ptrString returns a pointer to a string value
-//
-//go:fix inline
-func ptrString(s string) *string {
-	return new(s)
-}
-
 // setupZKLazyLoading sets up the lazy loading callback for ZK circuits
 func setupZKLazyLoading(logger *shared.Logger) error {
 	// Resolve and validate circuits directory exists
@@ -215,8 +208,8 @@ func main() {
 			positional = append(positional, a)
 			continue
 		}
-		if strings.HasPrefix(a, "--router-url=") {
-			routerURL = strings.TrimPrefix(a, "--router-url=")
+		if after, ok := strings.CutPrefix(a, "--router-url="); ok {
+			routerURL = after
 			continue
 		}
 		positional = append(positional, a)

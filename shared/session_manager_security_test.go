@@ -8,7 +8,7 @@ import (
 
 func TestCreateSessionRespectsMaxSessionsUnderConcurrency(t *testing.T) {
 	sm := NewSessionManager()
-	for i := 0; i < MaxSessions-10; i++ {
+	for i := range MaxSessions - 10 {
 		_, err := sm.CreateSession(nil)
 		if err != nil {
 			t.Fatalf("failed to create session %d: %v", i, err)
@@ -19,17 +19,15 @@ func TestCreateSessionRespectsMaxSessionsUnderConcurrency(t *testing.T) {
 	var successCount atomic.Int32
 	var failCount atomic.Int32
 
-	for i := 0; i < 50; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range 50 {
+		wg.Go(func() {
 			_, err := sm.CreateSession(nil)
 			if err != nil {
 				failCount.Add(1)
 			} else {
 				successCount.Add(1)
 			}
-		}()
+		})
 	}
 	wg.Wait()
 

@@ -236,8 +236,8 @@ func RunRATLSRefresh(ctx context.Context, ratls *RATLSManager, postRefresh func(
 // attestation JWT + container image digest out of it. The same JWT goes
 // into the router registration body; the digest is the router's
 // allowlist key.
-func ExtractIdentityFromRATLS(ratls *RATLSManager, logger *Logger) (imageDigest, attestationType string, attestation []byte, err error) {
-	cert := ratls.Certificate()
+func ExtractIdentityFromRATLS(snap RATLSSnapshot, logger *Logger) (imageDigest, attestationType string, attestation []byte, err error) {
+	cert := snap.Certificate()
 	if cert == nil || cert.Leaf == nil {
 		return "", "", nil, errors.New("RA-TLS manager has no current cert")
 	}
@@ -245,7 +245,7 @@ func ExtractIdentityFromRATLS(ratls *RATLSManager, logger *Logger) (imageDigest,
 	// SEV-SNP (OID .2) takes precedence when present. The report is binary, so
 	// it travels base64-encoded in the JSON register body; the router decodes it.
 	if report := findExtension(leaf, AttestationOIDSEVSNP); report != nil {
-		spki, serr := ratls.PublicKeyDER()
+		spki, serr := snap.PublicKeyDER()
 		if serr != nil {
 			return "", "", nil, fmt.Errorf("marshal SPKI: %w", serr)
 		}

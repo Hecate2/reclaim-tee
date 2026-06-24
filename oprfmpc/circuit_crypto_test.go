@@ -50,7 +50,7 @@ func mustDeriveReceivedLabel(t *testing.T, entry *OTReceiverEntry, index int) ot
 func TestECDHLabelDerivation_Choice0(t *testing.T) {
 	curve := elliptic.P256()
 
-	for trial := 0; trial < 100; trial++ {
+	for trial := range 100 {
 		// Generate sender setup (garbler side)
 		setup, err := ot.GenerateCOSenderSetup(rand.Reader, curve)
 		if err != nil {
@@ -103,7 +103,7 @@ func TestECDHLabelDerivation_Choice0(t *testing.T) {
 func TestECDHLabelDerivation_Choice1(t *testing.T) {
 	curve := elliptic.P256()
 
-	for trial := 0; trial < 100; trial++ {
+	for trial := range 100 {
 		// Generate sender setup (garbler side)
 		setup, err := ot.GenerateCOSenderSetup(rand.Reader, curve)
 		if err != nil {
@@ -164,7 +164,7 @@ func TestECDHLabelDerivation_Deterministic(t *testing.T) {
 	receiverPoint := choicePoints[0]
 
 	// Derive labels multiple times with same inputs
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		r0a, r1a := mustDeriveRandomLabels(t, setup, receiverPoint, 42)
 		r0b, r1b := mustDeriveRandomLabels(t, setup, receiverPoint, 42)
 
@@ -287,7 +287,7 @@ func TestDerandomization_AllCases(t *testing.T) {
 func TestDerandomization_NoLeakage(t *testing.T) {
 	curve := elliptic.P256()
 
-	for trial := 0; trial < 50; trial++ {
+	for trial := range 50 {
 		setup, err := ot.GenerateCOSenderSetup(rand.Reader, curve)
 		if err != nil {
 			t.Fatalf("failed to generate sender setup: %v", err)
@@ -344,7 +344,7 @@ func TestDerandomization_NoLeakage(t *testing.T) {
 func TestDerandomization_Property(t *testing.T) {
 	curve := elliptic.P256()
 
-	for trial := 0; trial < 500; trial++ {
+	for trial := range 500 {
 		// Random precomputed and actual choices
 		precomputedChoice := trial%2 == 0
 		actualChoice := (trial/2)%2 == 0
@@ -516,7 +516,7 @@ func TestGarbledCircuit_EndToEnd(t *testing.T) {
 	otEntries := make([]*OTPoolEntry, cmacInputBitCount)
 	receiverEntries := make([]*OTReceiverEntry, cmacInputBitCount)
 
-	for i := 0; i < cmacInputBitCount; i++ {
+	for i := range cmacInputBitCount {
 		setup, err := ot.GenerateCOSenderSetup(rand.Reader, curve)
 		if err != nil {
 			t.Fatalf("failed to generate OT setup for index %d: %v", i, err)
@@ -572,10 +572,10 @@ func TestGarbledCircuit_EndToEnd(t *testing.T) {
 	// Reconstruct combined key and message
 	var combinedKey [16]byte
 	var combinedMsg [64]byte
-	for i := 0; i < 16; i++ {
+	for i := range 16 {
 		combinedKey[i] = garblerInput[64+i] ^ evaluatorInput[64+i]
 	}
-	for i := 0; i < 64; i++ {
+	for i := range 64 {
 		combinedMsg[i] = garblerInput[i] ^ evaluatorInput[i]
 	}
 
@@ -593,7 +593,7 @@ func TestGarbledCircuit_Soundness(t *testing.T) {
 	otEntries := make([]*OTPoolEntry, cmacInputBitCount)
 	receiverEntries := make([]*OTReceiverEntry, cmacInputBitCount)
 
-	for i := 0; i < cmacInputBitCount; i++ {
+	for i := range cmacInputBitCount {
 		setup, err := ot.GenerateCOSenderSetup(rand.Reader, curve)
 		if err != nil {
 			t.Fatalf("failed to generate OT setup: %v", err)
@@ -630,7 +630,7 @@ func TestGarbledCircuit_Soundness(t *testing.T) {
 	}
 
 	// Regenerate entries for second evaluation
-	for i := 0; i < cmacInputBitCount; i++ {
+	for i := range cmacInputBitCount {
 		setup, _ := ot.GenerateCOSenderSetup(rand.Reader, curve)
 		bundle, _, _ := ot.BuildCOChoices(rand.Reader, curve, setup.Ax, setup.Ay, []bool{false})
 		receiverEntries[i] = &OTReceiverEntry{
@@ -643,11 +643,11 @@ func TestGarbledCircuit_Soundness(t *testing.T) {
 	// Compute expected CMACs
 	var combinedKey1, combinedKey2 [16]byte
 	var combinedMsg1, combinedMsg2 [64]byte
-	for i := 0; i < 16; i++ {
+	for i := range 16 {
 		combinedKey1[i] = garblerInput[64+i] ^ evaluatorInput1[64+i]
 		combinedKey2[i] = garblerInput[64+i] ^ evaluatorInput2[64+i]
 	}
-	for i := 0; i < 64; i++ {
+	for i := range 64 {
 		combinedMsg1[i] = garblerInput[i] ^ evaluatorInput1[i]
 		combinedMsg2[i] = garblerInput[i] ^ evaluatorInput2[i]
 	}
@@ -671,7 +671,7 @@ func TestOutputLabelVerification_ValidLabels(t *testing.T) {
 	otEntries := make([]*OTPoolEntry, cmacInputBitCount)
 	receiverEntries := make([]*OTReceiverEntry, cmacInputBitCount)
 
-	for i := 0; i < cmacInputBitCount; i++ {
+	for i := range cmacInputBitCount {
 		setup, _ := ot.GenerateCOSenderSetup(rand.Reader, curve)
 		bundle, choicePoints, _ := ot.BuildCOChoices(rand.Reader, curve, setup.Ax, setup.Ay, []bool{false})
 
@@ -706,7 +706,7 @@ func TestOutputLabelVerification_InvalidLabels(t *testing.T) {
 	curve := elliptic.P256()
 
 	otEntries := make([]*OTPoolEntry, cmacInputBitCount)
-	for i := 0; i < cmacInputBitCount; i++ {
+	for i := range cmacInputBitCount {
 		setup, _ := ot.GenerateCOSenderSetup(rand.Reader, curve)
 		_, choicePoints, _ := ot.BuildCOChoices(rand.Reader, curve, setup.Ax, setup.Ay, []bool{false})
 		otEntries[i] = &OTPoolEntry{
@@ -741,7 +741,7 @@ func TestOutputLabelVerification_ModifiedLabels(t *testing.T) {
 	otEntries := make([]*OTPoolEntry, cmacInputBitCount)
 	receiverEntries := make([]*OTReceiverEntry, cmacInputBitCount)
 
-	for i := 0; i < cmacInputBitCount; i++ {
+	for i := range cmacInputBitCount {
 		setup, _ := ot.GenerateCOSenderSetup(rand.Reader, curve)
 		bundle, choicePoints, _ := ot.BuildCOChoices(rand.Reader, curve, setup.Ax, setup.Ay, []bool{false})
 
@@ -783,7 +783,7 @@ func runCMACTest(t *testing.T, garblerInput, evaluatorInput [80]byte) ([16]byte,
 	otEntries := make([]*OTPoolEntry, cmacInputBitCount)
 	receiverEntries := make([]*OTReceiverEntry, cmacInputBitCount)
 
-	for i := 0; i < cmacInputBitCount; i++ {
+	for i := range cmacInputBitCount {
 		setup, err := ot.GenerateCOSenderSetup(rand.Reader, curve)
 		if err != nil {
 			return [16]byte{}, err
@@ -833,7 +833,7 @@ func computeAESCMAC(key, message []byte) []byte {
 
 	// Process 4 blocks (64 bytes)
 	var C [16]byte
-	for blockIdx := 0; blockIdx < 4; blockIdx++ {
+	for blockIdx := range 4 {
 		var M [16]byte
 		copy(M[:], message[blockIdx*16:(blockIdx+1)*16])
 

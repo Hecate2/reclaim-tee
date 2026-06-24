@@ -308,7 +308,7 @@ func verifyNitroTPMDocument(docBytes []byte) (*nitroAttestationDoc, map[uint32][
 	}
 
 	// COSE_Sign1 ToBeSigned = ["Signature1", protected(bstr), external_aad h'', payload(bstr)].
-	tbs, err := cbor.Marshal([]interface{}{"Signature1", cose.Protected, []byte{}, cose.Payload})
+	tbs, err := cbor.Marshal([]any{"Signature1", cose.Protected, []byte{}, cose.Payload})
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("encode Sig_structure: %w", err)
 	}

@@ -37,6 +37,7 @@ func processRedactionRequest(
 	rs *ResponseRedaction,
 	bodyStartIdx int,
 	resChunks []shared.ResponseRedactionRange,
+	revealFraming bool,
 ) ([]RedactionItem, error) {
 	logger.Info("Starting processRedactionRequest", zap.String("component", "Response"), zap.String("operation", "processRedactionRequest"), zap.String("xpath", rs.XPath), zap.String("json_path", rs.JSONPath), zap.String("regex", rs.Regex))
 	items := []RedactionItem{}
@@ -66,7 +67,7 @@ func processRedactionRequest(
 					jStartAbs := startAbs + jsonLoc.Start
 					jEndAbs := startAbs + jsonLoc.End
 					logger.Debug("Applying regex to JSON value", zap.String("component", "Response"), zap.String("operation", "processRedactionRequest"), zap.String("level", "verbose"), zap.Int("json_value_index", j+1), zap.Int("start", jStartAbs), zap.Int("end", jEndAbs))
-					proc, err := applyRegexWindow(body, *rs, jStartAbs, jEndAbs, bodyStartIdx, resChunks)
+					proc, err := applyRegexWindow(body, *rs, jStartAbs, jEndAbs, bodyStartIdx, resChunks, revealFraming)
 					if err != nil {
 						logger.Error("Regex application failed", zap.String("component", "Response"), zap.String("operation", "processRedactionRequest"), zap.Error(err))
 						return nil, err
@@ -75,7 +76,7 @@ func processRedactionRequest(
 				}
 				continue
 			}
-			proc, err := applyRegexWindow(body, *rs, startAbs, endAbs, bodyStartIdx, resChunks)
+			proc, err := applyRegexWindow(body, *rs, startAbs, endAbs, bodyStartIdx, resChunks, revealFraming)
 			if err != nil {
 				logger.Error("Regex application failed", zap.String("component", "Response"), zap.String("operation", "processRedactionRequest"), zap.Error(err))
 				return nil, err
@@ -98,7 +99,7 @@ func processRedactionRequest(
 			startAbs := jsonLoc.Start
 			endAbs := jsonLoc.End
 
-			proc, err := applyRegexWindow(body, *rs, startAbs, endAbs, bodyStartIdx, resChunks)
+			proc, err := applyRegexWindow(body, *rs, startAbs, endAbs, bodyStartIdx, resChunks, revealFraming)
 			if err != nil {
 				logger.Error("Regex application failed", zap.String("component", "Response"), zap.String("operation", "processRedactionRequest"), zap.Error(err))
 				return nil, err
@@ -111,7 +112,7 @@ func processRedactionRequest(
 	// 3) Regex-only branch
 	if rs.Regex != "" {
 
-		proc, err := applyRegexWindow(body, *rs, 0, len(body), bodyStartIdx, resChunks)
+		proc, err := applyRegexWindow(body, *rs, 0, len(body), bodyStartIdx, resChunks, revealFraming)
 		if err != nil {
 			logger.Error("Regex processing failed", zap.String("component", "Response"), zap.String("operation", "processRedactionRequest"), zap.Error(err))
 			return nil, err
@@ -206,6 +207,7 @@ func applyRegexWindow(
 	endAbs int,
 	bodyStartIdx int,
 	resChunks []shared.ResponseRedactionRange,
+	revealFraming bool,
 ) ([]RedactionItem, error) {
 	items := []RedactionItem{}
 
@@ -215,7 +217,13 @@ func applyRegexWindow(
 			return
 		}
 		reveal := getReveal(sAbs, eAbs-sAbs, bodyStartIdx, resChunks, "")
-		items = append(items, RedactionItem{Reveal: reveal, Redactions: getRedactionsForChunkHeaders(reveal.Start, reveal.Start+reveal.Length, resChunks)})
+		// new clients leave chunk framing revealed (verifier dechunks); older
+		// clients redact framing inside a reveal that spans chunks
+		var reds []shared.ResponseRedactionRange
+		if !revealFraming {
+			reds = getRedactionsForChunkHeaders(reveal.Start, reveal.Start+reveal.Length, resChunks)
+		}
+		items = append(items, RedactionItem{Reveal: reveal, Redactions: reds})
 	}
 
 	segment := body[startAbs:endAbs]

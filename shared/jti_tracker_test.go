@@ -37,7 +37,7 @@ func TestJTITracker_DistinctJTIs(t *testing.T) {
 	tr := NewJTITracker(0)
 	now := time.Unix(1_700_000_000, 0)
 	exp := now.Add(60 * time.Second)
-	for i := 0; i < 100; i++ {
+	for i := range 100 {
 		jti := "jti-" + string(rune('A'+i%26)) + string(rune('a'+(i/26)%26))
 		if err := tr.Use(jti, exp, now); err != nil {
 			t.Fatalf("distinct jti %q rejected: %v", jti, err)
