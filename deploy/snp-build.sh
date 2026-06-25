@@ -160,6 +160,21 @@ if [[ "${1:-}" == clean ]]; then
     echo "[clean] done"; exit 0
 fi
 
+# Persist the just-built digest to deploy/snp-digests.env (per-role, keyed on
+# COMMIT) so update-image-history.sh / snp-redeploy-fleet.sh read it, no hand-edit.
+record_digest_env() {
+    local role="$1" digest="$2" f="${SCRIPT_DIR}/snp-digests.env"
+    local commit kd="" td=""
+    commit="$(git -C "${REPO_ROOT}" rev-parse HEAD)"
+    if [[ -f "${f}" ]] && grep -qx "COMMIT=${commit}" "${f}"; then
+        kd="$(sed -n 's/^SNP_K_DIGEST=//p' "${f}")"
+        td="$(sed -n 's/^SNP_T_DIGEST=//p' "${f}")"
+    fi
+    [[ "${role}" == k ]] && kd="${digest}" || td="${digest}"
+    { echo "SNP_K_DIGEST=${kd}"; echo "SNP_T_DIGEST=${td}"; echo "COMMIT=${commit}"; } > "${f}"
+    echo "[build]   recorded ${role^^} digest in deploy/snp-digests.env (COMMIT=${commit:0:7})"
+}
+
 ROLE="${1:?usage: $0 <k|t> <gcp|aws> [TAG]}"
 CLOUD="${2:?usage: $0 <k|t> <gcp|aws> [TAG]}"
 case "${ROLE}" in k|t) ;; *) echo "role must be k|t" >&2; exit 1 ;; esac
@@ -194,6 +209,7 @@ DIGEST="snp-app:$(sha256sum "${BUNDLE_HOST}" | cut -d' ' -f1)"
 # SNP_BUILD_ONLY: identity verify (verify.sh) — emit digests, skip cloud packaging.
 if [[ "${SNP_BUILD_ONLY:-0}" != 1 ]]; then
     [[ "${CLOUD}" == gcp ]] && package_gcp "${TAG}" || package_aws "${TAG}"
+    record_digest_env "${ROLE}" "${DIGEST}"
 fi
 echo "[build] DONE tee_${ROLE}@${CLOUD}"
 echo "[build]   base UKI   = ${BASE_UKI}  (${BASE_VAR}, commit-independent)"

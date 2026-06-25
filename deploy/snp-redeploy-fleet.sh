@@ -70,7 +70,8 @@ K_CLOUD="${SNP_K_CLOUD:-gcp}"
 T_CLOUD="${SNP_T_CLOUD:-aws}"
 K_LOC="${SNP_K_LOCATION:-$([[ "$K_CLOUD" == gcp ]] && echo "${SNP_PAIR_GCP_ZONE:?}" || echo "${SNP_PAIR_AWS_REGION:?}")}"
 T_LOC="${SNP_T_LOCATION:-$([[ "$T_CLOUD" == gcp ]] && echo "${SNP_PAIR_GCP_ZONE:?}" || echo "${SNP_PAIR_AWS_REGION:?}")}"
-DIGEST_CACHE="${SCRIPT_DIR}/snp-fleet-digests.env"
+# Shared with snp-build.sh (which writes it) + update-image-history.sh (reads it).
+DIGEST_CACHE="${SCRIPT_DIR}/snp-digests.env"
 
 DRAIN_TIMEOUT="${SNP_DRAIN_TIMEOUT:-300}"
 
