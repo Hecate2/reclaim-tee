@@ -240,9 +240,11 @@ for b in json.load(open('${HISTORY}')).get('base_images', []):
         else echo "  Result:   MATCH"; fi
     done < <(python3 -c "
 import json
-for a in json.load(open('${HISTORY}')).get('app_images', []):
-    if a.get('type')=='sev-snp':
-        print(a['role'], a['sourceCommit'], a['version'])
+app = json.load(open('${HISTORY}')).get('app_images', [])
+for role in ('k', 't'):
+    for a in reversed(app):
+        if a.get('type')=='sev-snp' and a.get('role')==role:
+            print(a['role'], a['sourceCommit'], a['version']); break
 ")
     echo "============================================="
 fi
