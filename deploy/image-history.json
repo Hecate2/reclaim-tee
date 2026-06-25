@@ -183,24 +183,6 @@
     {
       "type": "sev-snp",
       "role": "k",
-      "version": "snp-app:a27eb2880cabbc6d90c1374147f2a0926088242796600c778b455c47d37845c8",
-      "createTime": "2026-06-23T18:19:09+05:00",
-      "updateTime": "2026-06-23T18:19:09+05:00",
-      "sourceCommit": "71c199b",
-      "sourceDateEpoch": 1782220749
-    },
-    {
-      "type": "sev-snp",
-      "role": "t",
-      "version": "snp-app:ac05e3e7c659e245d78a9c2bd19a6438add748a793077f04654a9b203d56ba8c",
-      "createTime": "2026-06-23T18:19:09+05:00",
-      "updateTime": "2026-06-23T18:19:09+05:00",
-      "sourceCommit": "71c199b",
-      "sourceDateEpoch": 1782220749
-    },
-    {
-      "type": "sev-snp",
-      "role": "k",
       "version": "snp-app:91c7a96e679abf76899eb2aad279c9ceb859325299ab1051edac72bfc5127267",
       "createTime": "2026-06-25T09:47:13+05:00",
       "updateTime": "2026-06-25T09:47:13+05:00",

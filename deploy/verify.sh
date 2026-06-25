@@ -222,12 +222,16 @@ for b in json.load(open('${HISTORY}')).get('base_images', []):
         [[ -z "${ROLE}" ]] && continue
         log "Verifying SNP app (tee_${ROLE} @ ${COMMIT:0:12})..."
         git -C "${REPO_ROOT}" rev-parse --verify "${COMMIT}^{commit}" >/dev/null 2>&1 || { log "ERROR: sourceCommit ${COMMIT} not in repo"; PASS=false; continue; }
-        WT="${TMPDIR}/snp-${ROLE}-${COMMIT}"
-        git -C "${REPO_ROOT}" worktree add --detach "${WT}" "${COMMIT}" >/dev/null
+        # Clone, NOT worktree: a linked worktree's .git is a file, which Go's
+        # buildvcs does not treat as a VCS repo -> it silently omits the commit
+        # stamp, so the app would never match the fleet build (which embeds it).
+        SRC="${TMPDIR}/snp-${ROLE}-${COMMIT}"
+        git clone -q "${REPO_ROOT}" "${SRC}"
+        git -C "${SRC}" checkout -q "${COMMIT}"
         APP_LOG="${TMPDIR}/snp-app-${ROLE}.log"
-        ( cd "${WT}" && GCP_PROJECT=verify SNP_BUILD_ONLY=1 ./deploy/snp-build.sh "${ROLE}" gcp ) >"${APP_LOG}" 2>&1 || true
+        ( cd "${SRC}" && GCP_PROJECT=verify SNP_BUILD_ONLY=1 ./deploy/snp-build.sh "${ROLE}" gcp ) >"${APP_LOG}" 2>&1 || true
         ACT_APP=$(sed -n 's/.*app digest *= *\(snp-app:[0-9a-f]*\).*/\1/p' "${APP_LOG}" | tail -1)
-        git -C "${REPO_ROOT}" worktree remove --force "${WT}" 2>/dev/null || true
+        rm -rf "${SRC}"
         echo "SNP app tee_${ROLE}: expected ${EXP_APP:0:24}… actual ${ACT_APP:0:24}…"
         if [[ "${ACT_APP}" != "${EXP_APP}" ]]; then
             echo "  Result:   MISMATCH — snp-build.sh output (tail):"
