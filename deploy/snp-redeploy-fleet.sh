@@ -177,13 +177,22 @@ done
 for pid in "${PIDS[@]}"; do heartbeat_until_done "${pid}" "new pair bringup"; wait "${pid}"; done
 
 # ---- 5. Confirm N new pairs Ready in the router ----------------------------
+# Poll: snp-pair.sh returns when the HTTP health endpoints are up, but router
+# Ready (control link + first heartbeat) lands a few seconds later.
 log "Verifying ${COUNT} new pair(s) Ready..."
-READY=$(rt "${ROUTER}/pairs" | python3 -c "
+READY_TIMEOUT="${SNP_READY_TIMEOUT:-240}"
+START=$(date +%s); READY=0
+while [[ $(( $(date +%s) - START )) -lt ${READY_TIMEOUT} ]]; do
+    READY=$(rt "${ROUTER}/pairs" | python3 -c "
 import json,sys
 d=json.load(sys.stdin); nd='${K_DIGEST}'
 print(sum(1 for p in d.get('pairs',[]) if p.get('teek_image_digest')==nd and p.get('ready_at') and not p.get('draining',False)))
 ")
-[[ "${READY}" -ge "${COUNT}" ]] || { log "ERROR: only ${READY}/${COUNT} new pairs Ready. Aborting before retiring old."; exit 1; }
+    [[ "${READY}" -ge "${COUNT}" ]] && break
+    log "  ...${READY}/${COUNT} Ready, waiting ($(( $(date +%s) - START ))s)"
+    sleep 5
+done
+[[ "${READY}" -ge "${COUNT}" ]] || { log "ERROR: only ${READY}/${COUNT} new pairs Ready after ${READY_TIMEOUT}s. Aborting before retiring old."; exit 1; }
 log "${READY} new pair(s) Ready."
 
 # ---- 6. Retire old pairs ---------------------------------------------------
