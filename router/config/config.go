@@ -35,11 +35,11 @@ type Config struct {
 	ControlUnhealthy   time.Duration // control_healthy=false sustained → "degraded"
 	OTNotReady         time.Duration // ot_ready=false sustained → "degraded"
 
-	// AdminToken gates /pairs, /pairs/{id}/drain, and /pairs/{id}/dead.
-	// Empty disables admin endpoints entirely (503). In production deployment
-	// behind Cloud Run + IAP, this can stay empty since IAP enforces auth at
-	// the network edge; for non-IAP deployments or local ops, set ADMIN_TOKEN.
-	AdminToken string
+	// AdminTokenHash is the hex SHA-256 of the admin bearer token; it gates
+	// /pairs, /pairs/{id}/drain, and /pairs/{id}/dead. Empty disables admin
+	// endpoints entirely (503). The router never stores the plaintext token; set
+	// ADMIN_TOKEN_HASH (sha256 of the token) for non-IAP deployments or local ops.
+	AdminTokenHash string
 
 	// FirestoreProjectID, when set, selects the Firestore-backed Store
 	// instead of the in-memory one. Required for multi-replica deployments.
@@ -147,7 +147,7 @@ func Load() (*Config, error) {
 		HeartbeatStaleness:  heartbeatStaleness,
 		ControlUnhealthy:    controlUnhealthy,
 		OTNotReady:          otNotReady,
-		AdminToken:          os.Getenv("ADMIN_TOKEN"),
+		AdminTokenHash:      os.Getenv("ADMIN_TOKEN_HASH"),
 		FirestoreProjectID:  os.Getenv("FIRESTORE_PROJECT_ID"),
 		FirestoreDatabaseID: os.Getenv("FIRESTORE_DATABASE_ID"),
 		KMSKeyName:          os.Getenv("KMS_KEY_NAME"),

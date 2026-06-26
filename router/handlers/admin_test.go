@@ -1,6 +1,8 @@
 package handlers
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -9,10 +11,18 @@ import (
 
 const adminToken = "test-admin-token"
 
+// sha256Hex matches how the router stores the admin token (hex SHA-256).
+func sha256Hex(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:])
+}
+
+var adminTokenHash = sha256Hex(adminToken)
+
 func adminServer(t *testing.T) *Server {
 	t.Helper()
 	s := newTestServer(t)
-	s.Config.AdminToken = adminToken
+	s.Config.AdminTokenHash = adminTokenHash
 	return s
 }
 
@@ -215,7 +225,7 @@ func TestAdmin_Kill_UnknownPair(t *testing.T) {
 
 func TestAdmin_DrainBlocksFutureAllocations(t *testing.T) {
 	s, _ := newTestServerWithSigner(t)
-	s.Config.AdminToken = adminToken
+	s.Config.AdminTokenHash = adminTokenHash
 	bothSidesReady(t, s)
 
 	// Confirm allocation works before drain.

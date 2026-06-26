@@ -101,21 +101,29 @@ log "Current revision: ${PREV_REV}"
 # predictable for the verify step.
 SUFFIX="${COMMIT}-$(date +%s)"
 log "Deploying as revision suffix ${SUFFIX}..."
-# --update-env-vars sets/updates KMS_KEY_NAME and FIRESTORE_PROJECT_ID
-# without touching other env vars (SA_TOKEN_AUDIENCE / APPROVED_SA_PATTERN
-# / ADMIN_TOKEN / JWT_ISSUER stay as configured).
+# --update-env-vars pins KMS_KEY_NAME, FIRESTORE_PROJECT_ID and the admin-token
+# HASH without touching other env vars (SA_TOKEN_AUDIENCE / APPROVED_SA_PATTERN
+# / JWT_ISSUER stay as configured).
 #
 # FIRESTORE_PROJECT_ID is critical: without it the router silently falls
 # back to an in-memory Store, so pairs + allowlist are wiped on every
-# revision swap. Pinning it here means future deploys can't accidentally
-# drop persistence. The `^|^` delimiter lets us pass values containing
+# revision swap. The `^|^` delimiter lets us pass values containing
 # commas (the KMS key path) safely.
+#
+# The router stores only the admin token's SHA-256; derive it from
+# ROUTER_ADMIN_TOKEN and strip any legacy plaintext ADMIN_TOKEN from the service.
+ENV_VARS="KMS_KEY_NAME=${KMS_KEY_NAME}|FIRESTORE_PROJECT_ID=${PROJECT}"
+if [[ -n "${ROUTER_ADMIN_TOKEN:-}" ]]; then
+    ADMIN_TOKEN_HASH=$(printf %s "${ROUTER_ADMIN_TOKEN}" | sha256sum | cut -d' ' -f1)
+    ENV_VARS="${ENV_VARS}|ADMIN_TOKEN_HASH=${ADMIN_TOKEN_HASH}"
+fi
 gcloud run deploy "${SERVICE}" \
     --project="${PROJECT}" \
     --region="${REGION}" \
     --image="${IMAGE}" \
     --revision-suffix="${SUFFIX}" \
-    --update-env-vars="^|^KMS_KEY_NAME=${KMS_KEY_NAME}|FIRESTORE_PROJECT_ID=${PROJECT}" \
+    --update-env-vars="^|^${ENV_VARS}" \
+    --remove-env-vars=ADMIN_TOKEN \
     --quiet
 
 NEW_REV=$(gcloud run services describe "${SERVICE}" \

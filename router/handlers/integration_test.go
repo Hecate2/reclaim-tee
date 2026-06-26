@@ -65,7 +65,7 @@ func newIntegrationServer(t *testing.T) *integrationServer {
 			OTNotReady:         0,
 			JWTExpiry:          60 * time.Second,
 			JWTIssuer:          "router.integration.test",
-			AdminToken:         intAdminToken,
+			AdminTokenHash:     sha256Hex(intAdminToken),
 		},
 	}
 	hs := httptest.NewServer(srv.Routes())

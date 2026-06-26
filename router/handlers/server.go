@@ -1,7 +1,9 @@
 package handlers
 
 import (
+	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -73,10 +75,10 @@ func (s *Server) authenticateSA(r *http.Request) (*auth.SAClaims, error) {
 // "config is missing" apart from "I forgot the token."
 var errAdminDisabled = errors.New("admin endpoints not configured")
 
-// authenticateAdmin enforces the static admin bearer token. A blank
-// AdminToken in config disables admin endpoints entirely.
+// authenticateAdmin enforces the static admin bearer token. The router holds
+// only the token's SHA-256; a blank AdminTokenHash disables admin entirely.
 func (s *Server) authenticateAdmin(r *http.Request) error {
-	if s.Config.AdminToken == "" {
+	if s.Config.AdminTokenHash == "" {
 		return errAdminDisabled
 	}
 	authz := r.Header.Get("Authorization")
@@ -84,7 +86,9 @@ func (s *Server) authenticateAdmin(r *http.Request) error {
 	if !ok {
 		return errors.New("missing or malformed Authorization header")
 	}
-	if subtle.ConstantTimeCompare([]byte(token), []byte(s.Config.AdminToken)) != 1 {
+	sum := sha256.Sum256([]byte(token))
+	got := hex.EncodeToString(sum[:])
+	if subtle.ConstantTimeCompare([]byte(got), []byte(s.Config.AdminTokenHash)) != 1 {
 		return errors.New("invalid admin token")
 	}
 	return nil
