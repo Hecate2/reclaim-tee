@@ -52,15 +52,13 @@ func (s *MemoryStore) GetPair(_ context.Context, id string) (*Pair, error) {
 	if !ok {
 		return nil, ErrNotFound
 	}
-	cp := *p
-	return &cp, nil
+	return new(*p), nil
 }
 
 func (s *MemoryStore) UpsertPair(_ context.Context, p *Pair) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	cp := *p
-	s.pairs[p.ID] = &cp
+	s.pairs[p.ID] = new(*p)
 	return nil
 }
 
@@ -69,8 +67,7 @@ func (s *MemoryStore) ListPairs(_ context.Context) ([]*Pair, error) {
 	defer s.mu.RUnlock()
 	out := make([]*Pair, 0, len(s.pairs))
 	for _, p := range s.pairs {
-		cp := *p
-		out = append(out, &cp)
+		out = append(out, new(*p))
 	}
 	return out, nil
 }
@@ -99,8 +96,7 @@ func (s *MemoryStore) MutatePair(_ context.Context, id string, fn func(p *Pair, 
 		return nil, err
 	}
 	s.pairs[id] = &p
-	cp := p
-	return &cp, nil
+	return new(p), nil
 }
 
 func (s *MemoryStore) DeletePairIf(_ context.Context, id string, fn func(*Pair) error) error {
@@ -110,8 +106,7 @@ func (s *MemoryStore) DeletePairIf(_ context.Context, id string, fn func(*Pair) 
 	if !ok {
 		return ErrNotFound
 	}
-	cp := *cur
-	if err := fn(&cp); err != nil {
+	if err := fn(new(*cur)); err != nil {
 		return err
 	}
 	delete(s.pairs, id)

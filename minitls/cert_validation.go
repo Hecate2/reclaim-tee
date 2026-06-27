@@ -131,8 +131,7 @@ func (c *Client) verifyCertificateChainWithDepth(certs []*x509.Certificate, serv
 		if aiaDepth < maxAIADepth && len(leafCert.IssuingCertificateURL) > 0 {
 			// Check if error is due to unknown authority (missing intermediate)
 			// Use errors.As to handle wrapped errors
-			var unknownAuthorityErr x509.UnknownAuthorityError
-			if errors.As(err, &unknownAuthorityErr) {
+			if _, ok := errors.AsType[x509.UnknownAuthorityError](err); ok {
 				c.logger.Info("Certificate chain incomplete, fetching missing intermediates",
 					zap.String("cert", leafCert.Subject.String()),
 					zap.Int("aia_depth", aiaDepth),

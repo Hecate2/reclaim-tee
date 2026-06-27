@@ -3,12 +3,13 @@ package client
 import (
 	"errors"
 	"fmt"
-	teeproto "github.com/reclaimprotocol/reclaim-tee/proto"
-	"github.com/reclaimprotocol/reclaim-tee/shared"
 	"io"
 	"net"
 	"strings"
 	"time"
+
+	teeproto "github.com/reclaimprotocol/reclaim-tee/proto"
+	"github.com/reclaimprotocol/reclaim-tee/shared"
 
 	"go.uber.org/zap"
 )
@@ -163,8 +164,7 @@ func (c *Client) tcpToWebsocket() {
 				c.logger.Info("TCP connection closed by server (EOF)")
 				eofReceived = true // Mark EOF but continue to process any final data
 			} else {
-				var netErr net.Error
-				if errors.As(err, &netErr) && netErr.Timeout() {
+				if netErr, ok := errors.AsType[net.Error](err); ok && netErr.Timeout() {
 					// Only treat idle as "done" when we're cleanly between
 					// records (no incomplete bytes pending), past the
 					// handshake, and have captured ≥1 record. Multi-second

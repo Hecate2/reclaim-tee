@@ -354,8 +354,7 @@ func (t *TEEK) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		conn.SetReadDeadline(time.Now().Add(SessionReadTimeout))
 		_, msgBytes, err := conn.ReadMessage()
 		if err != nil {
-			var ne net.Error
-			if errors.As(err, &ne) && ne.Timeout() {
+			if ne, ok := errors.AsType[net.Error](err); ok && ne.Timeout() {
 				t.logger.WithSession(sessionID).Warn("Client session read timeout", zap.Duration("timeout", SessionReadTimeout))
 				t.terminateSessionWithError(sessionID, shared.ReasonTimeoutExceeded, err, "client session idle timeout")
 			} else if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {

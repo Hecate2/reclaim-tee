@@ -941,8 +941,7 @@ func (c *Client) getIdealBlocksForTOPRF(rangeStart, rangeEnd int, packetMetadata
 
 		// Boundary marks how many bytes in this block are valid (nil = full block)
 		if len(blockCiphertext) < blockSize {
-			boundary := uint32(len(blockCiphertext))
-			block.Boundary = &boundary
+			block.Boundary = new(uint32(len(blockCiphertext)))
 		}
 
 		blocks = append(blocks, block)

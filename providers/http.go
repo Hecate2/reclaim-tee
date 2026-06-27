@@ -351,8 +351,7 @@ func GetHostPort(params *HTTPProviderParams, secretParams *HTTPProviderSecretPar
 
 	host, port, err := net.SplitHostPort(u.Host)
 	if err != nil {
-		var addrError *net.AddrError
-		if errors.As(err, &addrError) {
+		if _, ok := errors.AsType[*net.AddrError](err); ok {
 			// No port specified, use HTTPS default
 			logger.Debug("No explicit port, using default HTTPS port", zap.String("component", "HTTP"), zap.String("operation", "GetHostPort"))
 			logger.Info("Resolved host and port", zap.String("component", "HTTP"), zap.String("operation", "GetHostPort"), zap.String("host", u.Host), zap.Int("port", DEFAULT_HTTPS_PORT))

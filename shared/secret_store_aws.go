@@ -53,8 +53,7 @@ func (s *AWSSecretStore) LoadOrCreateOPRFShare(ctx context.Context, role, deploy
 		return share, nil
 	}
 
-	var notFound *smtypes.ResourceNotFoundException
-	if !errors.As(err, &notFound) {
+	if _, ok := errors.AsType[*smtypes.ResourceNotFoundException](err); !ok {
 		return nil, fmt.Errorf("get secret %q: %w", secretID, err)
 	}
 
@@ -73,8 +72,7 @@ func (s *AWSSecretStore) StoreOPRFShare(ctx context.Context, role, deploymentKey
 
 	secretID := oprfSecretID(role, deploymentKey)
 	err := s.create(ctx, secretID, share)
-	var exists *smtypes.ResourceExistsException
-	if errors.As(err, &exists) {
+	if _, ok := errors.AsType[*smtypes.ResourceExistsException](err); ok {
 		_, perr := s.sm.PutSecretValue(ctx, &secretsmanager.PutSecretValueInput{
 			SecretId:     aws.String(secretID),
 			SecretBinary: share,

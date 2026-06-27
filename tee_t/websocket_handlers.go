@@ -70,8 +70,7 @@ func (t *TEET) handleClientWebSocket(w http.ResponseWriter, r *http.Request) {
 		conn.SetReadDeadline(time.Now().Add(SessionReadTimeout))
 		_, msgBytes, err := conn.ReadMessage()
 		if err != nil {
-			var ne net.Error
-			if errors.As(err, &ne) && ne.Timeout() {
+			if ne, ok := errors.AsType[net.Error](err); ok && ne.Timeout() {
 				t.logger.Warn("Client session read timeout", zap.Duration("timeout", SessionReadTimeout))
 				if sessionID != "" {
 					t.terminateSessionWithError(sessionID, shared.ReasonTimeoutExceeded, err, "client session idle timeout")
