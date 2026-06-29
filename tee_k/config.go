@@ -27,6 +27,7 @@ type TEEKConfig struct {
 	SelfAddr                string `json:"self_addr,omitempty"`
 	PeerAddr                string `json:"peer_addr,omitempty"`
 	ExpectedPeerImageDigest string `json:"expected_peer_image_digest,omitempty"`
+	ExpectedPeerBaseDigest  string `json:"expected_peer_base_digest,omitempty"`
 	JWTPublicKey            string `json:"jwt_public_key,omitempty"`
 	ExpectedJWTIssuer       string `json:"expected_jwt_issuer,omitempty"`
 	KMSEnclaveDomainKey     string `json:"kms_enclave_domain_key,omitempty"`
@@ -55,6 +56,7 @@ func LoadTEEKConfig() *TEEKConfig {
 		SelfAddr:                shared.GetEnvOrDefault("SELF_ADDR", ""),
 		PeerAddr:                shared.GetEnvOrDefault("PEER_ADDR", ""),
 		ExpectedPeerImageDigest: shared.GetEnvOrDefault("EXPECTED_PEER_IMAGE_DIGEST", ""),
+		ExpectedPeerBaseDigest:  shared.GetEnvOrDefault("EXPECTED_PEER_BASE_DIGEST", ""),
 		JWTPublicKey:            shared.GetEnvOrDefault("JWT_PUBLIC_KEY", ""),
 		ExpectedJWTIssuer:       shared.GetEnvOrDefault("EXPECTED_JWT_ISSUER", ""),
 		KMSEnclaveDomainKey:     shared.GetEnvOrDefault("KMS_ENCLAVE_DOMAIN_KEY", ""),

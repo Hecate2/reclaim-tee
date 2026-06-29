@@ -217,3 +217,24 @@ func TestVerifyRATLSPeer_DispatchesToSEVSNP(t *testing.T) {
 		t.Fatalf("dispatched to wrong branch (extension not found): %v", err)
 	}
 }
+
+func TestBaseAccepted(t *testing.T) {
+	const gcp, aws = "snp-base:e51ea77d", "snp-base:48329081"
+	set := gcp + "," + aws
+	cases := []struct {
+		expected, got string
+		want          bool
+	}{
+		{set, gcp, true},
+		{set, aws, true},
+		{set, "snp-base:rogue", false},
+		{gcp + " , " + aws, aws, true}, // tolerates spaces
+		{gcp, aws, false},
+		{set, "", false},
+	}
+	for _, c := range cases {
+		if got := baseAccepted(c.expected, c.got); got != c.want {
+			t.Errorf("baseAccepted(%q, %q) = %v, want %v", c.expected, c.got, got, c.want)
+		}
+	}
+}

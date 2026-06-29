@@ -219,6 +219,7 @@ func startRouterMode(parent context.Context, config *TEETConfig, logger *shared.
 		verifyPeer := shared.VerifyRATLSPeer(shared.RATLSVerifyOptions{
 			PeerRole:            "tee_k",
 			ExpectedImageDigest: teet.expectedPeerImageDigest,
+			ExpectedBaseDigest:  teet.expectedPeerBaseDigest,
 			Logger:              logger,
 		})
 		srvTLS.VerifyPeerCertificate = func(rawCerts [][]byte, chains [][]*x509.Certificate) error {

@@ -25,12 +25,15 @@ func TestDispatchingValidator_SEVSNP(t *testing.T) {
 	token := []byte(base64.StdEncoding.EncodeToString(append([]byte{0x01}, raw...)))
 
 	v := NewDispatchingValidator(zap.NewNop())
-	id, bind, err := v.Validate(AttestationTypeSEVSNP, "T", token, spki)
+	id, base, bind, err := v.Validate(AttestationTypeSEVSNP, "T", token, spki)
 	if err != nil {
 		t.Fatalf("validate SEV-SNP: %v", err)
 	}
 	if !strings.HasPrefix(id, "snp-app:") {
 		t.Fatalf("identity = %q, want snp-app: prefix", id)
+	}
+	if !strings.HasPrefix(base, "snp-base:") {
+		t.Fatalf("base = %q, want snp-base: prefix", base)
 	}
 	if len(id) != len("snp-app:")+64 {
 		t.Fatalf("identity = %q, want 64 hex chars", id)
@@ -48,21 +51,21 @@ func TestDispatchingValidator_SEVSNPRejectsWrongSPKI(t *testing.T) {
 	}
 	token := []byte(base64.StdEncoding.EncodeToString(append([]byte{0x01}, raw...)))
 	v := NewDispatchingValidator(zap.NewNop())
-	if _, _, err := v.Validate(AttestationTypeSEVSNP, "T", token, []byte("wrong spki")); err == nil {
+	if _, _, _, err := v.Validate(AttestationTypeSEVSNP, "T", token, []byte("wrong spki")); err == nil {
 		t.Fatal("expected binding failure with wrong SPKI")
 	}
 }
 
 func TestDispatchingValidator_RejectsBadType(t *testing.T) {
 	v := NewDispatchingValidator(zap.NewNop())
-	if _, _, err := v.Validate("nonsense", "K", []byte("x"), nil); err == nil {
+	if _, _, _, err := v.Validate("nonsense", "K", []byte("x"), nil); err == nil {
 		t.Fatal("expected error for unknown attestation type")
 	}
 }
 
 func TestDispatchingValidator_SEVSNPRejectsGarbage(t *testing.T) {
 	v := NewDispatchingValidator(zap.NewNop())
-	if _, _, err := v.Validate(AttestationTypeSEVSNP, "T", []byte("!!not base64!!"), []byte("spki")); err == nil {
+	if _, _, _, err := v.Validate(AttestationTypeSEVSNP, "T", []byte("!!not base64!!"), []byte("spki")); err == nil {
 		t.Fatal("expected error for non-base64 SEV-SNP token")
 	}
 }

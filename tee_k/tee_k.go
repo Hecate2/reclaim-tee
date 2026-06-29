@@ -82,6 +82,7 @@ type TEEK struct {
 	router                  *shared.RouterClient
 	pairID                  string
 	expectedPeerImageDigest string             // sha256:... of TEE_T container image, for RA-TLS peer verification
+	expectedPeerBaseDigest  string             // snp-base:<PCR11> of TEE_T's per-cloud base UKI (SEV-SNP only)
 	jwtPubKey               *ecdsa.PublicKey   // verifies client allocation JWTs (nil = no JWT check, local dev)
 	expectedJWTIssuer       string             // expected iss claim on client allocation JWTs
 	jtiTracker              *shared.JTITracker // replay guard for allocation-JWT jti (nil in standalone)
@@ -123,6 +124,7 @@ func NewTEEKForRouter(
 	teek.router = router
 	teek.pairID = pairID
 	teek.expectedPeerImageDigest = config.ExpectedPeerImageDigest
+	teek.expectedPeerBaseDigest = config.ExpectedPeerBaseDigest
 	if config.JWTPublicKey != "" {
 		pubKey, err := shared.ParseECDSAPublicKeyPEM([]byte(config.JWTPublicKey))
 		if err != nil {

@@ -87,7 +87,7 @@ func (s *Server) HandleRegister(w http.ResponseWriter, r *http.Request) {
 
 	digest := req.ImageDigest
 	if !s.Config.Standalone {
-		validated, spkiHash, err := s.AttestValidator.Validate(req.AttestationType, req.Role, []byte(req.AttestationJWT), req.SPKIDer)
+		validated, validatedBase, spkiHash, err := s.AttestValidator.Validate(req.AttestationType, req.Role, []byte(req.AttestationJWT), req.SPKIDer)
 		if err != nil {
 			log.Warn("register: attestation invalid",
 				zap.String("pair_id", req.PairID), zap.Error(err))
@@ -101,6 +101,13 @@ func (s *Server) HandleRegister(w http.ResponseWriter, r *http.Request) {
 		}
 		if !s.Allowlist.Contains(validated) {
 			writeErr(w, http.StatusForbidden, "image digest not in allowlist")
+			return
+		}
+		// SEV-SNP: the per-cloud base UKI (PCR 11) is the measured-boot TCB that
+		// extends PCR 8 (the app). Pin it too, fail-closed, so a rogue base can't
+		// forge the app measurement. CS attestations report no base (empty).
+		if validatedBase != "" && !s.Allowlist.Contains(validatedBase) {
+			writeErr(w, http.StatusForbidden, "base UKI not in allowlist")
 			return
 		}
 		digest = validated

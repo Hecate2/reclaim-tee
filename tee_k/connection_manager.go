@@ -293,6 +293,7 @@ func (cm *TEETConnectionManager) dialer(wsURL string) *websocket.Dialer {
 				VerifyPeerCertificate: shared.VerifyRATLSPeer(shared.RATLSVerifyOptions{
 					PeerRole:            "tee_t",
 					ExpectedImageDigest: cm.teek.expectedPeerImageDigest,
+					ExpectedBaseDigest:  cm.teek.expectedPeerBaseDigest,
 					Logger:              cm.logger,
 				}),
 				// TLS 1.3 only on the TEE↔TEE peer link. Independent of

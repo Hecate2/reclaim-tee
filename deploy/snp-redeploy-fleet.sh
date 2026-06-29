@@ -44,6 +44,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [[ -f "${SCRIPT_DIR}/.env" ]]; then set -a; source "${SCRIPT_DIR}/.env"; set +a; fi
 source "${SCRIPT_DIR}/_lib.sh"
+# Per-cloud base UKI identities (SNP_BASE_DIGEST_GCP/AWS) to allowlist alongside apps.
+set -a; source "${SCRIPT_DIR}/snp-image/pins.env"; set +a
 
 GCP_PROJECT="${GCP_PROJECT:?set GCP_PROJECT in deploy/.env}"
 # SNP_TARGET (test|prod) picks the router this fleet redeploy talks to AND is
@@ -160,7 +162,8 @@ log "New pair numbers: ${NEW_NS[*]}"
 
 # ---- 3. Allowlist new digests (idempotent) ---------------------------------
 log "Allowlisting new digests on ${ROUTER} ..."
-for d in "${K_DIGEST}" "${T_DIGEST}"; do
+# Apps (cross-cloud) + both per-cloud base UKIs; register pins both, fail-closed.
+for d in "${K_DIGEST}" "${T_DIGEST}" "${SNP_BASE_DIGEST_GCP}" "${SNP_BASE_DIGEST_AWS}"; do
     rt -X POST -H "Content-Type: application/json" -d "{\"digest\":\"${d}\"}" "${ROUTER}/allowlist" >/dev/null
 done
 

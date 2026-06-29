@@ -16,6 +16,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [[ -f "${SCRIPT_DIR}/.env" ]]; then set -a; source "${SCRIPT_DIR}/.env"; set +a; fi
 source "${SCRIPT_DIR}/_lib.sh"
+# Per-cloud base UKI identities (SNP_BASE_DIGEST_GCP/AWS) for EXPECTED_PEER_BASE_DIGEST.
+set -a; source "${SCRIPT_DIR}/snp-image/pins.env"; set +a
 
 GCP_PROJECT="${GCP_PROJECT:?set GCP_PROJECT in deploy/.env}"
 PAIR_NAME="${SNP_PAIR_NAME:-snp-pair}"
@@ -124,6 +126,8 @@ write_env() {
         echo "SELF_ADDR=${self_ip}:${PORT}"
         echo "PEER_ADDR=${peer_ip}:${PORT}"
         echo "EXPECTED_PEER_IMAGE_DIGEST=${peer_digest}"
+        # Both clouds' bases; the peer's must match one (no per-side mapping).
+        echo "EXPECTED_PEER_BASE_DIGEST=${SNP_BASE_DIGEST_GCP},${SNP_BASE_DIGEST_AWS}"
         echo "JWT_PUBLIC_KEY=${JWT}"
         echo "EXPECTED_JWT_ISSUER=${JWT_ISSUER}"
         echo "PORT=${PORT}"

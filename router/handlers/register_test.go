@@ -92,15 +92,16 @@ var testRegSPKIHash = func() [32]byte {
 
 type fakeAttestValidator struct {
 	digest   string
+	base     string
 	spkiHash [32]byte
 	err      error
 }
 
-func (f *fakeAttestValidator) Validate(_, _ string, _, _ []byte) (string, [32]byte, error) {
+func (f *fakeAttestValidator) Validate(_, _ string, _, _ []byte) (string, string, [32]byte, error) {
 	if f.err != nil {
-		return "", [32]byte{}, f.err
+		return "", "", [32]byte{}, f.err
 	}
-	return f.digest, f.spkiHash, nil
+	return f.digest, f.base, f.spkiHash, nil
 }
 
 const (
@@ -314,6 +315,35 @@ func TestRegisterSEVSNPSkipsSAToken(t *testing.T) {
 	w := doRegister(t, s, body, teetIP+":12345", "")
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200 for SEV-SNP without SA token, got %d body=%s", w.Code, w.Body.String())
+	}
+}
+
+// SEV-SNP base UKI must be allowlisted too: a valid (allowlisted) app on a
+// non-allowlisted base — a rogue loader forging the PCR 8 app measurement — is
+// rejected fail-closed; allowlisting the base lets the same register through.
+func TestRegisterRejectsBaseNotInAllowlist(t *testing.T) {
+	s := newTestServer(t)
+	snpID := "snp-app:" + strings.Repeat("cd", 32)
+	snpBase := "snp-base:" + strings.Repeat("ef", 32)
+	if err := s.Allowlist.Add(t.Context(), snpID); err != nil { // app allowlisted; base is NOT
+		t.Fatalf("seed allowlist: %v", err)
+	}
+	s.AttestValidator = &fakeAttestValidator{digest: snpID, base: snpBase, spkiHash: testRegSPKIHash}
+
+	body := registerRequest{
+		PairID: pairID, Role: "T", SelfAddr: teetIP + ":443", PeerAddrClaim: teekIP + ":443",
+		ImageDigest: snpID, AttestationType: "sev-snp",
+	}
+	signRegisterBody(&body)
+
+	if w := doRegister(t, s, body, teetIP+":12345", ""); w.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for non-allowlisted base, got %d body=%s", w.Code, w.Body.String())
+	}
+	if err := s.Allowlist.Add(t.Context(), snpBase); err != nil {
+		t.Fatalf("seed base: %v", err)
+	}
+	if w := doRegister(t, s, body, teetIP+":12345", ""); w.Code != http.StatusOK {
+		t.Fatalf("expected 200 after base allowlisted, got %d body=%s", w.Code, w.Body.String())
 	}
 }
 

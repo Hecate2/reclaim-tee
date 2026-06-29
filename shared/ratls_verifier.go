@@ -21,7 +21,12 @@ import (
 type RATLSVerifyOptions struct {
 	PeerRole            string
 	ExpectedImageDigest string
-	Logger              *Logger
+	// ExpectedBaseDigest, when non-empty, pins the peer's per-cloud base UKI
+	// (snp-base:<PCR11>). It may list both pair clouds' bases comma-separated, so
+	// neither side needs to know which cloud its peer runs on; the peer's base
+	// must match one. Empty (e.g. CS peers) skips the base check.
+	ExpectedBaseDigest string
+	Logger             *Logger
 }
 
 // validateRATLSCertStructure parses + validates an RA-TLS leaf cert
@@ -37,18 +42,18 @@ type RATLSVerifyOptions struct {
 //
 // Standalone certs (no attestation extension) are rejected. Local-dev
 // flows must avoid this verifier.
-func validateRATLSCertStructure(rawCerts [][]byte, peerRole string, logger *Logger) (identity string, err error) {
+func validateRATLSCertStructure(rawCerts [][]byte, peerRole string, logger *Logger) (app, base string, err error) {
 	if len(rawCerts) == 0 {
-		return "", errors.New("ratls: no peer certificate")
+		return "", "", errors.New("ratls: no peer certificate")
 	}
 	leaf, err := x509.ParseCertificate(rawCerts[0])
 	if err != nil {
-		return "", fmt.Errorf("ratls: parse peer cert: %w", err)
+		return "", "", fmt.Errorf("ratls: parse peer cert: %w", err)
 	}
 
 	spkiDER, err := x509.MarshalPKIXPublicKey(leaf.PublicKey)
 	if err != nil {
-		return "", fmt.Errorf("ratls: marshal peer SPKI: %w", err)
+		return "", "", fmt.Errorf("ratls: marshal peer SPKI: %w", err)
 	}
 	actualHash := spkiSha256(spkiDER)
 
@@ -56,9 +61,10 @@ func validateRATLSCertStructure(rawCerts [][]byte, peerRole string, logger *Logg
 		return validateSEVSNP(snp, spkiDER)
 	}
 	if jwt := findExtension(leaf, AttestationOID); jwt != nil {
-		return validateGCPCS(jwt, peerRole, actualHash, logger)
+		app, err = validateGCPCS(jwt, peerRole, actualHash, logger)
+		return app, "", err // CS has no separate base
 	}
-	return "", errors.New("ratls: attestation extension not present on certificate")
+	return "", "", errors.New("ratls: attestation extension not present on certificate")
 }
 
 // validateGCPCS verifies a Confidential Space attestation JWT, binds the SPKI
@@ -93,14 +99,12 @@ func validateGCPCS(attestation []byte, peerRole string, actualHash [32]byte, log
 // to the Google vTPM root, the SEV report to the AMD root, report_data binds the
 // AK to this cert's SPKI (anti-splice), and the AK-signed quote pins PCR 8 (app)
 // + PCR 11 (base). Returns the app (payload) identity "snp-app:<hex(appHash)>".
-func validateSEVSNP(attestation, spkiDER []byte) (string, error) {
-	app, _, err := VerifyCombinedSEVSNPAttestation(attestation, spkiDER)
+func validateSEVSNP(attestation, spkiDER []byte) (string, string, error) {
+	app, base, err := VerifyCombinedSEVSNPAttestation(attestation, spkiDER)
 	if err != nil {
-		return "", fmt.Errorf("ratls: %w", err)
+		return "", "", fmt.Errorf("ratls: %w", err)
 	}
-	// RA-TLS peer pinning matches the app (payload) identity; the per-cloud base
-	// is pinned at the router/attestor on admission.
-	return app, nil
+	return app, base, nil
 }
 
 // findExtension returns the value of the first cert extension matching oid, or
@@ -119,7 +123,7 @@ func findExtension(cert *x509.Certificate, oid asn1.ObjectIdentifier) []byte {
 // to opts.ExpectedImageDigest. Any failure aborts the TLS handshake.
 func VerifyRATLSPeer(opts RATLSVerifyOptions) func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
 	return func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
-		gotDigest, err := validateRATLSCertStructure(rawCerts, opts.PeerRole, opts.Logger)
+		gotDigest, gotBase, err := validateRATLSCertStructure(rawCerts, opts.PeerRole, opts.Logger)
 		if err != nil {
 			return err
 		}
@@ -127,8 +131,25 @@ func VerifyRATLSPeer(opts RATLSVerifyOptions) func(rawCerts [][]byte, _ [][]*x50
 			return fmt.Errorf("ratls: image_digest mismatch: expected %q, got %q",
 				opts.ExpectedImageDigest, gotDigest)
 		}
+		// Pin the per-cloud base UKI when configured (SEV-SNP pairs). An honest
+		// TEE refuses to MPC with a peer whose base isn't an expected one.
+		if opts.ExpectedBaseDigest != "" && !baseAccepted(opts.ExpectedBaseDigest, gotBase) {
+			return fmt.Errorf("ratls: peer base %q not in expected set %q", gotBase, opts.ExpectedBaseDigest)
+		}
 		return nil
 	}
+}
+
+// baseAccepted reports whether gotBase is one of the comma-separated expected
+// base UKIs. Listing both pair clouds' bases lets either side accept its peer
+// without knowing which cloud the peer runs on.
+func baseAccepted(expected, gotBase string) bool {
+	for b := range strings.SplitSeq(expected, ",") {
+		if strings.TrimSpace(b) == gotBase {
+			return true
+		}
+	}
+	return false
 }
 
 // VerifyRATLSAttestation returns a tls.Config.VerifyPeerCertificate
@@ -142,7 +163,7 @@ func VerifyRATLSPeer(opts RATLSVerifyOptions) func(rawCerts [][]byte, _ [][]*x50
 // binding). What's INSIDE the attestation is decided downstream.
 func VerifyRATLSAttestation(peerRole string, logger *Logger) func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
 	return func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
-		_, err := validateRATLSCertStructure(rawCerts, peerRole, logger)
+		_, _, err := validateRATLSCertStructure(rawCerts, peerRole, logger)
 		return err
 	}
 }
