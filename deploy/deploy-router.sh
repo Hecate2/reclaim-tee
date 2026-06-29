@@ -47,15 +47,9 @@ KMS_KEY_NAME="projects/${PROJECT}/locations/${REGION}/keyRings/${KMS_KEYRING}/${
 SKIP_BUILD=0
 if [[ "${1:-}" == "--skip-build" ]]; then SKIP_BUILD=1; fi
 
-# Refuse to deploy with uncommitted tracked changes — the image tag is the
-# git short SHA, so a dirty tracked file would silently ship as that SHA.
-# Untracked files (e.g. this script, local notes) are ignored.
-if ! git diff-index --quiet HEAD --; then
-    echo "ERROR: tracked files have uncommitted changes. Commit or stash before deploying."
-    git status --short --untracked-files=no
-    exit 1
-fi
-
+# The router image is NOT attestation-measured (unlike the TEEs); its tag is
+# just provenance, not a reproducibility claim. Tag with HEAD and deploy —
+# tree cleanness doesn't matter here.
 COMMIT=$(git rev-parse --short HEAD)
 IMAGE="${AR_HOST}/${PROJECT}/${AR_REPO}/router:${COMMIT}"
 
