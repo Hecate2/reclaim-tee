@@ -73,7 +73,17 @@ func (t *TEET) verifyTagForResponse(sessionID string, encryptedResp *shared.Encr
 		if success {
 			t.logger.WithSession(sessionID).Debug("Tag verification succeeded")
 		} else {
-			t.logger.WithSession(sessionID).Error("Tag verification failed")
+			var recHdr0 byte
+			if len(encryptedResp.RecordHeader) >= 1 {
+				recHdr0 = encryptedResp.RecordHeader[0]
+			}
+			t.logger.WithSession(sessionID).Error("Tag verification failed",
+				zap.Uint64("client_seq", encryptedResp.SeqNum),
+				zap.Uint64("tag_seq", tagSecretsData.SeqNum),
+				zap.Int("inner_len", len(encryptedResp.EncryptedData)),
+				zap.Int("tag_len", len(encryptedResp.Tag)),
+				zap.Uint8("rec_hdr0", recHdr0),
+				zap.Bool("tls13", cipherInfo != nil && cipherInfo.IsTLS13))
 		}
 	}
 

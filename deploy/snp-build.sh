@@ -181,11 +181,30 @@ case "${ROLE}" in k|t) ;; *) echo "role must be k|t" >&2; exit 1 ;; esac
 case "${CLOUD}" in gcp|aws) ;; *) echo "cloud must be gcp|aws" >&2; exit 1 ;; esac
 TAG="${3:-tee${ROLE}-${CLOUD}}"
 
+# Reproducible per-commit app build. The app is VCS-stamped, so its digest is
+# commit-specific AND a dirty tree taints it. Default to the latest app_images
+# commit recorded in image-history.json (i.e. what's allowlisted), override with
+# SNP_BUILD_COMMIT. Build the app from a clean clone at that commit (like
+# verify.sh — clone NOT worktree so buildvcs stamps the commit), sidestepping the
+# working tree entirely. The loader/base (PCR 11) stay commit-independent.
+BUILD_COMMIT="${SNP_BUILD_COMMIT:-}"
+if [[ -z "${BUILD_COMMIT}" && -f "${SCRIPT_DIR}/image-history.json" ]]; then
+    BUILD_COMMIT="$(python3 -c "import json; a=[x for x in json.load(open('${SCRIPT_DIR}/image-history.json')).get('app_images',[]) if x.get('role')=='${ROLE}']; print(a[-1]['sourceCommit'] if a else '')" 2>/dev/null || true)"
+fi
+if [[ -n "${BUILD_COMMIT}" ]]; then
+    CLONE_DIR="$(mktemp -d)"; trap 'rm -rf "${CLONE_DIR}"' EXIT
+    echo "[build] app source: clean clone @ ${BUILD_COMMIT:0:12} (dirty-tree-immune)"
+    git clone -q "${REPO_ROOT}" "${CLONE_DIR}"
+    git -C "${CLONE_DIR}" checkout -q "${BUILD_COMMIT}"
+    REPO_ROOT="${CLONE_DIR}"
+fi
+
 # The app digest is VCS-stamped (tracks the commit), so a dirty tree yields a
 # vcs.modified artifact, not the clean-commit value. Refuse unless overridden.
+# (When BUILD_COMMIT cloned above, REPO_ROOT is the clean clone -> passes.)
 if [[ -n "$(git -C "${REPO_ROOT}" status --porcelain 2>/dev/null)" && "${SNP_ALLOW_DIRTY:-0}" != 1 ]]; then
     echo "[build] working tree is dirty -> app digest would be a vcs.modified artifact." >&2
-    echo "[build] commit/stash first, or set SNP_ALLOW_DIRTY=1 to override." >&2
+    echo "[build] commit/stash first, set SNP_BUILD_COMMIT=<hash>, or SNP_ALLOW_DIRTY=1." >&2
     exit 1
 fi
 
@@ -206,6 +225,12 @@ fi
 
 # App bundle (PCR 8) tracks the commit -> compute + report; operator allowlists.
 DIGEST="snp-app:$(sha256sum "${BUNDLE_HOST}" | cut -d' ' -f1)"
+# Optional guard: assert the reproduced digest matches an expected/allowlisted one.
+if [[ -n "${SNP_EXPECT_DIGEST:-}" && "${SNP_EXPECT_DIGEST}" != "${DIGEST}" ]]; then
+    echo "[build] DIGEST MISMATCH: built ${DIGEST}, expected ${SNP_EXPECT_DIGEST}" >&2
+    echo "[build] base/toolchain/commit differ from the allowlisted build; do NOT deploy." >&2
+    exit 1
+fi
 # SNP_BUILD_ONLY: identity verify (verify.sh) — emit digests, skip cloud packaging.
 if [[ "${SNP_BUILD_ONLY:-0}" != 1 ]]; then
     [[ "${CLOUD}" == gcp ]] && package_gcp "${TAG}" || package_aws "${TAG}"

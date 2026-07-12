@@ -124,6 +124,12 @@ func (t *TEEK) performTLSHandshakeAndHTTP(sessionID string) error {
 	cipherSuite := tlsClient.GetCipherSuite()
 	tlsState.CipherSuite = cipherSuite
 
+	// Log domain at INFO so a tag-fail (logged on TEE_T by sid) can be tied to
+	// a target host and reproduced locally without client logs.
+	t.logger.WithSession(sessionID).Info("TLS handshake complete",
+		zap.String("hostname", session.ConnectionData.Hostname),
+		zap.Uint16("cipher_suite", cipherSuite))
+
 	// Certificate info is stored as structured data instead of raw handshake packets
 
 	t.logger.WithSession(sessionID).Debug("Handshake finished - ready for split AEAD")

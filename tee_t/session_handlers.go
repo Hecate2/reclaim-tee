@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"fmt"
 	"sort"
 	"time"
@@ -174,6 +175,19 @@ func (t *TEET) handleBatchedEncryptedResponses(sessionID string, msg *shared.Mes
 	})
 
 	for _, encryptedResp := range sortedResponses {
+		// Per-record fingerprint: identical fp on consecutive seqs = duplicate
+		// record captured by client (suspected trailing-record tag-fail cause).
+		fpSum := sha256.Sum256(append(append([]byte{}, encryptedResp.EncryptedData...), encryptedResp.Tag...))
+		var recHdr0 byte
+		if len(encryptedResp.RecordHeader) >= 1 {
+			recHdr0 = encryptedResp.RecordHeader[0]
+		}
+		t.logger.WithSession(sessionID).Debug("Response record fingerprint",
+			zap.Uint64("seq_num", encryptedResp.SeqNum),
+			zap.Int("enc_len", len(encryptedResp.EncryptedData)),
+			zap.Int("tag_len", len(encryptedResp.Tag)),
+			zap.Uint8("rec_hdr0", recHdr0),
+			zap.String("fp", fmt.Sprintf("%x", fpSum[:10])))
 		session.ResponseState.PendingEncryptedResponses[encryptedResp.SeqNum] = &encryptedResp
 		if err := t.addSingleResponseToTranscript(sessionID, &encryptedResp); err != nil {
 			session.ResponseState.ResponsesMutex.Unlock()
