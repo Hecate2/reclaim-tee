@@ -496,7 +496,7 @@ func (t *TEET) handleBatchedTagSecrets(msg *shared.Message) error {
 		if !verificationResult.Success {
 			allSuccessful = false
 			verifications = append(verifications, verificationResult)
-			t.classifyTagFailure(sessionID, encryptedResp, tagSecretBySeq)
+			t.classifyTagFailure(sessionID, encryptedResp, tagSecretBySeq, session.ResponseState.PendingEncryptedResponses)
 			break // Exit loop to send results - this is OK
 		}
 		t.logger.Debug("Tag verification completed",

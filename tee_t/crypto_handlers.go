@@ -108,12 +108,29 @@ func (t *TEET) verifyTagForResponse(sessionID string, encryptedResp *shared.Encr
 	return verificationData
 }
 
-// classifyTagFailure re-verifies a failed record's ciphertext against the tag
-// secrets of neighbouring seqs. Authenticating at seq+k means a sequence/count
-// drift of k (a dropped/merged record upstream); no match means the ciphertext
-// bytes are corrupt. TLS 1.3 only (its AAD is nonce-independent). Diagnostic
-// only: it never marks the record valid, so the caller still fails the batch.
-func (t *TEET) classifyTagFailure(sessionID string, failed *shared.EncryptedResponseData, tagSecretBySeq map[uint64][]byte) {
+// tagOK recomputes the TLS 1.3 AEAD tag for a record under a candidate tag
+// secret and reports whether it matches. AAD is intrinsic to the record.
+func (t *TEET) tagOK(cipherSuite uint16, resp *shared.EncryptedResponseData, secret []byte) bool {
+	if secret == nil {
+		return false
+	}
+	var recordType byte = 0x17
+	if len(resp.RecordHeader) >= 1 {
+		recordType = resp.RecordHeader[0]
+	}
+	ctLen := len(resp.EncryptedData) + 16
+	aad := []byte{recordType, 0x03, 0x03, byte(ctLen >> 8), byte(ctLen & 0xFF)}
+	computed, err := minitls.ComputeTagFromSecrets(resp.EncryptedData, secret, cipherSuite, aad)
+	return err == nil && subtle.ConstantTimeCompare(computed, resp.Tag) == 1
+}
+
+// classifyTagFailure buckets a verification failure without changing the batch
+// result. It scans the contiguous tail from the first failure (the verify loop
+// breaks, so only the first is otherwise seen), then decides: only one record =
+// ISOLATED; a tail where the first record authenticates under a shifted nonce
+// (same key) = SEQ_DRIFT of k; a tail where no neighbouring nonce authenticates
+// = KEY_CHANGE (a mid-stream rekey; a ~6-byte predecessor points to it). TLS 1.3.
+func (t *TEET) classifyTagFailure(sessionID string, failed *shared.EncryptedResponseData, tagSecretBySeq map[uint64][]byte, pendingBySeq map[uint64]*shared.EncryptedResponseData) {
 	teetState, err := t.sessionManager.GetTEETSessionState(sessionID)
 	if err != nil {
 		return
@@ -121,44 +138,68 @@ func (t *TEET) classifyTagFailure(sessionID string, failed *shared.EncryptedResp
 	cipherSuite := teetState.CipherSuite
 	cipherInfo := minitls.GetCipherSuiteInfo(cipherSuite)
 	if cipherInfo == nil || !cipherInfo.IsTLS13 {
-		t.logger.WithSession(sessionID).Warn("tag-fail classifier: skipped (TLS 1.2)")
+		t.logger.WithSession(sessionID).Warn("resp-diag: skipped (TLS 1.2)")
 		return
 	}
-	var recordType byte = 0x17
-	if len(failed.RecordHeader) >= 1 {
-		recordType = failed.RecordHeader[0]
+	n := failed.SeqNum
+
+	tailFailed, tailTotal, lastSeq := 0, 0, n
+	for seq := n; ; seq++ {
+		resp := pendingBySeq[seq]
+		if resp == nil {
+			break
+		}
+		tailTotal++
+		lastSeq = seq
+		if !t.tagOK(cipherSuite, resp, tagSecretBySeq[seq]) {
+			tailFailed++
+		}
 	}
-	ctLen := len(failed.EncryptedData) + 16
-	aad := []byte{recordType, 0x03, 0x03, byte(ctLen >> 8), byte(ctLen & 0xFF)}
-	for k := -8; k <= 8; k++ {
+
+	drift, driftFound := 0, false
+	for k := -8; k <= 8 && !driftFound; k++ {
 		if k == 0 {
 			continue
 		}
 		var candSeq uint64
 		if k < 0 {
-			if failed.SeqNum < uint64(-k) {
+			if n < uint64(-k) {
 				continue
 			}
-			candSeq = failed.SeqNum - uint64(-k)
+			candSeq = n - uint64(-k)
 		} else {
-			candSeq = failed.SeqNum + uint64(k)
+			candSeq = n + uint64(k)
 		}
-		cand := tagSecretBySeq[candSeq]
-		if cand == nil {
-			continue
-		}
-		computed, cerr := minitls.ComputeTagFromSecrets(failed.EncryptedData, cand, cipherSuite, aad)
-		if cerr == nil && subtle.ConstantTimeCompare(computed, failed.Tag) == 1 {
-			t.logger.WithSession(sessionID).Error("tag-fail classifier: SEQUENCE/COUNT DRIFT",
-				zap.Uint64("failed_seq", failed.SeqNum),
-				zap.Int("drift", k),
-				zap.Int("inner_len", len(failed.EncryptedData)))
-			return
+		if t.tagOK(cipherSuite, failed, tagSecretBySeq[candSeq]) {
+			drift, driftFound = k, true
 		}
 	}
-	t.logger.WithSession(sessionID).Error("tag-fail classifier: CONTENT CORRUPTION (no neighbouring nonce authenticates)",
-		zap.Uint64("failed_seq", failed.SeqNum),
-		zap.Int("inner_len", len(failed.EncryptedData)))
+
+	prev := []int{}
+	for _, d := range []uint64{1, 2} {
+		if n >= d {
+			if r := pendingBySeq[n-d]; r != nil {
+				prev = append(prev, len(r.EncryptedData))
+			}
+		}
+	}
+
+	verdict := "ISOLATED"
+	if tailFailed > 1 && driftFound {
+		verdict = "SEQ_DRIFT"
+	} else if tailFailed > 1 {
+		verdict = "KEY_CHANGE"
+	}
+	t.logger.WithSession(sessionID).Error("resp-diag",
+		zap.String("verdict", verdict),
+		zap.Uint64("first_seq", n),
+		zap.Uint64("last_seq", lastSeq),
+		zap.Int("tail_failed", tailFailed),
+		zap.Int("tail_total", tailTotal),
+		zap.Bool("drift_found", driftFound),
+		zap.Int("drift", drift),
+		zap.Int("inner_len", len(failed.EncryptedData)),
+		zap.Ints("prev_inner", prev))
 }
 
 // verifyCommitmentsIfReady verifies commitments if both streams and expected commitments are available
