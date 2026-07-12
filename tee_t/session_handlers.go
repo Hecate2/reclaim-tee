@@ -469,6 +469,13 @@ func (t *TEET) handleBatchedTagSecrets(msg *shared.Message) error {
 		return sortedTagSecrets[i].SeqNum < sortedTagSecrets[j].SeqNum
 	})
 
+	// seq -> tag secret, so a failed record can be re-verified against
+	// neighbouring nonces (drift classifier below).
+	tagSecretBySeq := make(map[uint64][]byte, len(sortedTagSecrets))
+	for _, ts := range sortedTagSecrets {
+		tagSecretBySeq[ts.SeqNum] = ts.TagSecrets
+	}
+
 	for _, tagSecretsData := range sortedTagSecrets {
 		encryptedResp := session.ResponseState.PendingEncryptedResponses[tagSecretsData.SeqNum]
 		if encryptedResp == nil {
@@ -489,6 +496,7 @@ func (t *TEET) handleBatchedTagSecrets(msg *shared.Message) error {
 		if !verificationResult.Success {
 			allSuccessful = false
 			verifications = append(verifications, verificationResult)
+			t.classifyTagFailure(sessionID, encryptedResp, tagSecretBySeq)
 			break // Exit loop to send results - this is OK
 		}
 		t.logger.Debug("Tag verification completed",

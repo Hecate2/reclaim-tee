@@ -108,6 +108,59 @@ func (t *TEET) verifyTagForResponse(sessionID string, encryptedResp *shared.Encr
 	return verificationData
 }
 
+// classifyTagFailure re-verifies a failed record's ciphertext against the tag
+// secrets of neighbouring seqs. Authenticating at seq+k means a sequence/count
+// drift of k (a dropped/merged record upstream); no match means the ciphertext
+// bytes are corrupt. TLS 1.3 only (its AAD is nonce-independent). Diagnostic
+// only: it never marks the record valid, so the caller still fails the batch.
+func (t *TEET) classifyTagFailure(sessionID string, failed *shared.EncryptedResponseData, tagSecretBySeq map[uint64][]byte) {
+	teetState, err := t.sessionManager.GetTEETSessionState(sessionID)
+	if err != nil {
+		return
+	}
+	cipherSuite := teetState.CipherSuite
+	cipherInfo := minitls.GetCipherSuiteInfo(cipherSuite)
+	if cipherInfo == nil || !cipherInfo.IsTLS13 {
+		t.logger.WithSession(sessionID).Warn("tag-fail classifier: skipped (TLS 1.2)")
+		return
+	}
+	var recordType byte = 0x17
+	if len(failed.RecordHeader) >= 1 {
+		recordType = failed.RecordHeader[0]
+	}
+	ctLen := len(failed.EncryptedData) + 16
+	aad := []byte{recordType, 0x03, 0x03, byte(ctLen >> 8), byte(ctLen & 0xFF)}
+	for k := -8; k <= 8; k++ {
+		if k == 0 {
+			continue
+		}
+		var candSeq uint64
+		if k < 0 {
+			if failed.SeqNum < uint64(-k) {
+				continue
+			}
+			candSeq = failed.SeqNum - uint64(-k)
+		} else {
+			candSeq = failed.SeqNum + uint64(k)
+		}
+		cand := tagSecretBySeq[candSeq]
+		if cand == nil {
+			continue
+		}
+		computed, cerr := minitls.ComputeTagFromSecrets(failed.EncryptedData, cand, cipherSuite, aad)
+		if cerr == nil && subtle.ConstantTimeCompare(computed, failed.Tag) == 1 {
+			t.logger.WithSession(sessionID).Error("tag-fail classifier: SEQUENCE/COUNT DRIFT",
+				zap.Uint64("failed_seq", failed.SeqNum),
+				zap.Int("drift", k),
+				zap.Int("inner_len", len(failed.EncryptedData)))
+			return
+		}
+	}
+	t.logger.WithSession(sessionID).Error("tag-fail classifier: CONTENT CORRUPTION (no neighbouring nonce authenticates)",
+		zap.Uint64("failed_seq", failed.SeqNum),
+		zap.Int("inner_len", len(failed.EncryptedData)))
+}
+
 // verifyCommitmentsIfReady verifies commitments if both streams and expected commitments are available
 // Note: Streams arrive from client, commitments arrive from TEE_K - they may arrive in any order.
 // Deferral is correct when waiting for the other piece. TEE_K enforces commitment presence before forwarding.

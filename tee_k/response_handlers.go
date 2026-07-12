@@ -69,6 +69,12 @@ func (t *TEEK) handleBatchedResponseLengths(sessionID string, msg *shared.Messag
 			nonceSeq = tlsState.NextResponseTagSeq()
 		}
 
+		// nonce_seq is the actual server-app-seq used; client_seq is what the
+		// tag secret is labelled with. Their gap = the NST offset (drift if != ).
+		t.logger.WithSession(sessionID).Debug("Response tag-secret nonce",
+			zap.Uint64("client_seq", lengthData.SeqNum),
+			zap.Uint64("nonce_seq", nonceSeq))
+
 		// Generate tag secrets for this response
 		tagSecretsBytes, nonce, err := t.generateResponseTagSecrets(
 			sessionID,
