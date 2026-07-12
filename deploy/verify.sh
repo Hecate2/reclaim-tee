@@ -229,7 +229,9 @@ for b in json.load(open('${HISTORY}')).get('base_images', []):
         git clone -q "${REPO_ROOT}" "${SRC}"
         git -C "${SRC}" checkout -q "${COMMIT}"
         APP_LOG="${TMPDIR}/snp-app-${ROLE}.log"
-        ( cd "${SRC}" && GCP_PROJECT=verify SNP_BUILD_ONLY=1 ./deploy/snp-build.sh "${ROLE}" gcp ) >"${APP_LOG}" 2>&1 || true
+        # Pin snp-build.sh to this entry's commit; otherwise its BUILD_COMMIT
+        # defaults to image-history.json's latest, building the wrong tree.
+        ( cd "${SRC}" && GCP_PROJECT=verify SNP_BUILD_ONLY=1 SNP_BUILD_COMMIT="${COMMIT}" ./deploy/snp-build.sh "${ROLE}" gcp ) >"${APP_LOG}" 2>&1 || true
         ACT_APP=$(sed -n 's/.*app digest *= *\(snp-app:[0-9a-f]*\).*/\1/p' "${APP_LOG}" | tail -1)
         rm -rf "${SRC}"
         echo "SNP app tee_${ROLE}: expected ${EXP_APP:0:24}… actual ${ACT_APP:0:24}…"
