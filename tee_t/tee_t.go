@@ -94,6 +94,10 @@ type TEET struct {
 	otReady        atomic.Bool
 	activeSessions atomic.Int32
 
+	// attestHealth gates the pair off the router (via ControlHealthy) and
+	// self-resets when the SEV attestation path wedges. Nil-safe.
+	attestHealth *shared.AttestationHealth
+
 	// onPairAssigned is fired by the connection manager when it reads
 	// TEE_K's TEEKPairAssignment envelope. Nil in standalone mode; set by
 	// router_boot to register with the router and spin up the heartbeat
@@ -230,7 +234,7 @@ func (t *TEET) PairID() string {
 	return *p
 }
 func (t *TEET) Router() *shared.RouterClient { return t.router }
-func (t *TEET) ControlHealthy() bool         { return t.controlHealthy.Load() }
+func (t *TEET) ControlHealthy() bool         { return t.controlHealthy.Load() && t.attestHealth.Healthy() }
 func (t *TEET) OTReady() bool                { return t.otReady.Load() }
 func (t *TEET) ActiveSessions() int          { return int(t.activeSessions.Load()) }
 

@@ -95,6 +95,10 @@ type TEEK struct {
 	controlHealthy atomic.Bool
 	otReady        atomic.Bool
 	activeSessions atomic.Int32
+
+	// attestHealth gates the pair off the router (via ControlHealthy) and
+	// self-resets when the SEV attestation path wedges. Nil-safe.
+	attestHealth *shared.AttestationHealth
 }
 
 // NewTEEKWithConfig creates a new TEEK instance with the provided configuration
@@ -217,7 +221,7 @@ func initializeOPRFKeyShare(logger *shared.Logger) []byte {
 // shared.HeartbeatTarget so router heartbeat logic lives in shared/.
 func (t *TEEK) PairID() string                { return t.pairID }
 func (t *TEEK) Router() *shared.RouterClient  { return t.router }
-func (t *TEEK) ControlHealthy() bool          { return t.controlHealthy.Load() }
+func (t *TEEK) ControlHealthy() bool          { return t.controlHealthy.Load() && t.attestHealth.Healthy() }
 func (t *TEEK) OTReady() bool                 { return t.otReady.Load() }
 func (t *TEEK) ActiveSessions() int           { return int(t.activeSessions.Load()) }
 

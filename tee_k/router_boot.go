@@ -141,6 +141,7 @@ func startRouterMode(parent context.Context, config *TEEKConfig, logger *shared.
 		return
 	}
 
+	teek.attestHealth = shared.NewAttestationHealth(logger)
 	if teek.ratls != nil {
 		// Regenerate the per-session cached attestation on every cert
 		// rotation so its cert_hash nonce stays in lockstep with the

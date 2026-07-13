@@ -150,8 +150,10 @@ func (t *TEEK) getCachedAttestation(sessionID string) (*teeproto.AttestationRepo
 			return cached, nil
 		}
 		if err := t.refreshAttestation(); err != nil {
+			t.attestHealth.RecordFailure(err)
 			return nil, fmt.Errorf("failed to generate fallback attestation: %v", err)
 		}
+		t.attestHealth.RecordSuccess()
 		t.attestationMutex.RLock()
 		result := t.cachedAttestation
 		t.attestationMutex.RUnlock()

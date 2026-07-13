@@ -185,6 +185,7 @@ func startRouterMode(parent context.Context, config *TEETConfig, logger *shared.
 		}()
 	}
 
+	teet.attestHealth = shared.NewAttestationHealth(logger)
 	if teet.ratls != nil {
 		// Regenerate per-session cached attestation on every cert rotation
 		// — single ticker drives both so cert_hash nonce can't drift from
