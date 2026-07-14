@@ -179,6 +179,11 @@ type Client struct {
 	// Batched response tracking (collection until EOF)
 	batchedResponses []shared.EncryptedResponseData // Collect response packets until EOF
 
+	// recordState is this session's TLS record-reassembly buffer. Per-Client
+	// (never a package global) so an overlapping session/retry can't splice or
+	// drop records across streams. One reader goroutine, so no lock needed.
+	recordState tlsRecordState
+
 	// Response processing success tracking
 	responseProcessingSuccessful bool // Track if response was successfully processed
 	reconstructedResponseSize    int  // Size of reconstructed response data

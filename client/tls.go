@@ -360,35 +360,32 @@ type tlsRecordState struct {
 	recordType   byte
 }
 
-var recordProcessingState = &tlsRecordState{
-	buffer:       make([]byte, 0),
-	expectedSize: 0,
-}
-
-// processTLSRecordFromData processes TLS records directly from raw TCP data
+// processTLSRecordFromData processes TLS records directly from raw TCP data,
+// buffering in this Client's own recordState (never a shared global).
 func (c *Client) processTLSRecordFromData(data []byte) {
+	rs := &c.recordState
 	// Add new data to our processing buffer
-	recordProcessingState.buffer = append(recordProcessingState.buffer, data...)
+	rs.buffer = append(rs.buffer, data...)
 
 	// Process all complete records in the buffer
-	for len(recordProcessingState.buffer) >= 5 {
+	for len(rs.buffer) >= 5 {
 		// Check if we have a complete TLS record header
-		if recordProcessingState.expectedSize == 0 {
+		if rs.expectedSize == 0 {
 			// Parse TLS record header: type (1) + version (2) + length (2)
-			recordProcessingState.recordType = recordProcessingState.buffer[0]
-			recordLength := int(recordProcessingState.buffer[3])<<8 | int(recordProcessingState.buffer[4])
-			recordProcessingState.expectedSize = 5 + recordLength
+			rs.recordType = rs.buffer[0]
+			recordLength := int(rs.buffer[3])<<8 | int(rs.buffer[4])
+			rs.expectedSize = 5 + recordLength
 		}
 
 		// Check if we have a complete record
-		if len(recordProcessingState.buffer) >= recordProcessingState.expectedSize {
+		if len(rs.buffer) >= rs.expectedSize {
 			// Extract the complete record
-			record := make([]byte, recordProcessingState.expectedSize)
-			copy(record, recordProcessingState.buffer[:recordProcessingState.expectedSize])
+			record := make([]byte, rs.expectedSize)
+			copy(record, rs.buffer[:rs.expectedSize])
 
 			// Remove the processed record from buffer
-			recordProcessingState.buffer = recordProcessingState.buffer[recordProcessingState.expectedSize:]
-			recordProcessingState.expectedSize = 0
+			rs.buffer = rs.buffer[rs.expectedSize:]
+			rs.expectedSize = 0
 
 			// Process the complete record
 			recordType := record[0]
