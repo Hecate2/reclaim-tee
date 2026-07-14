@@ -52,7 +52,7 @@ func (t *TEET) handleClientWebSocket(w http.ResponseWriter, r *http.Request) {
 				time.Now().Add(time.Second))
 			return
 		}
-		if _, err := shared.ReadAndVerifyClientAuth(conn, t.jwtPubKey, t.expectedJWTIssuer, *pidPtr, t.jtiTracker); err != nil {
+		if _, _, err := shared.ReadAndVerifyClientAuth(conn, t.jwtPubKey, t.expectedJWTIssuer, *pidPtr, t.jtiTracker); err != nil {
 			t.logger.Warn("Rejecting client: ClientAuth invalid", zap.Error(err))
 			_ = conn.WriteControl(websocket.CloseMessage,
 				websocket.FormatCloseMessage(4001, "unauthorized"),

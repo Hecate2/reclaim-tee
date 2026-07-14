@@ -309,8 +309,10 @@ func (t *TEEK) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	// jwtPubKey is nil in standalone (local-dev) mode, where the JWT step
 	// is skipped and the first wire message is whatever the legacy protocol
 	// expects.
+	var clientVersion string
 	if t.jwtPubKey != nil {
-		if _, err := shared.ReadAndVerifyClientAuth(conn, t.jwtPubKey, t.expectedJWTIssuer, t.pairID, t.jtiTracker); err != nil {
+		_, cv, err := shared.ReadAndVerifyClientAuth(conn, t.jwtPubKey, t.expectedJWTIssuer, t.pairID, t.jtiTracker)
+		if err != nil {
 			t.logger.Warn("Rejecting client: ClientAuth invalid", zap.Error(err))
 			_ = conn.WriteControl(websocket.CloseMessage,
 				websocket.FormatCloseMessage(4001, "unauthorized"),
@@ -318,6 +320,7 @@ func (t *TEEK) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			conn.Close()
 			return
 		}
+		clientVersion = cv
 	}
 
 	// Create session for this client connection
@@ -330,7 +333,10 @@ func (t *TEEK) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 	t.activeSessions.Add(1)
 
-	t.logger.Info("Session created", zap.String("sid", shared.TruncateSessionID(sessionID)))
+	// client_version is empty for pre-versioning builds; a non-empty value on a
+	// later tag-failure means a build that should already carry the fix.
+	t.logger.Info("Session created", zap.String("sid", shared.TruncateSessionID(sessionID)),
+		zap.String("client_version", clientVersion))
 
 	// Notify TEE_T about the new session (with retry for shared connection)
 	if err := t.notifyTEETNewSessionWithRetry(sessionID); err != nil {

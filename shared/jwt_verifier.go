@@ -93,37 +93,40 @@ func VerifyAllocationJWT(token string, pubKey *ecdsa.PublicKey, expectedIssuer, 
 // The connection's read deadline is set and cleared by this function
 // (5s, controlled by ClientAuthReadTimeout). Subsequent reads have no
 // deadline unless the caller reinstates one.
-func ReadAndVerifyClientAuth(conn *websocket.Conn, pubKey *ecdsa.PublicKey, expectedIssuer, expectedPairID string, jtiTracker *JTITracker) (*AllocationJWTClaims, error) {
+// Returns the verified claims and the client-reported build version (empty for
+// pre-versioning clients), so callers can log which build a session came from.
+func ReadAndVerifyClientAuth(conn *websocket.Conn, pubKey *ecdsa.PublicKey, expectedIssuer, expectedPairID string, jtiTracker *JTITracker) (*AllocationJWTClaims, string, error) {
 	if err := conn.SetReadDeadline(time.Now().Add(ClientAuthReadTimeout)); err != nil {
-		return nil, fmt.Errorf("set read deadline: %w", err)
+		return nil, "", fmt.Errorf("set read deadline: %w", err)
 	}
 	_, msgBytes, err := conn.ReadMessage()
 	if clearErr := conn.SetReadDeadline(time.Time{}); clearErr != nil && err == nil {
-		return nil, fmt.Errorf("clear read deadline: %w", clearErr)
+		return nil, "", fmt.Errorf("clear read deadline: %w", clearErr)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("read ClientAuth envelope: %w", err)
+		return nil, "", fmt.Errorf("read ClientAuth envelope: %w", err)
 	}
 
 	var env teeproto.Envelope
 	if err := proto.Unmarshal(msgBytes, &env); err != nil {
-		return nil, fmt.Errorf("parse first envelope: %w", err)
+		return nil, "", fmt.Errorf("parse first envelope: %w", err)
 	}
 	auth, ok := env.Payload.(*teeproto.Envelope_ClientAuth)
 	if !ok {
-		return nil, fmt.Errorf("expected ClientAuth as first envelope, got %T", env.Payload)
+		return nil, "", fmt.Errorf("expected ClientAuth as first envelope, got %T", env.Payload)
 	}
+	clientVersion := auth.ClientAuth.GetClientVersion()
 	claims, err := VerifyAllocationJWT(auth.ClientAuth.GetJwt(), pubKey, expectedIssuer, expectedPairID)
 	if err != nil {
-		return nil, err
+		return nil, clientVersion, err
 	}
 	if jtiTracker != nil {
 		if claims.ExpiresAt == nil {
-			return nil, errors.New("jwt: missing exp claim (cannot bound jti tracking)")
+			return nil, clientVersion, errors.New("jwt: missing exp claim (cannot bound jti tracking)")
 		}
 		if err := jtiTracker.Use(claims.ID, claims.ExpiresAt.Time, time.Now()); err != nil {
-			return nil, fmt.Errorf("jwt replay check: %w", err)
+			return nil, clientVersion, fmt.Errorf("jwt replay check: %w", err)
 		}
 	}
-	return claims, nil
+	return claims, clientVersion, nil
 }

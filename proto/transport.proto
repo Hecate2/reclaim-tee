@@ -373,5 +373,8 @@ message TEEKPairAssignment {
 // accepting any further messages from the client.
 message ClientAuth {
   string jwt = 1;
+  // Client build identifier, logged by the TEE so a tag failure can be
+  // attributed to a specific client build (empty = pre-versioning build).
+  string client_version = 2;
 }
 

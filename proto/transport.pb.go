@@ -3338,8 +3338,11 @@ func (x *TEEKPairAssignment) GetPairId() string {
 // expiry, and that the `aud` claim matches its own pair_id before
 // accepting any further messages from the client.
 type ClientAuth struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Jwt           string                 `protobuf:"bytes,1,opt,name=jwt,proto3" json:"jwt,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Jwt   string                 `protobuf:"bytes,1,opt,name=jwt,proto3" json:"jwt,omitempty"`
+	// Client build identifier, logged by the TEE so a tag failure can be
+	// attributed to a specific client build (empty = pre-versioning build).
+	ClientVersion string `protobuf:"bytes,2,opt,name=client_version,json=clientVersion,proto3" json:"client_version,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -3377,6 +3380,13 @@ func (*ClientAuth) Descriptor() ([]byte, []int) {
 func (x *ClientAuth) GetJwt() string {
 	if x != nil {
 		return x.Jwt
+	}
+	return ""
+}
+
+func (x *ClientAuth) GetClientVersion() string {
+	if x != nil {
+		return x.ClientVersion
 	}
 	return ""
 }
@@ -3823,10 +3833,11 @@ const file_transport_proto_rawDesc = "" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x16\n" +
 	"\x06reason\x18\x02 \x01(\tR\x06reason\"-\n" +
 	"\x12TEEKPairAssignment\x12\x17\n" +
-	"\apair_id\x18\x01 \x01(\tR\x06pairId\"\x1e\n" +
+	"\apair_id\x18\x01 \x01(\tR\x06pairId\"E\n" +
 	"\n" +
 	"ClientAuth\x12\x10\n" +
-	"\x03jwt\x18\x01 \x01(\tR\x03jwt*U\n" +
+	"\x03jwt\x18\x01 \x01(\tR\x03jwt\x12%\n" +
+	"\x0eclient_version\x18\x02 \x01(\tR\rclientVersion*U\n" +
 	"\x06Sender\x12\x16\n" +
 	"\x12SENDER_UNSPECIFIED\x10\x00\x12\x0f\n" +
 	"\vSENDER_USER\x10\x01\x12\x10\n" +

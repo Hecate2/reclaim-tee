@@ -76,6 +76,12 @@ func (c *Client) ConnectToTEEK() error {
 	return nil
 }
 
+// ClientBuildVersion is reported to the TEE in ClientAuth so a tag failure can
+// be attributed to a specific client build (empty on pre-versioning builds).
+// Bump on material client changes; override at build time with
+// -ldflags "-X github.com/reclaimprotocol/reclaim-tee/client.ClientBuildVersion=<ver>".
+var ClientBuildVersion = "recordbuf-fix"
+
 // sendClientAuth writes the ClientAuth(jwt) envelope as the very first
 // frame on a TEE-bound WebSocket. Used in router mode so the TEE can
 // validate the JWT before allocating any session resources.
@@ -83,7 +89,7 @@ func sendClientAuth(conn *websocket.Conn, jwt string) error {
 	env := &teeproto.Envelope{
 		TimestampMs: time.Now().UnixMilli(),
 		Payload: &teeproto.Envelope_ClientAuth{
-			ClientAuth: &teeproto.ClientAuth{Jwt: jwt},
+			ClientAuth: &teeproto.ClientAuth{Jwt: jwt, ClientVersion: ClientBuildVersion},
 		},
 	}
 	data, err := proto.Marshal(env)
