@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	teeproto "github.com/reclaimprotocol/reclaim-tee/proto"
@@ -13,6 +14,12 @@ import (
 
 	"go.uber.org/zap"
 )
+
+// activeResponseCaptures counts live TCP-capture loops across the process. A
+// value >1 means overlapping capture goroutines (e.g. an SDK retry starting
+// before the prior session's loop exits) — the condition behind cross-stream
+// record corruption. Logged, not enforced.
+var activeResponseCaptures atomic.Int64
 
 // handleConnectionReady processes connection ready messages from TEE_K
 func (c *Client) handleConnectionReady(msg *shared.Message) {
@@ -118,6 +125,11 @@ func (c *Client) handleSendTCPData(msg *shared.Message) {
 
 // tcpToWebsocket reads from TCP connection and processes data
 func (c *Client) tcpToWebsocket() {
+	nActive := activeResponseCaptures.Add(1)
+	defer activeResponseCaptures.Add(-1)
+	if nActive > 1 {
+		c.logger.Warn("Overlapping response-capture loop", zap.Int64("concurrent_captures", nActive))
+	}
 	defer func() {
 		if c.isClosing.Load() && c.tcpConn != nil {
 			c.tcpConn.Close()

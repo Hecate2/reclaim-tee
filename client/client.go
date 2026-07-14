@@ -184,6 +184,11 @@ type Client struct {
 	// drop records across streams. One reader goroutine, so no lock needed.
 	recordState tlsRecordState
 
+	// lastBatchDiag retains per-record fingerprints of the batch last sent to
+	// TEE_T, kept after the batch is cleared so a failure can be correlated
+	// with TEE_T's per-record fingerprints. Diagnostic only, no plaintext.
+	lastBatchDiag []recordDiag
+
 	// Response processing success tracking
 	responseProcessingSuccessful bool // Track if response was successfully processed
 	reconstructedResponseSize    int  // Size of reconstructed response data

@@ -1,6 +1,8 @@
 package client
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"github.com/reclaimprotocol/reclaim-tee/minitls"
 	teeproto "github.com/reclaimprotocol/reclaim-tee/proto"
@@ -9,6 +11,25 @@ import (
 
 	"go.uber.org/zap"
 )
+
+// recordDiag is a non-revealing fingerprint of one response record: its seq,
+// ciphertext length, and a short hash of ciphertext||tag. Lets a failed batch
+// be matched against TEE_T's per-record fingerprints without exposing content.
+type recordDiag struct {
+	seq    uint64
+	length int
+	fp     string
+}
+
+// recordFingerprint hashes ciphertext||tag and returns the first bytes hex-
+// encoded, matching TEE_T's response-record fingerprint.
+func recordFingerprint(encryptedData, tag []byte) string {
+	h := sha256.New()
+	h.Write(encryptedData)
+	h.Write(tag)
+	sum := h.Sum(nil)
+	return hex.EncodeToString(sum[:6])
+}
 
 // handleHandshakeComplete processes handshake completion messages from TEE_K
 func (c *Client) handleHandshakeComplete(msg *shared.Message) {
@@ -210,13 +231,15 @@ func (c *Client) processTLSRecord(record []byte) {
 	}
 
 	if c.isClosing.Load() {
-		c.logger.Info("System is shutting down")
+		c.logger.Warn("Dropping response record: session closing",
+			zap.Uint64("seq_num", c.responseSeqNum), zap.Int("len", len(encryptedData)))
 		return
 	}
 
 	teetConnState := c.teetConn != nil
 	if !teetConnState {
-		c.logger.Info("TEE_T connection closed")
+		c.logger.Warn("Dropping response record: TEE_T connection nil",
+			zap.Uint64("seq_num", c.responseSeqNum), zap.Int("len", len(encryptedData)))
 		return
 	}
 
@@ -289,7 +312,21 @@ func (c *Client) sendBatchedResponses() error {
 		return fmt.Errorf("failed to send batched responses to TEE_T: %v", err)
 	}
 
-	c.logger.Info("Successfully sent batch to TEE_T", zap.Int("packets", len(c.batchedResponses)))
+	diag := make([]recordDiag, 0, len(c.batchedResponses))
+	for _, r := range c.batchedResponses {
+		diag = append(diag, recordDiag{seq: r.SeqNum, length: len(r.EncryptedData), fp: recordFingerprint(r.EncryptedData, r.Tag)})
+	}
+	c.lastBatchDiag = diag
+
+	var firstSeq, lastSeq uint64
+	if len(c.batchedResponses) > 0 {
+		firstSeq = c.batchedResponses[0].SeqNum
+		lastSeq = c.batchedResponses[len(c.batchedResponses)-1].SeqNum
+	}
+	c.logger.Info("Successfully sent batch to TEE_T",
+		zap.Int("packets", len(c.batchedResponses)),
+		zap.Uint64("first_seq", firstSeq), zap.Uint64("last_seq", lastSeq),
+		zap.Int64("concurrent_captures", activeResponseCaptures.Load()))
 
 	c.expectedRedactedStreams = len(c.batchedResponses)
 	c.logger.Info("Expecting redacted streams based on batch size", zap.Int("expected_streams", c.expectedRedactedStreams))

@@ -587,6 +587,8 @@ func (c *Client) terminateConnectionWithError(reason string, err error) {
 	// Log the critical error
 	c.logger.Error("CRITICAL ERROR - terminating connection", zap.String("reason", reason), zap.Error(err))
 
+	c.logBatchDiagnostics(reason)
+
 	// Perform immediate cleanup and termination
 	c.Close()
 
@@ -599,6 +601,31 @@ func (c *Client) terminateConnectionWithError(reason string, err error) {
 			// Channel might be full, but that's ok
 		}
 	})
+}
+
+// logBatchDiagnostics dumps the fingerprints of the last batch sent to TEE_T
+// so a failure can be correlated with TEE_T's per-record fingerprints. Tail
+// records are logged individually (failures cluster there); volume is bounded.
+func (c *Client) logBatchDiagnostics(reason string) {
+	diag := c.lastBatchDiag
+	if len(diag) == 0 {
+		return
+	}
+	const tail = 48
+	start := 0
+	if len(diag) > tail {
+		start = len(diag) - tail
+	}
+	c.logger.Warn("Response batch diagnostics",
+		zap.String("reason", reason),
+		zap.Int("records", len(diag)),
+		zap.Uint64("first_seq", diag[0].seq),
+		zap.Uint64("last_seq", diag[len(diag)-1].seq),
+		zap.Int("logged_tail", len(diag)-start),
+		zap.Int64("concurrent_captures", activeResponseCaptures.Load()))
+	for _, d := range diag[start:] {
+		c.logger.Info("resp-record-fp", zap.Uint64("seq", d.seq), zap.Int("len", d.length), zap.String("fp", d.fp))
+	}
 }
 
 // sendOPRFRangesToTEEK sends MPC OPRF ranges to TEE_K only. TEE_K relays them
