@@ -238,6 +238,7 @@ func main() {
 		},
 		// Optional context that will be included in the claim (JSON string)
 		"context": "{\"purpose\":\"demo\",\"version\":\"1.0\"}",
+		//"authRequest": "CgwQx//Y0gYYy4bZ0gYSQXTHsvzLJm3eyop+xtGB4yDxAEjdjVpYBhLZjD06mhFYVZwW/dfTo6WPHdN/ciWdipDN1YU+Lj8a/iEM03zohbMb",
 	}
 
 	// routerUrl is required — the library hits /allocate to resolve the

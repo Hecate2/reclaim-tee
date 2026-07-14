@@ -45,4 +45,6 @@ type ProviderRequestData struct {
 	Params       *providers.HTTPProviderParams       `json:"params"`            // Public provider parameters
 	SecretParams *providers.HTTPProviderSecretParams `json:"secretParams"`      // Secret provider parameters
 	Context      string                              `json:"context,omitempty"` // Optional context for the claim (JSON string)
+	// Base64 protobuf AuthenticationRequest for attestor auth; empty means none.
+	AuthRequest string `json:"authRequest,omitempty"`
 }

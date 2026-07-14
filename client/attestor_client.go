@@ -31,17 +31,20 @@ type AttestorClient struct {
 	logger     *shared.Logger
 	mu         sync.Mutex
 	connOnce   sync.Once // Ensure connection happens only once
+	// authRequest is forwarded to the attestor in the InitRequest when non-nil.
+	authRequest *teeproto.AuthenticationRequest
 }
 
 // NewAttestorClient creates a new client for communicating with attestor-core
-func NewAttestorClient(attestorURL string, privateKey *ecdsa.PrivateKey, logger *shared.Logger) *AttestorClient {
+func NewAttestorClient(attestorURL string, privateKey *ecdsa.PrivateKey, authRequest *teeproto.AuthenticationRequest, logger *shared.Logger) *AttestorClient {
 	address := shared.PubkeyToAddress(&privateKey.PublicKey)
 
 	return &AttestorClient{
-		url:        attestorURL,
-		privateKey: privateKey,
-		address:    address,
-		logger:     logger,
+		url:         attestorURL,
+		privateKey:  privateKey,
+		address:     address,
+		authRequest: authRequest,
+		logger:      logger,
 	}
 }
 
@@ -106,7 +109,7 @@ func (ac *AttestorClient) initializeConnection() error {
 		InitRequest: &teeproto.InitRequest{
 			ClientVersion: teeproto.AttestorVersion_ATTESTOR_VERSION_3_2_0, // Latest version
 			SignatureType: teeproto.ServiceSignatureType_SERVICE_SIGNATURE_TYPE_ETH,
-			Auth:          nil, // No authentication for now
+			Auth:          ac.authRequest,
 		},
 	}
 

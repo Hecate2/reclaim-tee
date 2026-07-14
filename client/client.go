@@ -1,15 +1,17 @@
 package client
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	teeproto "github.com/reclaimprotocol/reclaim-tee/proto"
-	"github.com/reclaimprotocol/reclaim-tee/providers"
-	"github.com/reclaimprotocol/reclaim-tee/shared"
 	"net"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	teeproto "github.com/reclaimprotocol/reclaim-tee/proto"
+	"github.com/reclaimprotocol/reclaim-tee/providers"
+	"github.com/reclaimprotocol/reclaim-tee/shared"
 
 	"github.com/gorilla/websocket"
 	"go.uber.org/zap"
@@ -138,13 +140,14 @@ type Client struct {
 	targetHost        string
 	targetPort        int
 	isClosing         atomic.Bool
-	capturedTraffic   [][]byte     // Append guarded by capturedTrafficMu (three writer goroutines).
+	capturedTraffic   [][]byte // Append guarded by capturedTrafficMu (three writer goroutines).
 	capturedTrafficMu sync.Mutex
 	handshakeComplete atomic.Bool // Routing boundary for captured records; Store after responseSeqNum write.
 
 	// Attestor client (created lazily when needed)
-	attestorClient *AttestorClient
-	attestorOnce   sync.Once // Ensure attestor client is created only once
+	attestorClient      *AttestorClient
+	attestorOnce        sync.Once                       // Ensure attestor client is created only once
+	attestorAuthRequest *teeproto.AuthenticationRequest // Optional auth request forwarded to the attestor
 
 	// Phase 4: Response handling
 	responseSeqNum       uint64 // TLS sequence number for response AEAD
@@ -295,6 +298,31 @@ func (c *Client) SetMode(mode ClientMode) {
 	c.clientMode = mode
 }
 
+// setAttestorAuthRequest decodes a base64 protobuf AuthenticationRequest and
+// stores it for the attestor InitRequest. Empty input clears any auth request.
+func (c *Client) setAttestorAuthRequest(authRequestB64 string) error {
+	if authRequestB64 == "" {
+		c.attestorAuthRequest = nil
+		return nil
+	}
+
+	raw, err := base64.StdEncoding.DecodeString(authRequestB64)
+	if err != nil {
+		return fmt.Errorf("failed to base64-decode auth request: %v", err)
+	}
+
+	authRequest := &teeproto.AuthenticationRequest{}
+	if err := proto.Unmarshal(raw, authRequest); err != nil {
+		return fmt.Errorf("failed to unmarshal auth request: %v", err)
+	}
+
+	c.attestorAuthRequest = authRequest
+	c.logger.Info("Attestor auth request configured",
+		zap.String("user_id", authRequest.GetData().GetId()),
+		zap.Uint32("expires_at", authRequest.GetData().GetExpiresAt()))
+	return nil
+}
+
 // getAttestorClient returns the attestor client, creating it lazily if needed
 func (c *Client) getAttestorClient() (*AttestorClient, error) {
 	var clientErr error
@@ -311,7 +339,7 @@ func (c *Client) getAttestorClient() (*AttestorClient, error) {
 			return
 		}
 
-		c.attestorClient = NewAttestorClient(c.attestorURL, privateKey, c.logger)
+		c.attestorClient = NewAttestorClient(c.attestorURL, privateKey, c.attestorAuthRequest, c.logger)
 	})
 
 	if clientErr != nil {
@@ -687,6 +715,11 @@ func (c *Client) ExecuteCompleteProtocol(
 	// Set provider params in client (equivalent to what StartProtocol does)
 	c.providerParams = providerData.Params
 	c.providerSecretParams = providerData.SecretParams
+
+	// Decode the optional attestor auth request before the attestor client is created.
+	if err := c.setAttestorAuthRequest(providerData.AuthRequest); err != nil {
+		return nil, err
+	}
 
 	// Connect to TEEs (equivalent to Connect())
 	if err := c.ConnectToTEEK(); err != nil {
