@@ -305,6 +305,15 @@
       "updateTime": "2026-07-14T21:54:22+05:00",
       "sourceCommit": "182355fe2ce8ade1a14846bc682962c179f413bb",
       "sourceDateEpoch": 1784048062
+    },
+    {
+      "type": "sev-snp",
+      "role": "t",
+      "version": "snp-app:7302ce692917e7183aa62a554092c5e3a74731a36eab981386b3e34a66d1749d",
+      "createTime": "2026-07-14T22:06:01+05:00",
+      "updateTime": "2026-07-14T22:06:01+05:00",
+      "sourceCommit": "44754f98bb3834bd5c113bad0f03d49a39ee3832",
+      "sourceDateEpoch": 1784048761
     }
   ]
 }
