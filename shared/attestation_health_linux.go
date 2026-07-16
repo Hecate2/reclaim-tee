@@ -11,6 +11,19 @@ import (
 	"go.uber.org/zap"
 )
 
+// isTerminalAttestWedge reports whether err is the sticky SEV-guest failure —
+// the kernel driver wiped the VMPCK (fail-closed) so every report ioctl now
+// returns ENOTTY until a reboot re-provisions the secrets page.
+func isTerminalAttestWedge(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, syscall.ENOTTY) {
+		return true
+	}
+	return strings.Contains(err.Error(), "inappropriate ioctl for device")
+}
+
 // captureAttestationDiag gathers reset-proof, in-guest evidence for an
 // attestation failure: the raw errno, the SEV guest device state, and kernel
 // ring-buffer lines mentioning the SEV/CCP path. Confidentiality-preserving
@@ -26,7 +39,7 @@ func captureAttestationDiag(err error) []zap.Field {
 	} else {
 		fields = append(fields, zap.Bool("sev_guest_present", false), zap.String("sev_guest_stat_err", serr.Error()))
 	}
-	fields = append(fields, zap.Strings("kmsg", kmsgTail("sev", "ccp", "psp", "snp")))
+	fields = append(fields, zap.Strings("kmsg", kmsgTail("sev", "ccp", "psp", "snp", "vmpck")))
 	return fields
 }
 

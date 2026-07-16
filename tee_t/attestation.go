@@ -25,6 +25,16 @@ func (t *TEET) getCurrentCertRaw() ([]byte, error) {
 // generateAttestationDoc produces a fresh GCP attestation token bound to
 // the supplied nonces, against the launcher socket on the host.
 func (t *TEET) generateAttestationDoc(ctx context.Context, nonces ...string) ([]byte, error) {
+	doc, err := t.generateAttestationDocRaw(ctx, nonces...)
+	if err != nil {
+		t.attestHealth.RecordFailure(err)
+		return nil, err
+	}
+	t.attestHealth.RecordSuccess()
+	return doc, nil
+}
+
+func (t *TEET) generateAttestationDocRaw(ctx context.Context, nonces ...string) ([]byte, error) {
 	if t.genAttestationDocFn != nil {
 		return t.genAttestationDocFn(ctx, nonces...)
 	}
@@ -134,10 +144,8 @@ func (t *TEET) getCachedAttestation(sessionID string) (*teeproto.AttestationRepo
 			return cached, nil
 		}
 		if err := t.refreshAttestation(); err != nil {
-			t.attestHealth.RecordFailure(err)
 			return nil, fmt.Errorf("failed to generate fallback attestation: %v", err)
 		}
-		t.attestHealth.RecordSuccess()
 		t.attestationMutex.RLock()
 		result := t.cachedAttestation
 		t.attestationMutex.RUnlock()

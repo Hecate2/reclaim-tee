@@ -52,7 +52,21 @@ func generateCombinedAWS(bound, appHash []byte, nonces []string) ([]byte, error)
 	if att, ok := snpAttestCacheGet(cacheKey); ok {
 		return att, nil
 	}
+	if cErr := snpDeviceInCooldown(); cErr != nil {
+		return nil, cErr
+	}
+	envBytes, err := generateCombinedAWSUncached(bound, appHash, nonces)
+	snpRecordDeviceResult(err)
+	if err != nil {
+		return nil, err
+	}
+	snpAttestCachePut(cacheKey, envBytes)
+	return envBytes, nil
+}
 
+// generateCombinedAWSUncached does the NitroTPM + SEV device work; the caller
+// holds snpAttestMu and owns caching + the post-failure cooldown.
+func generateCombinedAWSUncached(bound, appHash []byte, nonces []string) ([]byte, error) {
 	bind := sha512.Sum512(bound)
 	doc, err := RequestNitroTPMDocument(bind[:], nil, nil)
 	if err != nil {
@@ -66,7 +80,6 @@ func generateCombinedAWS(bound, appHash []byte, nonces []string) ([]byte, error)
 	if err != nil {
 		return nil, err
 	}
-	snpAttestCachePut(cacheKey, envBytes)
 	return envBytes, nil
 }
 

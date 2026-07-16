@@ -182,7 +182,7 @@ func RegisterWithRetry(ctx context.Context, register func(context.Context) error
 // until the next one — letting SEV-SNP track the actual NitroTPM leaf expiry
 // (refresh SNPRefreshMargin before NotAfter) instead of a fixed cadence. A nil
 // callback (or a non-positive return) falls back to the fixed ratlsRefreshInterval().
-func RunRATLSRefresh(ctx context.Context, ratls *RATLSManager, postRefresh func() error, nextInterval func() time.Duration, logger *Logger) {
+func RunRATLSRefresh(ctx context.Context, ratls *RATLSManager, postRefresh func() error, nextInterval func() time.Duration, health *AttestationHealth, logger *Logger) {
 	// Run postRefresh once immediately so the per-session attestation
 	// cache is populated before the server starts accepting traffic.
 	// Without this, the cache sits empty for the first RATLSRefreshInterval
@@ -219,6 +219,9 @@ func RunRATLSRefresh(ctx context.Context, ratls *RATLSManager, postRefresh func(
 		case <-timer.C:
 			if err := ratls.Refresh(ctx); err != nil {
 				logger.Error("RA-TLS refresh failed", zap.Error(err))
+				// The cert path hits the device directly (not via generateAttestationDoc);
+				// feed the watchdog here too — the path that goes silent on a wedge.
+				health.RecordFailure(err)
 				continue
 			}
 			if postRefresh != nil {

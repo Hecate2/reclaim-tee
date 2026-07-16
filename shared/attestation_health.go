@@ -16,6 +16,7 @@ type AttestationHealth struct {
 	mu           sync.Mutex
 	consecFails  int
 	diagCaptured bool
+	wedged       bool
 	lastSelfHeal time.Time
 	logger       *Logger
 }
@@ -41,6 +42,7 @@ func (a *AttestationHealth) RecordSuccess() {
 	}
 	a.consecFails = 0
 	a.diagCaptured = false
+	a.wedged = false
 	a.mu.Unlock()
 }
 
@@ -51,12 +53,18 @@ func (a *AttestationHealth) RecordFailure(err error) {
 	if a == nil {
 		return
 	}
+	// A terminal wedge (VMPCK wiped -> sticky ENOTTY) never self-recovers, so
+	// self-reset on first sight instead of waiting out the consecutive count.
+	terminal := isTerminalAttestWedge(err)
 	a.mu.Lock()
 	a.consecFails++
 	n := a.consecFails
 	captureDiag := !a.diagCaptured
 	a.diagCaptured = true
-	selfHeal := n >= attestSelfHealAfter && time.Since(a.lastSelfHeal) >= attestSelfHealMinGap
+	if terminal {
+		a.wedged = true
+	}
+	selfHeal := (n >= attestSelfHealAfter || terminal) && time.Since(a.lastSelfHeal) >= attestSelfHealMinGap
 	if selfHeal {
 		a.lastSelfHeal = time.Now()
 	}
@@ -66,7 +74,8 @@ func (a *AttestationHealth) RecordFailure(err error) {
 	if logger != nil {
 		logger.Error("attestation generation failed",
 			zap.Int("consecutive_failures", n),
-			zap.Bool("healthy", n < attestUnhealthyAfter),
+			zap.Bool("healthy", !terminal && n < attestUnhealthyAfter),
+			zap.Bool("terminal_wedge", terminal),
 			zap.Error(err))
 		if captureDiag {
 			logger.Error("attestation failure diagnostics", captureAttestationDiag(err)...)
@@ -74,8 +83,11 @@ func (a *AttestationHealth) RecordFailure(err error) {
 	}
 	if selfHeal {
 		if logger != nil {
-			logger.Error("attestation wedged past self-heal threshold; self-resetting VM",
-				zap.Int("consecutive_failures", n))
+			reason := "attestation wedged past self-heal threshold; self-resetting VM"
+			if terminal {
+				reason = "attestation channel wedged (terminal ENOTTY); self-resetting VM"
+			}
+			logger.Error(reason, zap.Int("consecutive_failures", n), zap.Bool("terminal_wedge", terminal))
 			logger.Sync()
 		}
 		go attestSelfReset(logger)
@@ -90,5 +102,5 @@ func (a *AttestationHealth) Healthy() bool {
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return a.consecFails < attestUnhealthyAfter
+	return !a.wedged && a.consecFails < attestUnhealthyAfter
 }

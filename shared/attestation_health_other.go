@@ -9,3 +9,5 @@ import "go.uber.org/zap"
 func captureAttestationDiag(err error) []zap.Field { return nil }
 
 func attestSelfReset(logger *Logger) {}
+
+func isTerminalAttestWedge(err error) bool { return false }

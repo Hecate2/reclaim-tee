@@ -146,7 +146,7 @@ func startRouterMode(parent context.Context, config *TEEKConfig, logger *shared.
 		// Regenerate the per-session cached attestation on every cert
 		// rotation so its cert_hash nonce stays in lockstep with the
 		// live cert. Single ticker drives both — no drift window.
-		go shared.RunRATLSRefresh(ctx, teek.ratls, teek.refreshAttestation, teek.nextRATLSRefresh, logger)
+		go shared.RunRATLSRefresh(ctx, teek.ratls, teek.refreshAttestation, teek.nextRATLSRefresh, teek.attestHealth, logger)
 	}
 	go shared.RunHeartbeats(ctx, teek, "K", logger, register, shared.RouterHeartbeatInterval)
 

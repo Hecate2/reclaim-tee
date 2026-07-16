@@ -3,9 +3,11 @@
 package shared
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"strings"
@@ -76,6 +78,78 @@ func snpAttestCachePut(key string, att []byte) {
 	snpAttestCache[key] = snpAttestCacheEntry{att: att, exp: time.Now().Add(snpAttestCacheTTL)}
 }
 
+// snpDeviceCooldown briefly holds a device error sticky so cache-miss callers
+// can't hammer a throttled device (repeated ratelimit hits drive it fail-closed).
+const snpDeviceCooldown = 2 * time.Second
+
+var (
+	snpLastDeviceErr     error
+	snpLastDeviceErrTime time.Time
+)
+
+// snpDeviceInCooldown returns the recent device error while still inside the
+// post-failure window; nil otherwise. Call with snpAttestMu held.
+func snpDeviceInCooldown() error {
+	if snpLastDeviceErr != nil && time.Since(snpLastDeviceErrTime) < snpDeviceCooldown {
+		return snpLastDeviceErr
+	}
+	return nil
+}
+
+// snpRecordDeviceResult stamps the last device outcome for the cooldown. Call
+// with snpAttestMu held.
+func snpRecordDeviceResult(err error) {
+	if err != nil {
+		snpLastDeviceErr, snpLastDeviceErrTime = err, time.Now()
+		return
+	}
+	snpLastDeviceErr = nil
+}
+
+// certChainHTTPClient serves the AK cert-issuer chain from an in-memory cache so
+// the fetch inside ak.Attest (under snpAttestMu) is instant after the first warm.
+var certChainHTTPClient = &http.Client{
+	Timeout:   30 * time.Second,
+	Transport: &cachingRoundTripper{base: http.DefaultTransport},
+}
+
+type cachingRoundTripper struct {
+	base http.RoundTripper
+	mu   sync.Mutex
+	body map[string][]byte
+}
+
+func (c *cachingRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	mkResp := func(b []byte) *http.Response {
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(b)), Header: make(http.Header), Request: req}
+	}
+	if req.Method == http.MethodGet {
+		c.mu.Lock()
+		b, ok := c.body[req.URL.String()]
+		c.mu.Unlock()
+		if ok {
+			return mkResp(b), nil
+		}
+	}
+	resp, err := c.base.RoundTrip(req)
+	if err != nil || req.Method != http.MethodGet || resp.StatusCode != http.StatusOK {
+		return resp, err
+	}
+	b, rerr := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if rerr != nil {
+		return nil, rerr
+	}
+	c.mu.Lock()
+	if c.body == nil {
+		c.body = map[string][]byte{}
+	}
+	c.body[req.URL.String()] = b
+	c.mu.Unlock()
+	resp.Body = io.NopCloser(bytes.NewReader(b))
+	return resp, nil
+}
+
 // generateCombinedGCP binds the given blob (raw SPKI for the cert path, or the
 // nonce commitment for the claim path) into report_data + the quote nonce, and
 // carries the presentable nonces (if any) in the envelope.
@@ -87,7 +161,21 @@ func generateCombinedGCP(bound, appHash []byte, nonces []string) ([]byte, error)
 	if att, ok := snpAttestCacheGet(cacheKey); ok {
 		return att, nil
 	}
+	if cErr := snpDeviceInCooldown(); cErr != nil {
+		return nil, cErr
+	}
+	envBytes, err := generateCombinedGCPUncached(bound, appHash, nonces)
+	snpRecordDeviceResult(err)
+	if err != nil {
+		return nil, err
+	}
+	snpAttestCachePut(cacheKey, envBytes)
+	return envBytes, nil
+}
 
+// generateCombinedGCPUncached does the vTPM + SEV device work; the caller holds
+// snpAttestMu and owns caching + the post-failure cooldown.
+func generateCombinedGCPUncached(bound, appHash []byte, nonces []string) ([]byte, error) {
 	rwc, err := legacytpm.OpenTPM("/dev/tpmrm0")
 	if err != nil {
 		return nil, fmt.Errorf("open tpm: %w", err)
@@ -123,7 +211,7 @@ func generateCombinedGCP(bound, appHash []byte, nonces []string) ([]byte, error)
 		TEENonce:         rd[:],
 		TEEDevice:        sev,
 		TCGEventLog:      []byte{},
-		CertChainFetcher: &http.Client{Timeout: 30 * time.Second},
+		CertChainFetcher: certChainHTTPClient,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("attest: %w", err)
@@ -136,7 +224,6 @@ func generateCombinedGCP(bound, appHash []byte, nonces []string) ([]byte, error)
 	if err != nil {
 		return nil, err
 	}
-	snpAttestCachePut(cacheKey, envBytes)
 	return envBytes, nil
 }
 
