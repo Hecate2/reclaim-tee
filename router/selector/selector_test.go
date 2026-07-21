@@ -175,6 +175,50 @@ func TestPickReadyPair_GatesByAttestationType(t *testing.T) {
 	}
 }
 
+func TestPickReadyPair_PrefersSNPWhenClientSupportsIt(t *testing.T) {
+	snp := readyPairTyped("snp", "sev-snp")
+	pairs := []*store.Pair{
+		readyPairTyped("cs1", "cs"),
+		readyPair("cs2"), // untyped -> CS
+		snp,
+	}
+	// Client accepts BOTH cs+snp: must always get the SNP pair when one is
+	// ready, so CS capacity is reserved for genuinely legacy clients.
+	for range 100 {
+		picked, err := PickReadyPair(pairs, acceptAll, now, staleness, controlUnhealthy, otNotReady, nil)
+		if err != nil {
+			t.Fatalf("pick: %v", err)
+		}
+		if picked.ID != "snp" {
+			t.Fatalf("SNP-capable client got %q, want snp (SNP must win over CS)", picked.ID)
+		}
+	}
+
+	// Fallback: no SNP pair ready => SNP-capable client is still served a CS pair.
+	csOnly := []*store.Pair{readyPairTyped("cs1", "cs"), readyPair("cs2")}
+	if _, err := PickReadyPair(csOnly, acceptAll, now, staleness, controlUnhealthy, otNotReady, nil); err != nil {
+		t.Fatalf("SNP-capable client must fall back to CS when no SNP ready: %v", err)
+	}
+
+	// SNP preference overrides geo: an Asia client with a NEAR CS pair and a
+	// FAR SNP pair must still get the SNP pair (this is what stops SNP clients
+	// from being geo-routed onto the CS pair).
+	nearCS := readyPairTyped("nearCS", "cs")
+	nearCS.TEEKRegion, nearCS.TEETRegion = "asia-south1", "asia-south1"
+	farSNP := readyPairTyped("farSNP", "sev-snp")
+	farSNP.TEEKRegion, farSNP.TEETRegion = "us-central1", "us-east-2"
+	mumbai := &geo.LatLon{Lat: 19.0, Lon: 72.8}
+	for range 50 {
+		picked, err := PickReadyPair([]*store.Pair{nearCS, farSNP}, acceptAll, now, staleness, controlUnhealthy, otNotReady, mumbai)
+		if err != nil {
+			t.Fatalf("pick: %v", err)
+		}
+		if picked.ID != "farSNP" {
+			t.Fatalf("SNP-capable Asia client got %q, want farSNP (SNP preference must beat geo)", picked.ID)
+		}
+	}
+}
+
 func TestPickReadyPair_GeoAffinity(t *testing.T) {
 	near := readyPair("near")
 	near.TEEKRegion, near.TEETRegion = "asia-south1", "asia-south1"

@@ -1,6 +1,7 @@
 // Package selector picks a ready pair to allocate to a new client session:
-// ready + attestation-type-accepted, then geo-nearest to the client (falling
-// back to uniform random when geo is unavailable).
+// ready + attestation-type-accepted, preferring SEV-SNP for SNP-capable
+// clients (so CS is reserved for genuinely legacy clients), then geo-nearest
+// to the client (falling back to uniform random when geo is unavailable).
 package selector
 
 import (
@@ -57,6 +58,23 @@ func PickReadyPair(
 	}
 	if len(ready) == 0 {
 		return nil, ErrNoReadyPairs
+	}
+
+	// SNP preference: a client that accepts SEV-SNP must be served an SEV-SNP
+	// pair whenever one is ready, even if it also accepts CS. This keeps
+	// SNP-capable clients off CS capacity, so the CS pair only ever serves
+	// genuinely legacy (CS-only) clients. Falls back to the full accepted set
+	// when no SNP pair is ready (graceful degradation, never fail-closed).
+	if accepted(accepts, shared.AttestationTypeSEVSNP) {
+		snpOnly := make([]*store.Pair, 0, len(ready))
+		for _, p := range ready {
+			if PairAttestationType(p) == shared.AttestationTypeSEVSNP {
+				snpOnly = append(snpOnly, p)
+			}
+		}
+		if len(snpOnly) > 0 {
+			ready = snpOnly
+		}
 	}
 
 	if clientLoc != nil {
