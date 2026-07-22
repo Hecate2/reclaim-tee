@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"slices"
 	"time"
 
 	"github.com/reclaimprotocol/reclaim-tee/router/geo"
@@ -115,6 +116,15 @@ func (s *Server) HandleAllocate(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "sign error")
 		return
 	}
+
+	// Structured allocation record for stats/dashboards: which attestation type
+	// was served (CS vs SEV-SNP) and whether the client is SNP-capable. A single
+	// stable source (the router sees every allocation) that survives pair
+	// redeploys, unlike instance-id-keyed TEE logs.
+	log.Info("pair allocated",
+		zap.String("pair_id", picked.ID),
+		zap.String("attestation_type", selector.PairAttestationType(picked)),
+		zap.Bool("snp_capable", slices.Contains(accepts, shared.AttestationTypeSEVSNP)))
 
 	writeJSON(w, http.StatusOK, allocateResponse{
 		PairID:   picked.ID,
