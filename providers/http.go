@@ -9,11 +9,21 @@ import (
 	"net/url"
 	"sort"
 	"strconv"
+	"strings"
 
 	"github.com/reclaimprotocol/reclaim-tee/shared"
 
 	"go.uber.org/zap"
 )
+
+// clientReservedHeaders are request headers the client sets itself; a provider
+// or secret config must not override them (lowercased for case-insensitive match).
+var clientReservedHeaders = map[string]struct{}{
+	"host":            {},
+	"connection":      {},
+	"content-length":  {},
+	"accept-encoding": {},
+}
 
 // CreateRequest builds the HTTP/1.1 request bytes and redaction ranges
 func CreateRequest(secret *HTTPProviderSecretParams, params *HTTPProviderParams) (CreateRequestResult, error) {
@@ -65,6 +75,20 @@ func CreateRequest(secret *HTTPProviderSecretParams, params *HTTPProviderParams)
 	}
 	if !hasUA {
 		pubHeaders["User-Agent"] = DEFAULT_USER_AGENT
+	}
+
+	// A config header duplicating one the client sets is appended after ours and
+	// a server may honor it as an override; reject instead of sending a conflict.
+	for _, h := range []struct {
+		src map[string]string
+		lbl string
+	}{{pubHeaders, "provider"}, {secret.Headers, "secret"}} {
+		for k := range h.src {
+			if _, reserved := clientReservedHeaders[strings.ToLower(strings.TrimSpace(k))]; reserved {
+				logger.Error("reserved header overridden by config", zap.String("component", "HTTP"), zap.String("operation", "CreateRequest"), zap.String("header", k), zap.String("source", h.lbl))
+				return CreateRequestResult{}, fmt.Errorf("%s header %q overrides a client-managed header (Host/Connection/Content-Length/Accept-Encoding); remove it from the provider config", h.lbl, k)
+			}
+		}
 	}
 
 	logger.Info("Step 1/5: Substituting template parameters", zap.String("component", "HTTP"), zap.String("operation", "CreateRequest"), zap.Int("step", 1), zap.Int("total", 5))
