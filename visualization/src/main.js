@@ -58,10 +58,12 @@ STEPS.forEach((_, i) => {
 })
 el('step-total').textContent = String(STEPS.length - 1)
 
+let isPlaying = false
 const ui = {
   holdAdvance: () => voice.isSpeaking(),
   showStep(idx, s) {
-    voice.play(idx)
+    if (isPlaying) voice.play(idx)
+    else voice.pause()
     el('step-num').textContent = String(idx)
     el('step-eyebrow').textContent = s.eyebrow
     el('step-title').textContent = s.title
@@ -84,19 +86,25 @@ const tour = new Tour(stage, nodes, wires, ui, reducedMotion)
 const voiceBtn = el('voice-toggle')
 if (voice.hasVoice) {
   voiceBtn.hidden = false
+  voiceBtn.classList.remove('muted') // narration defaults on; it starts with the play button
   voiceBtn.addEventListener('click', () => {
     const on = !voice.isEnabled()
-    voice.setEnabled(on, tour.idx)
+    voice.setEnabled(on, isPlaying ? tour.idx : undefined)
     voiceBtn.classList.toggle('muted', !on)
   })
+} else {
+  voice.setEnabled(false)
 }
 
 const playBtn = el('btn-play')
 function setPlaying(p) {
+  isPlaying = p
   tour.setPlaying(p)
   playBtn.classList.toggle('playing', p)
+  if (p) voice.resume(tour.idx)
+  else voice.pause()
 }
-setPlaying(true)
+setPlaying(false) // load paused — audio starts naturally with the user's play click
 playBtn.addEventListener('click', () => { setPlaying(!tour.playing) })
 el('btn-prev').addEventListener('click', () => { tour.prev(); markInteracted() })
 el('btn-next').addEventListener('click', () => { tour.next(); markInteracted() })

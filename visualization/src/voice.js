@@ -11,25 +11,36 @@ for (const [path, url] of Object.entries(files)) {
 
 export const hasVoice = Object.keys(clips).length > 0
 
-let enabled = false
+let enabled = true
+let currentIdx = -1
 const audio = new Audio()
 audio.preload = 'auto'
 
 export function isEnabled() { return enabled }
 export function isSpeaking() { return enabled && !audio.paused && !audio.ended }
 
-export function setEnabled(on, currentIdx) {
+export function setEnabled(on, idx) {
   enabled = on
   if (!on) {
     audio.pause()
-  } else if (currentIdx !== undefined) {
-    play(currentIdx)
+  } else if (idx !== undefined) {
+    play(idx)
   }
 }
 
 export function play(idx) {
+  currentIdx = idx
   if (!enabled || !clips[idx]) { audio.pause(); return }
   audio.src = clips[idx]
   audio.currentTime = 0
   audio.play().catch(() => {})
+}
+
+export function pause() { audio.pause() }
+
+// resume mid-clip if it's still the same step, else start that step's clip
+export function resume(idx) {
+  if (!enabled) return
+  if (idx === currentIdx && audio.src && !audio.ended) audio.play().catch(() => {})
+  else play(idx)
 }
