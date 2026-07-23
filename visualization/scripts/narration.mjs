@@ -1,0 +1,27 @@
+// Spoken narration per tour step — written for the ear, not the eye.
+// Indexes match STEPS in src/steps.js.
+export const NARRATION = [
+  `Reclaim lets your phone prove what a website told it — a balance, a grade, a follower count — without showing anyone the whole conversation. The client is the only party that ever talks to the website. Two hardware enclaves, TEE K and TEE A — one in Google Cloud, one in A W S — each hold half of the cryptographic picture. We call this design Split AEAD. A neutral attestor reunites the halves and signs the claim.`,
+
+  `First, the client asks the router for an enclave pair, announcing which attestation flavors it can verify. The router picks a ready pair — preferring SEV SNP and the nearest region — and returns the enclave addresses plus a short-lived token. Pairs earned their place at registration: attestation verified, code digest checked against an allowlist, and the base image pinned — fail closed.`,
+
+  `Before trusting anything, the client verifies both enclaves. Each enclave's TLS certificate carries its hardware attestation, bound to the certificate's own key, so it can't be lifted onto an impostor. Verification happens during the TLS handshake itself — before a single protocol byte. The two enclaves also attest each other.`,
+
+  `Why believe an attestation? For SEV SNP, the chain runs from silicon to signature. AMD's root keys sign a report produced inside the CPU. The report binds a TPM quote carrying two measurements: the base operating system image, which the attestor pins to exactly two allowed bases, one per cloud — and the application bundle, published inside every claim for anyone to audit. The enclave's signing key rides in the same hardware-signed report. And the pair spans clouds, so no single cloud operator ever holds both halves.`,
+
+  `Here is the core idea: Split AEAD. TLS guards every byte with a cipher where a single key both encrypts and authenticates. Reclaim separates those two jobs across the clouds. The key is born inside TEE K and never leaves. What crosses to TEE A is only tag secrets — enough to verify authentication tags over ciphertext, yet revealing nothing about the key itself. Neither half alone reveals anything.`,
+
+  `The client dials the website over plain TCP — no enclave ever connects to the target. But the client is only a relay: TEE K is the real TLS endpoint, and all session keys stay inside it. When the handshake completes, that wire goes quiet: nothing captured from the website is ever sent to TEE K again.`,
+
+  `Each session makes exactly one request. The client redacts your secrets — cookies, tokens — and splits the evidence: the redacted request goes to TEE K, one-time masks go to TEE A. TEE K encrypts what it is allowed to see; TEE A patches the secrets back in ciphertext space and seals the record. Neither enclave ever saw your secrets in the clear.`,
+
+  `Now the split does its job. The website answers with encrypted records. The client keeps the ciphertext and sends it, with each record's tag, to TEE A — which verifies every tag without holding any keys. TEE K never receives a byte of the response. It streams the keystream to the client, and the plaintext materializes only inside your phone.`,
+
+  `You choose what the world may see. Provider rules resolve into exact byte ranges — reveal this, hide the rest. TEE K then edits the keystream the way CRISPR edits genes: every byte outside the revealed ranges is destroyed before anything is signed. Hidden spans can never be decrypted again.`,
+
+  `Sometimes a hidden field still needs a stable reference. When a provider asks for it, that field becomes a deterministic fingerprint through O P R F multiparty computation: TEE K brings keystream, TEE A brings ciphertext, and a joint circuit combines them into the real value only inside itself — then collapses it to an opaque hash. Both enclaves get the same fingerprint. Neither ever saw the value.`,
+
+  `The client bundles both signed halves and carries them to the attestor. The bundle runs a gauntlet: attestations walked back to hardware roots, measurements checked, signatures matched to attested keys, fingerprints compared, keystream XORed with ciphertext, and the claimed facts tested against the revealed bytes. Only when every gate passes does the attestor sign.`,
+
+  `The attestor hands back a signed claim — a compact, portable proof that a specific website served specific bytes, checkable by anyone, revealing only what you chose. The plaintext never left your phone. No enclave touched the website. And every trusted statement traces back to hardware.`,
+]
