@@ -26,7 +26,7 @@ func (t *TEEK) sendBatchedEncryptedRequestToTEET(sessionID string, fragments []s
 	tagSecrets      []byte
 	redactionRanges []shared.RequestRedactionRange
 	seqNum          uint64
-}, cipherSuite uint16, baseSeqNum uint64, commitments [][]byte) error {
+}, cipherSuite uint16, baseSeqNum uint64) error {
 
 	t.logger.WithSession(sessionID).Debug("Sending batched encrypted request to TEE_T",
 		zap.Int("fragment_count", len(fragments)),
@@ -61,7 +61,6 @@ func (t *TEEK) sendBatchedEncryptedRequestToTEET(sessionID string, fragments []s
 				Fragments:   pbFragments,
 				BaseSeqNum:  baseSeqNum,
 				CipherSuite: uint32(cipherSuite),
-				Commitments: commitments,
 			},
 		},
 	}

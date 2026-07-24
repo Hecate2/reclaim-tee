@@ -610,7 +610,6 @@ func (cm *TEEKConnectionManager) handleSessionMessages(sessionID string, session
 					Fragments:   fragments,
 					BaseSeqNum:  p.BatchedEncryptedRequest.GetBaseSeqNum(),
 					CipherSuite: uint16(p.BatchedEncryptedRequest.GetCipherSuite()),
-					Commitments: p.BatchedEncryptedRequest.GetCommitments(),
 				},
 			}
 			handlerErr = cm.teet.handleBatchedEncryptedRequest(msg)

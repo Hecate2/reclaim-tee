@@ -34,8 +34,7 @@ func (t *TEET) handleRedactionStreams(sessionID string, msg *shared.Message) err
 
 	t.logger.Debug("Received redaction streams for session",
 		zap.String("session_id", sessionID),
-		zap.Int("streams_count", len(streamsData.Streams)),
-		zap.Int("keys_count", len(streamsData.CommitmentKeys)))
+		zap.Int("streams_count", len(streamsData.Streams)))
 
 	session, err := t.sessionManager.GetSession(sessionID)
 	if err != nil {
@@ -47,14 +46,9 @@ func (t *TEET) handleRedactionStreams(sessionID string, msg *shared.Message) err
 		session.RedactionState = &shared.RedactionSessionState{}
 	}
 
-	session.RedactionState.SetStreamsAndKeys(streamsData.Streams, streamsData.CommitmentKeys)
+	session.RedactionState.SetStreams(streamsData.Streams)
 
 	t.logger.Debug("Redaction streams stored for session", zap.String("session_id", sessionID))
-
-	if err := t.verifyCommitmentsIfReady(sessionID); err != nil {
-		t.terminateSessionWithError(sessionID, shared.ReasonCryptoCommitmentFailed, err, "Commitment verification failed")
-		return err
-	}
 
 	if procErr := t.processIfBothPartsArrived(sessionID); procErr != nil {
 		return procErr
@@ -348,9 +342,9 @@ func (t *TEET) handleBatchedEncryptedRequest(msg *shared.Message) error {
 		return err
 	}
 
-	if len(batchedReq.Commitments) > shared.MaxRedactionRanges {
-		err := fmt.Errorf("too many commitments: %d (max %d)", len(batchedReq.Commitments), shared.MaxRedactionRanges)
-		t.terminateSessionWithError(sessionID, shared.ReasonProtocolViolation, err, "Too many commitments")
+	if len(batchedReq.Fragments) > 0 && len(batchedReq.Fragments[0].RedactionRanges) > shared.MaxRedactionRanges {
+		err := fmt.Errorf("too many redaction ranges: %d (max %d)", len(batchedReq.Fragments[0].RedactionRanges), shared.MaxRedactionRanges)
+		t.terminateSessionWithError(sessionID, shared.ReasonProtocolViolation, err, "Too many redaction ranges")
 		return err
 	}
 
@@ -369,21 +363,13 @@ func (t *TEET) handleBatchedEncryptedRequest(msg *shared.Message) error {
 		}
 	}
 
-	// Store commitments and redaction ranges from the first fragment
+	// Store redaction ranges from the first fragment
 	if len(batchedReq.Fragments) > 0 {
-		session.RedactionState.SetRangesAndCommitments(
-			batchedReq.Fragments[0].RedactionRanges,
-			batchedReq.Commitments,
-		)
+		session.RedactionState.SetRanges(batchedReq.Fragments[0].RedactionRanges)
 
-		t.logger.Debug("Stored expected commitments from batched request",
+		t.logger.Debug("Stored redaction ranges from batched request",
 			zap.String("session_id", sessionID),
-			zap.Int("commitment_count", len(batchedReq.Commitments)))
-	}
-
-	if err := t.verifyCommitmentsIfReady(sessionID); err != nil {
-		t.terminateSessionWithError(sessionID, shared.ReasonCryptoCommitmentFailed, err, "Commitment verification failed")
-		return err
+			zap.Int("range_count", len(batchedReq.Fragments[0].RedactionRanges)))
 	}
 
 	teetState, err := t.getTEETSessionState(sessionID)

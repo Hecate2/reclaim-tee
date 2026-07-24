@@ -164,7 +164,7 @@ func (t *TEEK) encryptAndSendRequest(sessionID string, redactedRequest shared.Re
 	}
 
 	// Send all fragments in a single batch to TEE_T
-	if err := t.sendBatchedEncryptedRequestToTEET(sessionID, fragments, cipherSuite, actualSeqNum, redactedRequest.Commitments); err != nil {
+	if err := t.sendBatchedEncryptedRequestToTEET(sessionID, fragments, cipherSuite, actualSeqNum); err != nil {
 		return fmt.Errorf("failed to send batched encrypted request to TEE_T: %v", err)
 	}
 

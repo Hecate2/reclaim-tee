@@ -360,7 +360,6 @@ func (c *Client) sendMessage(msg *shared.Message) error {
 			}
 			env.Payload = &teeproto.Envelope_RedactedRequest{RedactedRequest: &teeproto.RedactedRequest{
 				RedactedRequest: d.RedactedRequest,
-				Commitments:     d.Commitments,
 				RedactionRanges: ranges,
 			}}
 		}

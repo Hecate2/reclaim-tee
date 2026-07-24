@@ -222,10 +222,6 @@ type Client struct {
 	fullRedactedResponse    []byte // final redacted HTTP response (concatenated)
 	expectedRedactedStreams int    // expected number of redacted streams from response sequences
 
-	// commitment opening for proof (R_SP streams only, as per protocol)
-	proofStream []byte // Concatenated R_SP streams
-	proofKey    []byte // First R_SP key (protocol assumes single K_SP)
-
 	// Request data from libreclaim library
 	requestData []byte
 
@@ -285,8 +281,6 @@ func NewClient(teekURL string) *Client {
 		protocolStartTime:           time.Now(),
 		lastResponseData:            nil,
 		transcriptValidationResults: nil,
-		proofStream:                 nil,
-		proofKey:                    nil,
 		expectedRedactedStreams:     0,
 	}
 }

@@ -403,7 +403,7 @@ func (t *TEEK) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			for _, r := range p.RedactedRequest.GetRedactionRanges() {
 				ranges = append(ranges, shared.RequestRedactionRange{Start: int(r.GetStart()), Length: int(r.GetLength()), Type: r.GetType()})
 			}
-			rr := shared.RedactedRequestData{RedactedRequest: p.RedactedRequest.GetRedactedRequest(), Commitments: p.RedactedRequest.GetCommitments(), RedactionRanges: ranges}
+			rr := shared.RedactedRequestData{RedactedRequest: p.RedactedRequest.GetRedactedRequest(), RedactionRanges: ranges}
 			msg := &shared.Message{SessionID: sessionID, Type: shared.MsgRedactedRequest, Data: rr}
 			handlerErr = t.handleRedactedRequest(sessionID, msg)
 		case *teeproto.Envelope_ResponseRedactionSpec:

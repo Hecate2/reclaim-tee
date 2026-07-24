@@ -149,7 +149,7 @@ message EncryptedDataResponse {
 
 message RedactedRequest {
   bytes redacted_request = 1; // R_red
-  repeated bytes commitments = 2; // [comm_s, comm_sp]
+  repeated bytes commitments = 2 [deprecated = true]; // DEPRECATED: unused, no longer populated or verified
   repeated RequestRedactionRange redaction_ranges = 3;
 }
 
@@ -160,7 +160,7 @@ message RedactionVerification {
 
 message RedactionStreams {
   repeated bytes streams = 1; // [Str_S, Str_SP]
-  repeated bytes commitment_keys = 2; // [K_S, K_SP]
+  repeated bytes commitment_keys = 2 [deprecated = true]; // DEPRECATED: unused, no longer populated or verified
 }
 
 // Client to TEE_K: response redaction specification
@@ -173,13 +173,13 @@ message BatchedEncryptedRequest {
   repeated EncryptedRequest fragments = 1;
   uint64 base_seq_num = 2; // Starting sequence number
   uint32 cipher_suite = 3;
-  repeated bytes commitments = 4; // Shared commitments for all fragments
+  repeated bytes commitments = 4 [deprecated = true]; // DEPRECATED: unused, no longer populated or verified
 }
 
 message EncryptedRequest {
   bytes encrypted_data = 1; // R_red_Enc
   bytes tag_secrets = 2;
-  repeated bytes commitments = 3; // [comm_s, comm_sp]
+  repeated bytes commitments = 3 [deprecated = true]; // DEPRECATED: unused, no longer populated or verified
   uint32 cipher_suite = 4; // uint16 fits here
   uint64 seq_num = 5;
   repeated RequestRedactionRange redaction_ranges = 6;

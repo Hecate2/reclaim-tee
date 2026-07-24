@@ -83,8 +83,7 @@ func (c *Client) sendRedactedRequest() {
 	// Log what TEE_K will see (the redacted request)
 	c.logger.Info("TEE_K will receive redacted request",
 		zap.Int("redacted_request_length", len(redactedData.RedactedRequest)),
-		zap.Int("redaction_ranges_count", len(redactedData.RedactionRanges)),
-		zap.Int("commitments_count", len(redactedData.Commitments)))
+		zap.Int("redaction_ranges_count", len(redactedData.RedactionRanges)))
 
 	// Show the redacted request content that TEE_K will see
 	prettyRedactedRequest := make([]byte, len(redactedData.RedactedRequest))
@@ -125,7 +124,6 @@ func (c *Client) sendRedactedRequest() {
 		Payload: &teeproto.Envelope_RedactedRequest{
 			RedactedRequest: &teeproto.RedactedRequest{
 				RedactedRequest: redactedData.RedactedRequest,
-				Commitments:     redactedData.Commitments,
 				RedactionRanges: pbRanges,
 			},
 		},
@@ -145,8 +143,7 @@ func (c *Client) sendRedactedRequest() {
 		TimestampMs: time.Now().UnixMilli(),
 		Payload: &teeproto.Envelope_RedactionStreams{
 			RedactionStreams: &teeproto.RedactionStreams{
-				Streams:        streamsData.Streams,
-				CommitmentKeys: streamsData.CommitmentKeys,
+				Streams: streamsData.Streams,
 			},
 		},
 	}

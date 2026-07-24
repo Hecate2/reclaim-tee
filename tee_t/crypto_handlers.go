@@ -1,8 +1,6 @@
 package main
 
 import (
-	"crypto/hmac"
-	"crypto/sha256"
 	"crypto/subtle"
 	"fmt"
 
@@ -200,79 +198,6 @@ func (t *TEET) classifyTagFailure(sessionID string, failed *shared.EncryptedResp
 		zap.Int("drift", drift),
 		zap.Int("inner_len", len(failed.EncryptedData)),
 		zap.Ints("prev_inner", prev))
-}
-
-// verifyCommitmentsIfReady verifies commitments if both streams and expected commitments are available
-// Note: Streams arrive from client, commitments arrive from TEE_K - they may arrive in any order.
-// Deferral is correct when waiting for the other piece. TEE_K enforces commitment presence before forwarding.
-func (t *TEET) verifyCommitmentsIfReady(sessionID string) error {
-	session, err := t.sessionManager.GetSession(sessionID)
-	if err != nil {
-		return fmt.Errorf("failed to get session: %v", err)
-	}
-	if session.RedactionState == nil {
-		return fmt.Errorf("critical security failure: no redaction state available for commitment verification in session %s", sessionID)
-	}
-	// Both writers (client streams and TEE_K commitments) may still race;
-	// snapshot under lock so the two len() checks see a consistent state.
-	streams, keys, expected := session.RedactionState.SnapshotForCommitmentCheck()
-	hasStreams := len(streams) > 0 && len(keys) > 0
-	hasCommitments := len(expected) > 0
-
-	// If no streams yet, defer verification until they arrive from client
-	if !hasStreams {
-		t.logger.WithSession(sessionID).Debug("Deferring - streams not available")
-		return nil
-	}
-
-	// If no commitments yet, defer verification until they arrive from TEE_K
-	// Note: TEE_K validates that commitments are present before forwarding, so if streams
-	// exist but commitments never arrive, something is wrong with message ordering
-	if !hasCommitments {
-		t.logger.WithSession(sessionID).Debug("Deferring commitment verification")
-		return nil
-	}
-
-	// SECURITY: Once both are present, commitment count must match stream count
-	if len(expected) != len(streams) {
-		return fmt.Errorf("SECURITY ERROR: commitment count (%d) does not match stream count (%d)",
-			len(expected), len(streams))
-	}
-	t.logger.WithSession(sessionID).Debug("Verifying commitments")
-	if err := t.verifyCommitments(streams, keys, expected); err != nil {
-		return fmt.Errorf("commitment verification failed: %v", err)
-	}
-	t.logger.WithSession(sessionID).Debug("Commitment verification completed")
-	return nil
-}
-
-// verifyCommitments verifies HMAC commitments for redaction streams
-func (t *TEET) verifyCommitments(streams, keys, expectedCommitments [][]byte) error {
-	if len(streams) != len(keys) {
-		return fmt.Errorf("streams and keys length mismatch: %d vs %d", len(streams), len(keys))
-	}
-	if len(expectedCommitments) != len(streams) {
-		return fmt.Errorf("expected commitments length mismatch: expected %d, got %d", len(streams), len(expectedCommitments))
-	}
-	for i := range streams {
-		h := hmac.New(sha256.New, keys[i])
-		h.Write(streams[i])
-		computedCommitment := h.Sum(nil)
-		t.logger.Debug("Computed stream commitment",
-			zap.Int("stream_index", i),
-			zap.Binary("computed_commitment", computedCommitment),
-			zap.Binary("expected_commitment", expectedCommitments[i]))
-		if len(computedCommitment) != len(expectedCommitments[i]) {
-			return fmt.Errorf("commitment %d length mismatch: computed %d bytes, expected %d bytes",
-				i, len(computedCommitment), len(expectedCommitments[i]))
-		}
-		if !hmac.Equal(computedCommitment, expectedCommitments[i]) {
-			return fmt.Errorf("commitment %d verification failed: HMAC(stream_%d, key_%d) does not match expected commitment from TEE_K", i, i, i)
-		}
-		t.logger.Debug("Stream commitment verified", zap.Int("index", i))
-	}
-	t.logger.Debug("All redaction commitments verified")
-	return nil
 }
 
 // reconstructFullRequestWithStreams reconstructs the original request data using redaction streams

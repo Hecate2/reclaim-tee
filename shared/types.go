@@ -269,7 +269,7 @@ type Session struct {
 	ID           string
 	ClientConn   Connection
 	TEEKConn     Connection
-	TEETConn     Connection // Per-session connection to TEE_T
+	TEETConn     Connection   // Per-session connection to TEE_T
 	ConnMutex    sync.RWMutex // Protects connection field assignments
 	CreatedAt    time.Time
 	LastActiveAt time.Time
@@ -312,51 +312,33 @@ type Session struct {
 
 // RedactionSessionState holds redaction-specific state for each session.
 //
-// Streams + commitment-keys arrive from the client; ranges + expected
-// commitments arrive from TEE_K. Those two paths run on different
-// goroutines and may write concurrently before the counter-at-join
-// barrier (RequestPartsArrived hitting 2). Reads that happen AFTER the
-// join are race-free via the counter's happens-before edge, but
-// verifyCommitmentsIfReady runs on BOTH paths BEFORE the join — those
-// reads MUST go through the mutex via SnapshotForCommitmentCheck.
+// Streams arrive from the client; ranges arrive from TEE_K. Those two
+// paths run on different goroutines and may write concurrently before
+// the counter-at-join barrier (RequestPartsArrived hitting 2). Reads
+// that happen AFTER the join are race-free via the counter's
+// happens-before edge; the mutex guards the setters' publish.
 type RedactionSessionState struct {
 	mu                    sync.Mutex
 	Ranges                []RequestRedactionRange
-	CommitmentOpenings    [][]byte
-	ExpectedCommitments   [][]byte // [comm_s, comm_sp] received from TEE_K
 	EncryptedRequestData  []EncryptedRequestData
 	EncryptedResponseData []EncryptedResponseData
 	RedactionStreams      [][]byte
-	CommitmentKeys        [][]byte
 }
 
-// SetStreamsAndKeys stores client-supplied redaction streams + their
-// commitment keys atomically. Called by handleRedactionStreams before
-// the counter-at-join barrier.
-func (r *RedactionSessionState) SetStreamsAndKeys(streams, keys [][]byte) {
+// SetStreams stores client-supplied redaction streams. Called by
+// handleRedactionStreams before the counter-at-join barrier.
+func (r *RedactionSessionState) SetStreams(streams [][]byte) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.RedactionStreams = streams
-	r.CommitmentKeys = keys
 }
 
-// SetRangesAndCommitments stores TEE_K-supplied ranges + expected
-// commitments atomically. Called by handleBatchedEncryptedRequest before
-// the counter-at-join barrier.
-func (r *RedactionSessionState) SetRangesAndCommitments(ranges []RequestRedactionRange, commitments [][]byte) {
+// SetRanges stores TEE_K-supplied ranges. Called by
+// handleBatchedEncryptedRequest before the counter-at-join barrier.
+func (r *RedactionSessionState) SetRanges(ranges []RequestRedactionRange) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.Ranges = ranges
-	r.ExpectedCommitments = commitments
-}
-
-// SnapshotForCommitmentCheck returns the three slices needed by
-// verifyCommitmentsIfReady under one lock acquisition. Slice headers
-// are copied; the underlying byte arrays are immutable once published.
-func (r *RedactionSessionState) SnapshotForCommitmentCheck() (streams, keys, expected [][]byte) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.RedactionStreams, r.CommitmentKeys, r.ExpectedCommitments
 }
 
 // ResponseSessionState holds response handling state for each session
@@ -514,17 +496,14 @@ type PlaintextData struct {
 // RedactedRequestData contains the redacted request and associated metadata
 type RedactedRequestData struct {
 	RedactedRequest []byte                  `json:"redacted_request"` // R_red
-	Commitments     [][]byte                `json:"commitments"`      // [comm_s, comm_sp]
 	RedactionRanges []RequestRedactionRange `json:"redaction_ranges"` // Position metadata
 }
 
-// RedactionStreamsData contains the XOR streams and commitment keys for
-// revelation. Ranges are NOT carried here — TEE_T uses the authoritative
-// ranges TEE_K validated in BatchedEncryptedRequest, not whatever the
-// client claims separately.
+// RedactionStreamsData contains the XOR streams for revelation. Ranges are
+// NOT carried here — TEE_T uses the authoritative ranges TEE_K validated in
+// BatchedEncryptedRequest, not whatever the client claims separately.
 type RedactionStreamsData struct {
-	Streams        [][]byte `json:"streams"`         // [Str_S, Str_SP]
-	CommitmentKeys [][]byte `json:"commitment_keys"` // [K_S, K_SP]
+	Streams [][]byte `json:"streams"` // [Str_S, Str_SP]
 }
 
 // DecryptedResponseData contains decrypted response data
@@ -543,7 +522,6 @@ type SessionReadyData struct {
 type EncryptedRequestData struct {
 	EncryptedData   []byte                  `json:"encrypted_data"` // R_red_Enc
 	TagSecrets      []byte                  `json:"tag_secrets"`    // Data needed for tag computation
-	Commitments     [][]byte                `json:"commitments"`    // [comm_s, comm_sp] from TEE_K
 	CipherSuite     uint16                  `json:"cipher_suite"`
 	SeqNum          uint64                  `json:"seq_num"`          // Sequence number for AEAD
 	RedactionRanges []RequestRedactionRange `json:"redaction_ranges"` // Redaction position metadata for stream application
@@ -676,5 +654,4 @@ type BatchedEncryptedRequestData struct {
 	Fragments   []EncryptedRequestData `json:"fragments"`    // Array of encrypted request fragments
 	BaseSeqNum  uint64                 `json:"base_seq_num"` // Starting sequence number for fragments
 	CipherSuite uint16                 `json:"cipher_suite"` // TLS cipher suite
-	Commitments [][]byte               `json:"commitments"`  // Shared commitments for all fragments
 }

@@ -1,9 +1,7 @@
 package client
 
 import (
-	"crypto/hmac"
 	"crypto/rand"
-	"crypto/sha256"
 	"fmt"
 	"github.com/reclaimprotocol/reclaim-tee/shared"
 	"strings"
@@ -53,7 +51,7 @@ func (c *Client) createRedactedRequest(httpRequest []byte) (shared.RedactedReque
 		return shared.RedactedRequestData{}, shared.RedactionStreamsData{}, fmt.Errorf("invalid redaction ranges: %v", err)
 	}
 
-	streams, keys, err := c.generateRedactionStreams(ranges)
+	streams, err := c.generateRedactionStreams(ranges)
 	if err != nil {
 		return shared.RedactedRequestData{}, shared.RedactionStreamsData{}, fmt.Errorf("failed to generate redaction streams: %v", err)
 	}
@@ -80,36 +78,6 @@ func (c *Client) createRedactedRequest(httpRequest []byte) (shared.RedactedReque
 		}
 	}
 
-	commitments := c.computeCommitments(streams, keys)
-
-	var proofStreams [][]byte
-	var proofKeys [][]byte
-	for idx, r := range ranges {
-		if r.Type == shared.RedactionTypeSensitiveProof {
-			proofStreams = append(proofStreams, streams[idx])
-			proofKeys = append(proofKeys, keys[idx])
-		}
-	}
-
-	if len(proofStreams) > 0 {
-		totalStreamLen := 0
-		for _, stream := range proofStreams {
-			totalStreamLen += len(stream)
-		}
-		c.proofStream = make([]byte, totalStreamLen)
-		offset := 0
-		for _, stream := range proofStreams {
-			copy(c.proofStream[offset:], stream)
-			offset += len(stream)
-		}
-		c.proofKey = proofKeys[0]
-
-		c.logger.Info("R_SP streams concatenated",
-			zap.Int("r_sp_ranges", len(proofStreams)),
-			zap.Int("total_proof_stream_length", len(c.proofStream)),
-			zap.Int("proof_key_length", len(c.proofKey)))
-	}
-
 	c.logger.Info("Redaction summary",
 		zap.Int("original_length", len(httpRequest)),
 		zap.Int("redacted_length", len(redactedRequest)),
@@ -120,30 +88,22 @@ func (c *Client) createRedactedRequest(httpRequest []byte) (shared.RedactedReque
 
 	return shared.RedactedRequestData{
 			RedactedRequest: redactedRequest,
-			Commitments:     commitments,
 			RedactionRanges: ranges,
 		}, shared.RedactionStreamsData{
-			Streams:        streams,
-			CommitmentKeys: keys,
+			Streams: streams,
 		}, nil
 }
 
-func (c *Client) generateRedactionStreams(ranges []shared.RequestRedactionRange) ([][]byte, [][]byte, error) {
+func (c *Client) generateRedactionStreams(ranges []shared.RequestRedactionRange) ([][]byte, error) {
 	streams := make([][]byte, len(ranges))
-	keys := make([][]byte, len(ranges))
 	for i, r := range ranges {
 		stream := make([]byte, r.Length)
 		if _, err := rand.Read(stream); err != nil {
-			return nil, nil, fmt.Errorf("failed to generate stream %d: %v", i, err)
+			return nil, fmt.Errorf("failed to generate stream %d: %v", i, err)
 		}
 		streams[i] = stream
-		key := make([]byte, 32)
-		if _, err := rand.Read(key); err != nil {
-			return nil, nil, fmt.Errorf("failed to generate key %d: %v", i, err)
-		}
-		keys[i] = key
 	}
-	return streams, keys, nil
+	return streams, nil
 }
 
 func (c *Client) applyRedaction(request []byte, ranges []shared.RequestRedactionRange, streams [][]byte) []byte {
@@ -158,16 +118,6 @@ func (c *Client) applyRedaction(request []byte, ranges []shared.RequestRedaction
 		}
 	}
 	return redacted
-}
-
-func (c *Client) computeCommitments(streams, keys [][]byte) [][]byte {
-	commitments := make([][]byte, len(streams))
-	for i := 0; i < len(streams) && i < len(keys); i++ {
-		h := hmac.New(sha256.New, keys[i])
-		h.Write(streams[i])
-		commitments[i] = h.Sum(nil)
-	}
-	return commitments
 }
 
 func (c *Client) validateRedactionRanges(ranges []shared.RequestRedactionRange, requestLen int) error {
