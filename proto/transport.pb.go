@@ -1422,9 +1422,10 @@ func (x *EncryptedDataResponse) GetSuccess() bool {
 }
 
 type RedactedRequest struct {
-	state           protoimpl.MessageState   `protogen:"open.v1"`
-	RedactedRequest []byte                   `protobuf:"bytes,1,opt,name=redacted_request,json=redactedRequest,proto3" json:"redacted_request,omitempty"` // R_red
-	Commitments     [][]byte                 `protobuf:"bytes,2,rep,name=commitments,proto3" json:"commitments,omitempty"`                                // [comm_s, comm_sp]
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	RedactedRequest []byte                 `protobuf:"bytes,1,opt,name=redacted_request,json=redactedRequest,proto3" json:"redacted_request,omitempty"` // R_red
+	// Deprecated: Marked as deprecated in transport.proto.
+	Commitments     [][]byte                 `protobuf:"bytes,2,rep,name=commitments,proto3" json:"commitments,omitempty"` // DEPRECATED: unused, no longer populated or verified
 	RedactionRanges []*RequestRedactionRange `protobuf:"bytes,3,rep,name=redaction_ranges,json=redactionRanges,proto3" json:"redaction_ranges,omitempty"`
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache
@@ -1467,6 +1468,7 @@ func (x *RedactedRequest) GetRedactedRequest() []byte {
 	return nil
 }
 
+// Deprecated: Marked as deprecated in transport.proto.
 func (x *RedactedRequest) GetCommitments() [][]byte {
 	if x != nil {
 		return x.Commitments
@@ -1534,9 +1536,10 @@ func (x *RedactionVerification) GetMessage() string {
 }
 
 type RedactionStreams struct {
-	state          protoimpl.MessageState `protogen:"open.v1"`
-	Streams        [][]byte               `protobuf:"bytes,1,rep,name=streams,proto3" json:"streams,omitempty"`                                     // [Str_S, Str_SP]
-	CommitmentKeys [][]byte               `protobuf:"bytes,2,rep,name=commitment_keys,json=commitmentKeys,proto3" json:"commitment_keys,omitempty"` // [K_S, K_SP]
+	state   protoimpl.MessageState `protogen:"open.v1"`
+	Streams [][]byte               `protobuf:"bytes,1,rep,name=streams,proto3" json:"streams,omitempty"` // [Str_S, Str_SP]
+	// Deprecated: Marked as deprecated in transport.proto.
+	CommitmentKeys [][]byte `protobuf:"bytes,2,rep,name=commitment_keys,json=commitmentKeys,proto3" json:"commitment_keys,omitempty"` // DEPRECATED: unused, no longer populated or verified
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
 }
@@ -1578,6 +1581,7 @@ func (x *RedactionStreams) GetStreams() [][]byte {
 	return nil
 }
 
+// Deprecated: Marked as deprecated in transport.proto.
 func (x *RedactionStreams) GetCommitmentKeys() [][]byte {
 	if x != nil {
 		return x.CommitmentKeys
@@ -1632,11 +1636,12 @@ func (x *ResponseRedactionSpec) GetRanges() []*ResponseRedactionRange {
 
 // Batched encrypted request for multiple fragments
 type BatchedEncryptedRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Fragments     []*EncryptedRequest    `protobuf:"bytes,1,rep,name=fragments,proto3" json:"fragments,omitempty"`
-	BaseSeqNum    uint64                 `protobuf:"varint,2,opt,name=base_seq_num,json=baseSeqNum,proto3" json:"base_seq_num,omitempty"` // Starting sequence number
-	CipherSuite   uint32                 `protobuf:"varint,3,opt,name=cipher_suite,json=cipherSuite,proto3" json:"cipher_suite,omitempty"`
-	Commitments   [][]byte               `protobuf:"bytes,4,rep,name=commitments,proto3" json:"commitments,omitempty"` // Shared commitments for all fragments
+	state       protoimpl.MessageState `protogen:"open.v1"`
+	Fragments   []*EncryptedRequest    `protobuf:"bytes,1,rep,name=fragments,proto3" json:"fragments,omitempty"`
+	BaseSeqNum  uint64                 `protobuf:"varint,2,opt,name=base_seq_num,json=baseSeqNum,proto3" json:"base_seq_num,omitempty"` // Starting sequence number
+	CipherSuite uint32                 `protobuf:"varint,3,opt,name=cipher_suite,json=cipherSuite,proto3" json:"cipher_suite,omitempty"`
+	// Deprecated: Marked as deprecated in transport.proto.
+	Commitments   [][]byte `protobuf:"bytes,4,rep,name=commitments,proto3" json:"commitments,omitempty"` // DEPRECATED: unused, no longer populated or verified
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1692,6 +1697,7 @@ func (x *BatchedEncryptedRequest) GetCipherSuite() uint32 {
 	return 0
 }
 
+// Deprecated: Marked as deprecated in transport.proto.
 func (x *BatchedEncryptedRequest) GetCommitments() [][]byte {
 	if x != nil {
 		return x.Commitments
@@ -1700,10 +1706,11 @@ func (x *BatchedEncryptedRequest) GetCommitments() [][]byte {
 }
 
 type EncryptedRequest struct {
-	state           protoimpl.MessageState   `protogen:"open.v1"`
-	EncryptedData   []byte                   `protobuf:"bytes,1,opt,name=encrypted_data,json=encryptedData,proto3" json:"encrypted_data,omitempty"` // R_red_Enc
-	TagSecrets      []byte                   `protobuf:"bytes,2,opt,name=tag_secrets,json=tagSecrets,proto3" json:"tag_secrets,omitempty"`
-	Commitments     [][]byte                 `protobuf:"bytes,3,rep,name=commitments,proto3" json:"commitments,omitempty"`                     // [comm_s, comm_sp]
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	EncryptedData []byte                 `protobuf:"bytes,1,opt,name=encrypted_data,json=encryptedData,proto3" json:"encrypted_data,omitempty"` // R_red_Enc
+	TagSecrets    []byte                 `protobuf:"bytes,2,opt,name=tag_secrets,json=tagSecrets,proto3" json:"tag_secrets,omitempty"`
+	// Deprecated: Marked as deprecated in transport.proto.
+	Commitments     [][]byte                 `protobuf:"bytes,3,rep,name=commitments,proto3" json:"commitments,omitempty"`                     // DEPRECATED: unused, no longer populated or verified
 	CipherSuite     uint32                   `protobuf:"varint,4,opt,name=cipher_suite,json=cipherSuite,proto3" json:"cipher_suite,omitempty"` // uint16 fits here
 	SeqNum          uint64                   `protobuf:"varint,5,opt,name=seq_num,json=seqNum,proto3" json:"seq_num,omitempty"`
 	RedactionRanges []*RequestRedactionRange `protobuf:"bytes,6,rep,name=redaction_ranges,json=redactionRanges,proto3" json:"redaction_ranges,omitempty"`
@@ -1755,6 +1762,7 @@ func (x *EncryptedRequest) GetTagSecrets() []byte {
 	return nil
 }
 
+// Deprecated: Marked as deprecated in transport.proto.
 func (x *EncryptedRequest) GetCommitments() [][]byte {
 	if x != nil {
 		return x.Commitments
@@ -3666,30 +3674,30 @@ const file_transport_proto_rawDesc = "" +
 	"\x15EncryptedDataResponse\x12%\n" +
 	"\x0eencrypted_data\x18\x01 \x01(\fR\rencryptedData\x12\x19\n" +
 	"\bauth_tag\x18\x02 \x01(\fR\aauthTag\x12\x18\n" +
-	"\asuccess\x18\x03 \x01(\bR\asuccess\"\xaa\x01\n" +
+	"\asuccess\x18\x03 \x01(\bR\asuccess\"\xae\x01\n" +
 	"\x0fRedactedRequest\x12)\n" +
-	"\x10redacted_request\x18\x01 \x01(\fR\x0fredactedRequest\x12 \n" +
-	"\vcommitments\x18\x02 \x03(\fR\vcommitments\x12J\n" +
+	"\x10redacted_request\x18\x01 \x01(\fR\x0fredactedRequest\x12$\n" +
+	"\vcommitments\x18\x02 \x03(\fB\x02\x18\x01R\vcommitments\x12J\n" +
 	"\x10redaction_ranges\x18\x03 \x03(\v2\x1f.teeproto.RequestRedactionRangeR\x0fredactionRanges\"K\n" +
 	"\x15RedactionVerification\x12\x18\n" +
 	"\asuccess\x18\x01 \x01(\bR\asuccess\x12\x18\n" +
-	"\amessage\x18\x02 \x01(\tR\amessage\"U\n" +
+	"\amessage\x18\x02 \x01(\tR\amessage\"Y\n" +
 	"\x10RedactionStreams\x12\x18\n" +
-	"\astreams\x18\x01 \x03(\fR\astreams\x12'\n" +
-	"\x0fcommitment_keys\x18\x02 \x03(\fR\x0ecommitmentKeys\"Q\n" +
+	"\astreams\x18\x01 \x03(\fR\astreams\x12+\n" +
+	"\x0fcommitment_keys\x18\x02 \x03(\fB\x02\x18\x01R\x0ecommitmentKeys\"Q\n" +
 	"\x15ResponseRedactionSpec\x128\n" +
-	"\x06ranges\x18\x01 \x03(\v2 .teeproto.ResponseRedactionRangeR\x06ranges\"\xba\x01\n" +
+	"\x06ranges\x18\x01 \x03(\v2 .teeproto.ResponseRedactionRangeR\x06ranges\"\xbe\x01\n" +
 	"\x17BatchedEncryptedRequest\x128\n" +
 	"\tfragments\x18\x01 \x03(\v2\x1a.teeproto.EncryptedRequestR\tfragments\x12 \n" +
 	"\fbase_seq_num\x18\x02 \x01(\x04R\n" +
 	"baseSeqNum\x12!\n" +
-	"\fcipher_suite\x18\x03 \x01(\rR\vcipherSuite\x12 \n" +
-	"\vcommitments\x18\x04 \x03(\fR\vcommitments\"\x84\x02\n" +
+	"\fcipher_suite\x18\x03 \x01(\rR\vcipherSuite\x12$\n" +
+	"\vcommitments\x18\x04 \x03(\fB\x02\x18\x01R\vcommitments\"\x88\x02\n" +
 	"\x10EncryptedRequest\x12%\n" +
 	"\x0eencrypted_data\x18\x01 \x01(\fR\rencryptedData\x12\x1f\n" +
 	"\vtag_secrets\x18\x02 \x01(\fR\n" +
-	"tagSecrets\x12 \n" +
-	"\vcommitments\x18\x03 \x03(\fR\vcommitments\x12!\n" +
+	"tagSecrets\x12$\n" +
+	"\vcommitments\x18\x03 \x03(\fB\x02\x18\x01R\vcommitments\x12!\n" +
 	"\fcipher_suite\x18\x04 \x01(\rR\vcipherSuite\x12\x17\n" +
 	"\aseq_num\x18\x05 \x01(\x04R\x06seqNum\x12J\n" +
 	"\x10redaction_ranges\x18\x06 \x03(\v2\x1f.teeproto.RequestRedactionRangeR\x0fredactionRanges\"\xaf\x01\n" +
