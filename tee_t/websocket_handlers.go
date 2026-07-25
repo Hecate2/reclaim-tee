@@ -102,8 +102,6 @@ func (t *TEET) handleClientWebSocket(w http.ResponseWriter, r *http.Request) {
 		switch p := env.Payload.(type) {
 		case *teeproto.Envelope_RedactionStreams:
 			msg = &shared.Message{SessionID: env.GetSessionId(), Type: shared.MsgRedactionStreams, Data: shared.RedactionStreamsData{Streams: p.RedactionStreams.GetStreams()}}
-		case *teeproto.Envelope_Finished:
-			msg = &shared.Message{SessionID: env.GetSessionId(), Type: shared.MsgFinished, Data: shared.FinishedMessage{}}
 		case *teeproto.Envelope_BatchedEncryptedResponses:
 			var arr []shared.EncryptedResponseData
 			for _, r := range p.BatchedEncryptedResponses.GetResponses() {
@@ -159,9 +157,6 @@ func (t *TEET) handleClientWebSocket(w http.ResponseWriter, r *http.Request) {
 		case shared.MsgRedactionStreams:
 			t.logger.Debug("Handling MsgRedactionStreams", zap.String("session_id", sessionID))
 			handlerErr = t.handleRedactionStreams(sessionID, msg)
-		case shared.MsgFinished:
-			t.logger.Debug("Handling MsgFinished from TEE_K", zap.String("session_id", sessionID))
-			handlerErr = t.handleFinishedFromTEEK(msg)
 		case shared.MsgBatchedEncryptedResponses:
 			t.logger.WithSession(sessionID).Debug("Handling batched encrypted responses")
 			handlerErr = t.handleBatchedEncryptedResponses(sessionID, msg)

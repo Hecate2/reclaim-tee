@@ -84,12 +84,30 @@ func (t *TEET) checkFinishedCondition(sessionID string) error {
 			zap.String("session_id", sessionID),
 			zap.String("oprf_state", shared.OPRFSessionState(teetState.OPRFState.Load()).String()))
 
-		// teetState already obtained above for OPRF check
+		// Snapshot the consolidated ciphertext under the same mutex that guards
+		// its append in verifyTagForResponse, so signing never races a write.
+		var ciphertext []byte
+		if session.ResponseState != nil {
+			session.ResponseState.ResponsesMutex.Lock()
+			if n := len(teetState.ConsolidatedResponseCiphertext); n > 0 {
+				ciphertext = make([]byte, n)
+				copy(ciphertext, teetState.ConsolidatedResponseCiphertext)
+			}
+			session.ResponseState.ResponsesMutex.Unlock()
+		}
 
-		if len(teetState.ConsolidatedResponseCiphertext) == 0 {
+		if len(ciphertext) == 0 {
 			t.logger.WarnIf("No consolidated response ciphertext to sign for session",
 				zap.String("session_id", sessionID))
 			// This is not an error - just means no response data to sign
+			return nil
+		}
+
+		// Sign the TOutput at most once: this path can be reached from both the
+		// peer finished and OPRF completion. The CAS loser returns without signing.
+		if !teetState.TOutputSigned.CompareAndSwap(false, true) {
+			t.logger.Debug("TOutput already signed for session, skipping",
+				zap.String("session_id", sessionID))
 			return nil
 		}
 		// Snapshot the signing keypair together with its attestation. Both
@@ -112,10 +130,10 @@ func (t *TEET) checkFinishedCondition(sessionID string) error {
 
 		timestampMs := time.Now().UnixMilli()
 		tOutput := &teeproto.TOutputPayload{
-			SessionId:                      sessionID,                                // Bind to session for cross-TEE verification
-			ConsolidatedResponseCiphertext: teetState.ConsolidatedResponseCiphertext, // Consolidated response ciphertext
-			RequestProofStreams:            teetState.RequestProofStreams,            // TEE_T signs R_SP streams
-			TimestampMs:                    uint64(timestampMs),                      // Include signed timestamp
+			SessionId:                      sessionID,                     // Bind to session for cross-TEE verification
+			ConsolidatedResponseCiphertext: ciphertext,                    // Consolidated response ciphertext (locked snapshot)
+			RequestProofStreams:            teetState.RequestProofStreams, // TEE_T signs R_SP streams
+			TimestampMs:                    uint64(timestampMs),           // Include signed timestamp
 		}
 
 		// Include OPRF outputs in signed payload
@@ -127,7 +145,7 @@ func (t *TEET) checkFinishedCondition(sessionID string) error {
 
 		t.logger.Debug("Including consolidated response ciphertext and R_SP streams in TEE_T signature",
 			zap.String("session_id", sessionID),
-			zap.Int("consolidated_response_ciphertext_bytes", len(teetState.ConsolidatedResponseCiphertext)),
+			zap.Int("consolidated_response_ciphertext_bytes", len(ciphertext)),
 			zap.Int("proof_streams_count", len(teetState.RequestProofStreams)))
 
 		body, err := proto.Marshal(tOutput)

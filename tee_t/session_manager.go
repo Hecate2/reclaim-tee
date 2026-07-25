@@ -22,6 +22,9 @@ type TEETSessionState struct {
 	// to 2 dispatches. Replaces a racy "if other half present" pattern.
 	RequestPartsArrived atomic.Int32
 
+	// One TOutput signature per session. checkFinishedCondition can fire from
+	// both the peer finished and OPRF completion; the CAS winner signs.
+	TOutputSigned atomic.Bool
 
 	// MPC OPRF state. TEE_K is the authoritative source of ranges: it relays
 	// the client's ranges via OPRFOnlineFull (with TotalRanges), so TEE_T

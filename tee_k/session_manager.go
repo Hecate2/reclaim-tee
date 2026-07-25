@@ -48,6 +48,7 @@ type TEEKSessionState struct {
 	OPRFState             atomic.Int32                              // Current OPRF processing state (shared.OPRFSessionState values)
 	OPRFExpectedCount     int                                       // Number of OPRF results expected
 	ClientRangesReceived  atomic.Bool                               // publishes OPRFRanges/OPRFKeyShare/GarblerOnlineSessions/OPRFResults
+	OPRFRangesSubmitted   atomic.Bool                               // one-shot: client submits ranges exactly once per session
 
 	// Per-session mutex for thread-safe access to OPRF state
 	// Must be held when accessing GarblerOnlineSessions, OPRFResults, or OPRFRanges

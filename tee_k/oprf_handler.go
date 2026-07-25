@@ -20,6 +20,14 @@ func (t *TEEK) handleOPRFRangesFromClient(sessionID string, msg *teeproto.OPRFRa
 		return fmt.Errorf("failed to get TEE_K session state: %w", err)
 	}
 
+	// Ranges are submitted exactly once per session. Reject any resubmission:
+	// re-entering below would re-init OPRF maps the peer goroutine reads locked.
+	if !teekState.OPRFRangesSubmitted.CompareAndSwap(false, true) {
+		err := fmt.Errorf("OPRF ranges already submitted")
+		t.terminateSessionWithError(sessionID, shared.ReasonProtocolViolation, err, "OPRF ranges already submitted")
+		return err
+	}
+
 	t.logger.WithSession(sessionID).Info("OPRF ranges received", zap.Int("count", len(msg.GetRanges())))
 
 	// If no ranges, mark OPRF as not needed
