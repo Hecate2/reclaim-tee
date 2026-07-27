@@ -2,243 +2,330 @@
 set -euo pipefail
 
 # =============================================================================
-# Blue-green redeploy of the SEV-SNP TEE fleet (the SNP analogue of
-# redeploy-fleet.sh, which is CS/GCP-only).
+# In-place SEV-SNP fleet redeploy.
 #
-#   1. Build new SNP images at HEAD (snp-build.sh for the K cloud + T cloud).
-#      App digest is cross-cloud-identical; base UKIs are per-cloud + pinned.
-#   2. Allowlist the new app digests on the router (admin API).
-#   3. Spin up N new pairs via snp-pair.sh, each a distinct SNP_PAIR_NAME
-#      (${PREFIX}-<n>), in the configured orientation (SNP_K_CLOUD/SNP_T_CLOUD).
-#   4. Wait until all N new pairs are Ready in the router.
-#   5. Retire every OLD pair (registered app digest != new) — drain by pair_id
-#      (resolved from the pair's stable IP on whichever cloud holds K), wait for
-#      active_sessions==0, mark dead, then snp-pair.sh down that pair.
-#   6. Trim old digests from the allowlist.
+# Discovers the live pairs from cloud resources + the router, prints them for
+# visual confirmation, then redeploys each pair ONE AT A TIME, IN PLACE, in the
+# SAME orientation + location it already runs, to the commit recorded in
+# deploy/image-history.json (the same commit `verify.sh` verifies):
 #
-# Differences from CS that this encodes:
-#   - Cross-cloud: each pair spans SNP_K_CLOUD + SNP_T_CLOUD; the whole fleet
-#     shares ONE orientation per redeploy (a redeploy doesn't flip clouds).
-#   - Pairs are namespaced by SNP_PAIR_NAME (snp-pair.sh has no auto-numbering);
-#     this script owns the ${PREFIX}-<n> scheme.
-#   - Retire maps router pair_id from the pair's IP (cloud-agnostic), since the
-#     CS retire-pair.sh resolves only GCP VM IPs.
-#   - Atomic K+T ([[atomic deploys]]) is WITHIN a pair; blue-green is ACROSS
-#     pairs. Both hold.
+#   read target commit + expected digests from image-history.json ->
+#   build (that commit, per-cloud images) -> assert built digests == recorded ->
+#   allowlist -> for each pair: drain -> wait active_sessions==0 -> dead ->
+#     remove BOTH old halves (keep static IP / EIP) -> snp-pair.sh up ->
+#     wait Ready in router -> next pair -> trim old app digests.
 #
-# Router target follows snp-pair.sh: SNP_ROUTER_URL + an admin token
-# (SNP_ADMIN_TOKEN, else deploy/.test-router-admin-token). For PROD set
-# SNP_ROUTER_URL/SNP_JWT_ISSUER to prod and SNP_ADMIN_TOKEN=$ROUTER_ADMIN_TOKEN,
-# and make sure snp-pair.sh is pointed at the prod router too (it derives the
-# TEE's JWT pubkey from the test signing key by default — prod needs the
-# prod /jwt-pubkey; see the SNP_TARGET note in snp-pair.sh).
+# Intended workflow:  fix -> commit -> record digests in image-history.json
+# (build-only + update-image-history.sh) -> commit -> push -> run this. The
+# fleet builds/verifies/deploys exactly what json (already pushed) pins, so the
+# deployed identity is publicly reproducible before a single VM is touched.
 #
-# Requirements: docker (+ AWS VM-import perms if a half is on AWS), gcloud, aws,
-# jq, python3, clean git tree (snp-build.sh refuses a dirty tree for prod).
+# Every run writes logs to a fresh temp dir (path printed up front and on any
+# failure): run.log (orchestration) + per-step build-*.log / up-*.log. Point me
+# at them, or dig in yourself, if a deploy stops midway.
 #
-# Usage:
-#   ./deploy/snp-redeploy-fleet.sh --count 1
-#   SNP_K_CLOUD=aws SNP_T_CLOUD=gcp ./deploy/snp-redeploy-fleet.sh --count 2
+#   ./deploy/snp-redeploy-fleet.sh record                # build-only HEAD + write image-history.json (then commit+push it)
+#   ./deploy/snp-redeploy-fleet.sh                       # prod (default), interactive deploy of what json pins
+#   SNP_DISCOVER_ONLY=1 ./deploy/snp-redeploy-fleet.sh   # preflight+discover only
+#   SNP_YES=1 ./deploy/snp-redeploy-fleet.sh             # skip the confirm prompt
+#   SNP_BUILD_COMMIT=<sha> ./deploy/snp-redeploy-fleet.sh # ad-hoc (skips json assert)
+#
+# Requires docker+buildx and authenticated gcloud + aws (checked in preflight).
 # =============================================================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 if [[ -f "${SCRIPT_DIR}/.env" ]]; then set -a; source "${SCRIPT_DIR}/.env"; set +a; fi
 source "${SCRIPT_DIR}/_lib.sh"
-# Per-cloud base UKI identities (SNP_BASE_DIGEST_GCP/AWS) to allowlist alongside apps.
 set -a; source "${SCRIPT_DIR}/snp-image/pins.env"; set +a
 
 GCP_PROJECT="${GCP_PROJECT:?set GCP_PROJECT in deploy/.env}"
-# SNP_TARGET (test|prod) picks the router this fleet redeploy talks to AND is
-# inherited by the snp-pair.sh up/down calls below (which then default to
-# 443/info for prod, 8081/debug for test). Keep it consistent across both.
-TARGET="${SNP_TARGET:-test}"
-export SNP_TARGET="${TARGET}"
+TARGET="${SNP_TARGET:-prod}"; export SNP_TARGET="${TARGET}"
 case "${TARGET}" in
-test)
-	ROUTER="${SNP_ROUTER_URL:?set SNP_ROUTER_URL in deploy/.env}"
-	ADMIN_TOKEN="${SNP_ADMIN_TOKEN:-$(cat "${SCRIPT_DIR}/.test-router-admin-token" 2>/dev/null || true)}"
-	;;
-prod)
-	ROUTER="${ROUTER_URL:?set ROUTER_URL in deploy/.env}"
-	ADMIN_TOKEN="${ROUTER_ADMIN_TOKEN:?set ROUTER_ADMIN_TOKEN in deploy/.env}"
-	;;
-*)
-	echo "SNP_TARGET must be 'test' or 'prod' (got '${TARGET}')" >&2; exit 1 ;;
+  prod) ROUTER="${ROUTER_URL:?set ROUTER_URL in deploy/.env}"; ADMIN_TOKEN="${ROUTER_ADMIN_TOKEN:?set ROUTER_ADMIN_TOKEN in deploy/.env}" ;;
+  test) ROUTER="${SNP_ROUTER_URL:?set SNP_ROUTER_URL in deploy/.env}"; ADMIN_TOKEN="${SNP_ADMIN_TOKEN:-$(cat "${SCRIPT_DIR}/.test-router-admin-token" 2>/dev/null || true)}" ;;
+  *) echo "SNP_TARGET must be prod|test (got ${TARGET})" >&2; exit 1 ;;
 esac
-[[ -n "${ADMIN_TOKEN}" ]] || { echo "no admin token for target '${TARGET}'" >&2; exit 1; }
+[[ -n "${ADMIN_TOKEN}" ]] || { echo "no admin token for ${TARGET}" >&2; exit 1; }
 
-PREFIX="${SNP_FLEET_PREFIX:-snp}"
-K_CLOUD="${SNP_K_CLOUD:-gcp}"
-T_CLOUD="${SNP_T_CLOUD:-aws}"
-K_LOC="${SNP_K_LOCATION:-$([[ "$K_CLOUD" == gcp ]] && echo "${SNP_PAIR_GCP_ZONE:?}" || echo "${SNP_PAIR_AWS_REGION:?}")}"
-T_LOC="${SNP_T_LOCATION:-$([[ "$T_CLOUD" == gcp ]] && echo "${SNP_PAIR_GCP_ZONE:?}" || echo "${SNP_PAIR_AWS_REGION:?}")}"
-# Shared with snp-build.sh (which writes it) + update-image-history.sh (reads it).
-DIGEST_CACHE="${SCRIPT_DIR}/snp-digests.env"
+AWS_REGION="${SNP_PAIR_AWS_REGION:?set SNP_PAIR_AWS_REGION in deploy/.env}"
+SNP_PROXY="${SNP_PROXY:-http://127.0.0.1:10808}"
+STATIC_OPRF="${SNP_TEST_STATIC_OPRF:-0}"
+DRAIN_TIMEOUT="${SNP_DRAIN_TIMEOUT:-600}"
+READY_TIMEOUT="${SNP_READY_TIMEOUT:-420}"
 
-DRAIN_TIMEOUT="${SNP_DRAIN_TIMEOUT:-300}"
+# Per-run log dir, revealed up front so a mid-deploy failure is inspectable.
+LOG_DIR="$(mktemp -d "${TMPDIR:-/tmp}/snp-redeploy-$(date +%Y%m%d-%H%M%S)-XXXX")"
 
-COUNT=1
-FORCE_REBUILD=0
-while [[ $# -gt 0 ]]; do
-    case $1 in
-        --count) COUNT="$2"; shift 2 ;;
-        --force-rebuild) FORCE_REBUILD=1; shift ;;
-        *) echo "unknown arg: $1" >&2; exit 1 ;;
-    esac
-done
+log() { local m="[$(date '+%H:%M:%S')] $*"; echo "${m}"; echo "${m}" >> "${LOG_DIR}/run.log"; }
+die() { echo "ERROR: $*" >&2; echo "ERROR: $*" >> "${LOG_DIR}/run.log" 2>/dev/null || true; echo "LOGS: ${LOG_DIR}" >&2; exit 1; }
 
-log() { echo "[$(date '+%H:%M:%S')] $*"; }
-# gcloud wants the proxy UNSET; aws wants it SET; router curls UNSET (LB is
-# directly reachable). See [[wsl-proxy]].
+# gcloud + router curls want the proxy UNSET; aws wants it SET. See [[wsl-proxy]].
 g()  { ( unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY 2>/dev/null || true; gcloud_retry gcloud "$@" --project="${GCP_PROJECT}" ); }
-a()  { local r="$1"; shift; ( export http_proxy="${SNP_PROXY:-http://127.0.0.1:10808}" https_proxy="${SNP_PROXY:-http://127.0.0.1:10808}"; aws --region "$r" "$@" ); }
+a()  { ( export http_proxy="${SNP_PROXY}" https_proxy="${SNP_PROXY}"; aws --region "${AWS_REGION}" "$@" ); }
 rt() { ( unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY 2>/dev/null || true; curl -sf -H "Authorization: Bearer ${ADMIN_TOKEN}" "$@" ); }
 
-heartbeat_until_done() {
-    local pid=$1 label="${2:-task}" start; start=$(date +%s)
-    while kill -0 "${pid}" 2>/dev/null; do
-        sleep 15; kill -0 "${pid}" 2>/dev/null || break
-        log "  ...${label} still running ($(( $(date +%s) - start ))s elapsed)"
-    done
+# ---- preflight -------------------------------------------------------------
+preflight() {
+  log "Preflight: docker / gcloud / aws ..."
+  command -v docker >/dev/null || die "docker not found"
+  docker version --format '{{.Server.Version}}' >/dev/null 2>&1 || die "docker daemon not reachable"
+  docker buildx version >/dev/null 2>&1 || die "docker buildx missing"
+  local acct arn
+  acct="$( ( unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY 2>/dev/null || true; gcloud auth list --filter=status:ACTIVE --format='value(account)' 2>/dev/null ) | head -1 || true)"
+  [[ -n "${acct}" ]] || die "gcloud not authenticated (run: gcloud auth login)"
+  arn="$( ( export http_proxy="${SNP_PROXY}" https_proxy="${SNP_PROXY}"; aws sts get-caller-identity --query Arn --output text 2>/dev/null ) || true )"
+  [[ "${arn}" == arn:aws:* ]] || die "aws not authenticated (run: aws sso login / configure creds)"
+  git -C "${REPO_ROOT}" rev-parse HEAD >/dev/null 2>&1 || die "no git HEAD"
+  log "  docker OK | gcloud=${acct} | aws=${arn}"
 }
 
-# region of a gcp zone
-gcp_region() { echo "${1%-*}"; }
-
-# Resolve a pair's K-half public IP (the stable address snp-pair.sh allocated),
-# whichever cloud K is on. Used to match the router pair_id for retire.
-pair_k_ip() {
-    local name="$1"
-    if [[ "$K_CLOUD" == gcp ]]; then
-        g compute addresses describe "${name}-k-ip" --region="$(gcp_region "${K_LOC}")" --format='value(address)' 2>/dev/null || true
-    else
-        a "${K_LOC}" ec2 describe-addresses --filters "Name=tag:Name,Values=${name}-k-aws" --query 'Addresses[0].PublicIp' --output text 2>/dev/null | grep -v '^None$' || true
-    fi
-}
-
-# Discover existing fleet pair numbers from the T-half resources on T_CLOUD.
-# (One role is enough; the fleet shares one orientation.)
-discover_old_ns() {
-    if [[ "$T_CLOUD" == gcp ]]; then
-        g compute instances list --zones="${T_LOC}" --filter="name~^${PREFIX}-[0-9]+-t-gcp$" --format="value(name)" 2>/dev/null \
-            | sed -E "s/^${PREFIX}-([0-9]+)-t-gcp$/\1/"
-    else
-        a "${T_LOC}" ec2 describe-instances \
-            --filters "Name=tag:Name,Values=${PREFIX}-*-t-aws" "Name=instance-state-name,Values=pending,running,stopping,stopped" \
-            --query 'Reservations[].Instances[].Tags[?Key==`Name`]|[][].Value' --output text 2>/dev/null \
-            | tr '\t' '\n' | sed -E "s/^${PREFIX}-([0-9]+)-t-aws$/\1/"
-    fi | grep -E '^[0-9]+$' | sort -n | uniq || true
-}
-
-# ---- 1. Build (skip if cache COMMIT == HEAD) -------------------------------
-HEAD_COMMIT=$(git -C "${SCRIPT_DIR}/.." rev-parse HEAD)
-SKIP_BUILD=0
-if [[ ${FORCE_REBUILD} -eq 0 && -f "${DIGEST_CACHE}" ]]; then
-    CACHED=$(grep -E '^COMMIT=' "${DIGEST_CACHE}" | cut -d= -f2- || true)
-    [[ "${CACHED}" == "${HEAD_COMMIT}" ]] && { log "Cached build matches HEAD (${HEAD_COMMIT:0:7}); skipping build."; SKIP_BUILD=1; } \
-                                          || log "Cache is ${CACHED:0:7}; HEAD ${HEAD_COMMIT:0:7}; rebuilding."
-fi
-if [[ ${SKIP_BUILD} -eq 0 ]]; then
-    log "Building tee_k@${K_CLOUD} ..."
-    K_DIGEST=$("${SCRIPT_DIR}/snp-build.sh" k "${K_CLOUD}" 2>&1 | tee /dev/stderr | sed -n 's/.*app digest *= *\(snp-app:[0-9a-f]*\).*/\1/p' | tail -1)
-    log "Building tee_t@${T_CLOUD} ..."
-    T_DIGEST=$("${SCRIPT_DIR}/snp-build.sh" t "${T_CLOUD}" 2>&1 | tee /dev/stderr | sed -n 's/.*app digest *= *\(snp-app:[0-9a-f]*\).*/\1/p' | tail -1)
-    [[ -n "${K_DIGEST}" && -n "${T_DIGEST}" ]] || { echo "build did not yield both digests" >&2; exit 1; }
-    { echo "COMMIT=${HEAD_COMMIT}"; echo "SNP_K_DIGEST=${K_DIGEST}"; echo "SNP_T_DIGEST=${T_DIGEST}"; } > "${DIGEST_CACHE}"
-fi
-source "${DIGEST_CACHE}"
-K_DIGEST="${SNP_K_DIGEST}"; T_DIGEST="${SNP_T_DIGEST}"
-log "Digests: K=${K_DIGEST:0:24}... T=${T_DIGEST:0:24}..."
-
-# ---- 2. Snapshot old pairs + compute new numbers ---------------------------
-OLD_NS=$(discover_old_ns)
-log "Old pairs: ${OLD_NS:-<none>}"
-NEW_NS=(); N=1
-while [[ ${#NEW_NS[@]} -lt ${COUNT} ]]; do
-    echo "${OLD_NS}" | grep -qx "${N}" || NEW_NS+=("${N}")
-    N=$((N+1))
-done
-log "New pair numbers: ${NEW_NS[*]}"
-
-# ---- 3. Allowlist new digests (idempotent) ---------------------------------
-log "Allowlisting new digests on ${ROUTER} ..."
-# Apps (cross-cloud) + both per-cloud base UKIs; register pins both, fail-closed.
-for d in "${K_DIGEST}" "${T_DIGEST}" "${SNP_BASE_DIGEST_GCP}" "${SNP_BASE_DIGEST_AWS}"; do
-    rt -X POST -H "Content-Type: application/json" -d "{\"digest\":\"${d}\"}" "${ROUTER}/allowlist" >/dev/null
-done
-
-# ---- 4. Spin up N new pairs in parallel ------------------------------------
-log "Spinning up ${COUNT} new pair(s) (${K_CLOUD}+${T_CLOUD})..."
-PIDS=()
-for n in "${NEW_NS[@]}"; do
-    SNP_PAIR_NAME="${PREFIX}-${n}" SNP_K_CLOUD="${K_CLOUD}" SNP_T_CLOUD="${T_CLOUD}" \
-        SNP_K_DIGEST="${K_DIGEST}" SNP_T_DIGEST="${T_DIGEST}" \
-        SNP_TEST_STATIC_OPRF="${SNP_TEST_STATIC_OPRF:-0}" \
-        "${SCRIPT_DIR}/snp-pair.sh" up &
-    PIDS+=($!)
-done
-for pid in "${PIDS[@]}"; do heartbeat_until_done "${pid}" "new pair bringup"; wait "${pid}"; done
-
-# ---- 5. Confirm N new pairs Ready in the router ----------------------------
-# Poll: snp-pair.sh returns when the HTTP health endpoints are up, but router
-# Ready (control link + first heartbeat) lands a few seconds later.
-log "Verifying ${COUNT} new pair(s) Ready..."
-READY_TIMEOUT="${SNP_READY_TIMEOUT:-240}"
-START=$(date +%s); READY=0
-while [[ $(( $(date +%s) - START )) -lt ${READY_TIMEOUT} ]]; do
-    READY=$(rt "${ROUTER}/pairs" | python3 -c "
+# ---- target from image-history.json ---------------------------------------
+TARGET_COMMIT=""; EXPECT_K=""; EXPECT_T=""
+read_target() {
+  local hist="${SCRIPT_DIR}/image-history.json"
+  [[ -f "${hist}" ]] || die "missing ${hist}"
+  local out; out="$(python3 -c "
 import json,sys
-d=json.load(sys.stdin); nd='${K_DIGEST}'
-print(sum(1 for p in d.get('pairs',[]) if p.get('teek_image_digest')==nd and p.get('ready_at') and not p.get('draining',False)))
-")
-    [[ "${READY}" -ge "${COUNT}" ]] && break
-    log "  ...${READY}/${COUNT} Ready, waiting ($(( $(date +%s) - START ))s)"
-    sleep 5
-done
-[[ "${READY}" -ge "${COUNT}" ]] || { log "ERROR: only ${READY}/${COUNT} new pairs Ready after ${READY_TIMEOUT}s. Aborting before retiring old."; exit 1; }
-log "${READY} new pair(s) Ready."
+apps=json.load(open('${hist}')).get('app_images',[])
+def last(role):
+    xs=[e for e in apps if e.get('role')==role and e.get('type')=='sev-snp']
+    return xs[-1] if xs else None
+k=last('k'); t=last('t')
+if not k or not t: sys.exit('no sev-snp app_images entries')
+print(k.get('sourceCommit',''), t.get('sourceCommit',''), k.get('version',''), t.get('version',''))
+" 2>/dev/null || true)"
+  [[ -n "${out}" ]] || die "could not read sev-snp target from ${hist}"
+  local kc tc kv tv; read -r kc tc kv tv <<<"${out}"
+  [[ -n "${kc}" && "${kc}" == "${tc}" ]] || die "image-history.json k/t sourceCommit differ or empty (k=${kc} t=${tc})"
+  TARGET_COMMIT="${SNP_BUILD_COMMIT:-${kc}}"
+  if [[ "${TARGET_COMMIT}" == "${kc}" ]]; then EXPECT_K="${kv}"; EXPECT_T="${tv}"; fi
+}
 
-# ---- 6. Retire old pairs ---------------------------------------------------
-if [[ -z "${OLD_NS}" ]]; then
-    log "No old pairs to retire."
-else
-    for n in ${OLD_NS}; do
-        name="${PREFIX}-${n}"
-        kip=$(pair_k_ip "${name}")
-        if [[ -z "${kip}" ]]; then
-            log "Pair ${name}: no K IP found; skipping router drain, will down anyway."
-        else
-            mapfile -t PIDS_R < <(rt "${ROUTER}/pairs" | jq -r --arg ip "${kip}" '.pairs[] | select(.teek_addr | startswith($ip + ":")) | .id' 2>/dev/null || true)
-            for pid_r in "${PIDS_R[@]}"; do
-                [[ -z "${pid_r}" ]] && continue
-                log "Draining ${name} (pair_id ${pid_r})..."
-                rt -X POST "${ROUTER}/pairs/${pid_r}/drain" >/dev/null || log "WARN: drain non-zero for ${pid_r}"
-                START=$(date +%s); ACTIVE=999
-                while [[ $(( $(date +%s) - START )) -lt ${DRAIN_TIMEOUT} ]]; do
-                    ACTIVE=$(rt "${ROUTER}/pairs" | jq -r --arg id "${pid_r}" '.pairs[]|select(.id==$id)|.active_sessions' 2>/dev/null || echo 999)
-                    [[ "${ACTIVE}" == "0" || -z "${ACTIVE}" ]] && break
-                    sleep 3
-                done
-                [[ "${ACTIVE}" == "0" || -z "${ACTIVE}" ]] && log "  drained." || log "  WARN: ${ACTIVE} active after ${DRAIN_TIMEOUT}s; killing anyway."
-                for attempt in 1 2 3 4 5; do
-                    CODE=$(rt -o /dev/null -w "%{http_code}" -X POST "${ROUTER}/pairs/${pid_r}/dead" || echo 000)
-                    case "${CODE}" in 204|404) break ;; *) sleep 2 ;; esac
-                done
-            done
-        fi
-        log "Tearing down ${name} ..."
-        SNP_PAIR_NAME="${name}" SNP_K_CLOUD="${K_CLOUD}" SNP_T_CLOUD="${T_CLOUD}" \
-            SNP_K_DIGEST=x SNP_T_DIGEST=x "${SCRIPT_DIR}/snp-pair.sh" down
+# ---- discover pairs from cloud resources + router --------------------------
+declare -a P_NAME P_KCLOUD P_KLOC P_KIP P_TCLOUD P_TLOC P_TIP P_ID P_ACTIVE P_KDIG P_TDIG
+discover() {
+  log "Discovering pairs (GCP + AWS ${AWS_REGION} + router ${ROUTER}) ..."
+  local tmp; tmp="$(mktemp)"
+  g compute instances list --filter="name~snp-" --format="value(name,zone,networkInterfaces[0].accessConfigs[0].natIP)" 2>/dev/null \
+    | while read -r nm zone ip; do
+        [[ "${nm}" =~ ^(snp-.+)-(k|t)-gcp$ ]] && echo "${BASH_REMATCH[1]}|${BASH_REMATCH[2]}|gcp|${zone}|${ip}"
+      done >> "${tmp}" || true
+  a ec2 describe-instances --filters "Name=tag:Name,Values=snp-*" "Name=instance-state-name,Values=pending,running" \
+      --query 'Reservations[].Instances[].[Tags[?Key==`Name`]|[0].Value,PublicIpAddress]' --output text 2>/dev/null \
+    | while read -r nm ip; do
+        [[ "${nm}" =~ ^(snp-.+)-(k|t)-aws$ ]] && echo "${BASH_REMATCH[1]}|${BASH_REMATCH[2]}|aws|${AWS_REGION}|${ip}"
+      done >> "${tmp}" || true
+
+  local pairs; mapfile -t pairs < <(cut -d'|' -f1 "${tmp}" | sort -u)
+  [[ ${#pairs[@]} -gt 0 ]] || { rm -f "${tmp}"; die "no SNP pairs discovered from cloud resources"; }
+
+  local routerjson; routerjson="$(rt "${ROUTER}/pairs" || echo '{}')"
+  local pn kline tline kcloud kloc kip tcloud tloc tip row
+  for pn in "${pairs[@]}"; do
+    kline="$(awk -F'|' -v p="${pn}" '$1==p && $2=="k"{print; exit}' "${tmp}")"
+    tline="$(awk -F'|' -v p="${pn}" '$1==p && $2=="t"{print; exit}' "${tmp}")"
+    [[ -n "${kline}" && -n "${tline}" ]] || { log "  WARN: ${pn} missing a half (k='${kline:-}' t='${tline:-}'); skipping"; continue; }
+    IFS='|' read -r _ _ kcloud kloc kip <<<"${kline}"
+    IFS='|' read -r _ _ tcloud tloc tip <<<"${tline}"
+    row="$(python3 -c "
+import json
+d=json.loads('''${routerjson}''')
+for p in d.get('pairs',[]):
+    if str(p.get('teek_addr','')).startswith('${kip}:'):
+        print(p['id'], p.get('active_sessions',0), p.get('teek_image_digest','?'), p.get('teet_image_digest','?')); break
+" 2>/dev/null || true)"
+    [[ -n "${row}" ]] || row="<none> - ? ?"
+    P_NAME+=("${pn}"); P_KCLOUD+=("${kcloud}"); P_KLOC+=("${kloc}"); P_KIP+=("${kip}")
+    P_TCLOUD+=("${tcloud}"); P_TLOC+=("${tloc}"); P_TIP+=("${tip}")
+    P_ID+=("$(awk '{print $1}' <<<"${row}")"); P_ACTIVE+=("$(awk '{print $2}' <<<"${row}")")
+    P_KDIG+=("$(awk '{print $3}' <<<"${row}")"); P_TDIG+=("$(awk '{print $4}' <<<"${row}")")
+  done
+  rm -f "${tmp}"
+  [[ ${#P_NAME[@]} -gt 0 ]] || die "no complete pairs discovered"
+}
+
+short() { local d="${1#snp-app:}"; echo "${d:0:12}"; }
+
+confirm() {
+  {
+    echo
+    echo "==================== SNP FLEET REDEPLOY (in place) ===================="
+    echo "Router        : ${ROUTER}   target=${TARGET}   real_oprf=$([[ "${STATIC_OPRF}" == 1 ]] && echo no || echo yes)"
+    echo "Deploy commit : ${TARGET_COMMIT:0:12}  (from image-history.json$([[ -n "${SNP_BUILD_COMMIT:-}" ]] && echo ' — overridden by SNP_BUILD_COMMIT'))"
+    [[ -n "${EXPECT_K}" ]] && echo "Expected      : K=$(short "${EXPECT_K}")  T=$(short "${EXPECT_T}")"
+    echo "Logs          : ${LOG_DIR}"
+    echo "Pairs (${#P_NAME[@]}) — redeployed IN PLACE, one at a time, same orientation:"
+    printf '  %-13s %-30s %-30s %-10s %-7s %s\n' NAME K-half T-half pair_id active curK/curT
+    local i
+    for i in "${!P_NAME[@]}"; do
+      printf '  %-13s %-30s %-30s %-10s %-7s %s/%s\n' \
+        "${P_NAME[$i]}" "${P_KCLOUD[$i]}/${P_KLOC[$i]} ${P_KIP[$i]}" "${P_TCLOUD[$i]}/${P_TLOC[$i]} ${P_TIP[$i]}" \
+        "${P_ID[$i]:0:8}" "${P_ACTIVE[$i]}" "$(short "${P_KDIG[$i]}")" "$(short "${P_TDIG[$i]}")"
     done
-fi
+    echo "======================================================================"
+  } | tee -a "${LOG_DIR}/run.log"
+  [[ "${SNP_DISCOVER_ONLY:-0}" == 1 ]] && { log "SNP_DISCOVER_ONLY=1 — stopping after discovery."; exit 0; }
+  if [[ "${SNP_YES:-0}" == 1 ]]; then log "SNP_YES=1 — proceeding without prompt."; return; fi
+  local ans; read -r -p "Redeploy these ${#P_NAME[@]} pair(s) to ${TARGET_COMMIT:0:7}, in place, one by one? [y/N] " ans || true
+  [[ "${ans}" == y || "${ans}" == Y ]] || { echo "aborted."; exit 1; }
+}
 
-# ---- 7. Trim old digests from the allowlist --------------------------------
-log "Trimming allowlist to current digests..."
-for d in $(rt "${ROUTER}/allowlist" | jq -r '.digests[]'); do
+NEW_K=""; NEW_T=""
+build_and_verify() {
+  declare -A need; local i
+  for i in "${!P_NAME[@]}"; do need["k:${P_KCLOUD[$i]}"]=1; need["t:${P_TCLOUD[$i]}"]=1; done
+  log "Building commit ${TARGET_COMMIT:0:7} for: ${!need[*]}"
+  local rc role cloud blog
+  for rc in "${!need[@]}"; do
+    role="${rc%%:*}"; cloud="${rc##*:}"; blog="${LOG_DIR}/build-${role}-${cloud}.log"
+    log "  build ${role} ${cloud}  (log: ${blog})"
+    ( export http_proxy="${SNP_PROXY}" https_proxy="${SNP_PROXY}" SNP_BUILD_COMMIT="${TARGET_COMMIT}"; "${SCRIPT_DIR}/snp-build.sh" "${role}" "${cloud}" ) > "${blog}" 2>&1 || die "build ${role} ${cloud} failed — see ${blog}"
+  done
+  set -a; source "${SCRIPT_DIR}/snp-digests.env"; set +a
+  [[ "${COMMIT}" == "${TARGET_COMMIT}" ]] || die "snp-digests.env COMMIT ${COMMIT:0:7} != target ${TARGET_COMMIT:0:7}"
+  NEW_K="${SNP_K_DIGEST:?missing K digest after build}"; NEW_T="${SNP_T_DIGEST:?missing T digest after build}"
+  if [[ -n "${EXPECT_K}" ]]; then
+    [[ "${NEW_K}" == "${EXPECT_K}" ]] || die "VERIFY FAIL: built K ${NEW_K} != image-history ${EXPECT_K} — NOT deploying"
+    [[ "${NEW_T}" == "${EXPECT_T}" ]] || die "VERIFY FAIL: built T ${NEW_T} != image-history ${EXPECT_T} — NOT deploying"
+    log "  verified: built digests match image-history.json (K=$(short "${NEW_K}") T=$(short "${NEW_T}"))"
+  else
+    log "  ad-hoc build (SNP_BUILD_COMMIT override): skipping json digest assert. K=$(short "${NEW_K}") T=$(short "${NEW_T}")"
+  fi
+}
+
+allowlist_add() {
+  log "Allowlisting new app digests + both bases ..."
+  local d
+  for d in "${NEW_K}" "${NEW_T}" "${SNP_BASE_DIGEST_GCP}" "${SNP_BASE_DIGEST_AWS}"; do
+    rt -X POST -H "Content-Type: application/json" -d "{\"digest\":\"${d}\"}" "${ROUTER}/allowlist" >/dev/null || die "allowlist ${d} failed"
+  done
+}
+
+# remove one old half, KEEPING its stable IP (gcp static address / aws EIP).
+remove_old_half() {
+  local cloud="$1" loc="$2" name="$3" role="$4"
+  if [[ "${cloud}" == gcp ]]; then
+    log "    delete GCP ${name}-${role}-gcp (keep static IP) ..."
+    g compute instances delete "${name}-${role}-gcp" --zone="${loc}" --quiet >/dev/null 2>&1 || true
+  else
+    local iid; iid="$(a ec2 describe-instances --filters "Name=tag:Name,Values=${name}-${role}-aws" "Name=instance-state-name,Values=pending,running,stopping,stopped" --query 'Reservations[].Instances[].InstanceId' --output text 2>/dev/null || true)"
+    if [[ -n "${iid}" && "${iid}" != None ]]; then
+      log "    terminate AWS ${iid} (keep EIP) ..."
+      a ec2 terminate-instances --instance-ids ${iid} >/dev/null
+      a ec2 wait instance-terminated --instance-ids ${iid} || true
+    fi
+  fi
+}
+
+redeploy_pair() {
+  local i="$1"
+  local name="${P_NAME[$i]}" pid="${P_ID[$i]}"
+  local kc="${P_KCLOUD[$i]}" kl="${P_KLOC[$i]}" kip="${P_KIP[$i]}"
+  local tc="${P_TCLOUD[$i]}" tl="${P_TLOC[$i]}"
+  echo; log "=== ${name}: K@${kc}/${kl} + T@${tc}/${tl}  (pair_id ${pid}) ==="
+
+  if [[ "${pid}" != "<none>" ]]; then
+    log "  draining ${pid} (wait active==0, up to ${DRAIN_TIMEOUT}s) ..."
+    rt -X POST "${ROUTER}/pairs/${pid}/drain" >/dev/null || log "  WARN: drain returned non-2xx"
+    local start active; start=$(date +%s); active=999
+    while (( $(date +%s) - start < DRAIN_TIMEOUT )); do
+      active="$(rt "${ROUTER}/pairs" | python3 -c "import json,sys;print(next((p.get('active_sessions',0) for p in json.load(sys.stdin).get('pairs',[]) if p['id']=='${pid}'),0))" 2>/dev/null || echo 999)"
+      [[ "${active}" == "0" ]] && break
+      log "    active=${active}, waiting ..."; sleep 5
+    done
+    [[ "${active}" == "0" ]] || die "${name}: ${active} sessions still active after ${DRAIN_TIMEOUT}s — aborting (never terminate live sessions)"
+    local code
+    for _ in 1 2 3 4 5; do code="$(rt -o /dev/null -w '%{http_code}' -X POST "${ROUTER}/pairs/${pid}/dead")"; case "${code}" in 204|404) break ;; *) sleep 2 ;; esac; done
+    log "  drained + dead."
+  else
+    log "  no router pair_id matched ${kip}; skipping drain."
+  fi
+
+  # Remove BOTH old halves first (keep IP/EIP) so `up` recreates cleanly with no
+  # stale-digest peer overlap (else the new K logs a transient RA-TLS mismatch).
+  remove_old_half "${kc}" "${kl}" "${name}" k
+  remove_old_half "${tc}" "${tl}" "${name}" t
+
+  local ulog="${LOG_DIR}/up-${name}.log"
+  log "  bringing up ${name} at new digests  (log: ${ulog}) ..."
+  SNP_PAIR_NAME="${name}" SNP_K_CLOUD="${kc}" SNP_T_CLOUD="${tc}" \
+    SNP_K_LOCATION="${kl}" SNP_T_LOCATION="${tl}" \
+    SNP_K_DIGEST="${NEW_K}" SNP_T_DIGEST="${NEW_T}" \
+    SNP_TARGET="${TARGET}" SNP_TEST_STATIC_OPRF="${STATIC_OPRF}" \
+    "${SCRIPT_DIR}/snp-pair.sh" up > "${ulog}" 2>&1 || die "${name}: snp-pair.sh up failed — see ${ulog}"
+
+  log "  waiting Ready in router (up to ${READY_TIMEOUT}s) ..."
+  local start2 ok; start2=$(date +%s); ok=0
+  while (( $(date +%s) - start2 < READY_TIMEOUT )); do
+    if rt "${ROUTER}/pairs" | python3 -c "import json,sys
+d=json.load(sys.stdin)
+sys.exit(0 if [p for p in d.get('pairs',[]) if str(p.get('teek_addr','')).startswith('${kip}:') and p.get('teek_image_digest')=='${NEW_K}' and p.get('ready_at')] else 1)" 2>/dev/null; then ok=1; break; fi
+    sleep 5
+  done
+  [[ "${ok}" == 1 ]] || die "${name}: not Ready at ${kip} with new digest after ${READY_TIMEOUT}s (see ${ulog} + Cloud Logging / CloudWatch)"
+  log "  ${name} READY on new build."
+}
+
+trim_allowlist() {
+  log "Trimming old app digests from allowlist (keep new apps + bases) ..."
+  local d
+  for d in $(rt "${ROUTER}/allowlist" | python3 -c "import json,sys;[print(x) for x in json.load(sys.stdin).get('digests',[])]"); do
     case "${d}" in
-        "${K_DIGEST}"|"${T_DIGEST}"|snp-base:*) ;;  # keep current apps + all bases
-        snp-app:*) log "Removing old app digest ${d:0:24}..."; rt -X DELETE "${ROUTER}/allowlist/${d}" >/dev/null ;;
+      "${NEW_K}"|"${NEW_T}"|snp-base:*) ;;
+      snp-app:*) log "  removing ${d:0:26}..."; rt -X DELETE "${ROUTER}/allowlist/${d}" >/dev/null || true ;;
     esac
-done
+  done
+}
 
-log "SNP fleet redeploy complete: ${COUNT} pair(s) at K=${K_DIGEST:0:19}.../T=${T_DIGEST:0:19}..."
+# ---- record: build-only HEAD, write digests to image-history.json ---------
+cmd_record() {
+  log "record: build-only HEAD, write digests to image-history.json (no cloud, no deploy)"
+  command -v docker >/dev/null && docker version >/dev/null 2>&1 || die "docker not reachable"
+  local head; head="$(git -C "${REPO_ROOT}" rev-parse HEAD)"
+  # record pins committed HEAD (clean clone), so only uncommitted SOURCE matters
+  # — deploy scripts are intentionally uncommitted and must not block this.
+  [[ -z "$(git -C "${REPO_ROOT}" status --porcelain -- tee_k tee_t shared minitls oprfmpc providers client lib cmd proto 2>/dev/null || true)" ]] || die "commit your code first — record pins committed HEAD ${head:0:7}, but there are uncommitted source changes"
+  local cur; cur="$(python3 -c "import json;a=[e for e in json.load(open('${SCRIPT_DIR}/image-history.json')).get('app_images',[]) if e.get('type')=='sev-snp' and e.get('role')=='k'];print(a[-1]['sourceCommit'] if a else '')" 2>/dev/null || true)"
+  [[ "${cur}" == "${head}" ]] && { log "image-history.json already pins ${head:0:7}; nothing to record. Just push + run the fleet."; return; }
+  local role blog kd td
+  for role in k t; do
+    blog="${LOG_DIR}/record-build-${role}.log"
+    log "  build-only ${role} @ ${head:0:7}  (log: ${blog})"
+    ( export http_proxy="${SNP_PROXY}" https_proxy="${SNP_PROXY}" SNP_BUILD_ONLY=1 SNP_BUILD_COMMIT="${head}"; "${SCRIPT_DIR}/snp-build.sh" "${role}" gcp ) > "${blog}" 2>&1 || die "build-only ${role} failed — see ${blog}"
+  done
+  kd="$(grep -oE 'snp-app:[0-9a-f]{64}' "${LOG_DIR}/record-build-k.log" | tail -1 || true)"
+  td="$(grep -oE 'snp-app:[0-9a-f]{64}' "${LOG_DIR}/record-build-t.log" | tail -1 || true)"
+  [[ -n "${kd}" && -n "${td}" ]] || die "could not parse digests from build logs in ${LOG_DIR}"
+  printf 'SNP_K_DIGEST=%s\nSNP_T_DIGEST=%s\nCOMMIT=%s\n' "${kd}" "${td}" "${head}" > "${SCRIPT_DIR}/snp-digests.env"
+  "${SCRIPT_DIR}/update-image-history.sh" snp > "${LOG_DIR}/record-history.log" 2>&1 || die "update-image-history failed — see ${LOG_DIR}/record-history.log"
+  log "recorded ${head:0:7}: K=$(short "${kd}") T=$(short "${td}") in deploy/image-history.json"
+  echo
+  echo "NEXT:  git add deploy/image-history.json && git commit -m '[CHORE] record snp app digests @${head:0:7}' && git push"
+  echo "THEN:  ./deploy/snp-redeploy-fleet.sh"
+}
+
+# ---- run -------------------------------------------------------------------
+echo "LOGS: ${LOG_DIR}   (run.log + per-step build-*.log / up-*.log)"
+if [[ "${1:-}" == record ]]; then cmd_record; log "Logs: ${LOG_DIR}"; exit 0; fi
+log "snp-redeploy-fleet starting (target=${TARGET}, router=${ROUTER})"
+preflight
+read_target
+discover
+confirm
+build_and_verify
+allowlist_add
+for i in "${!P_NAME[@]}"; do redeploy_pair "${i}"; done
+trim_allowlist
+
+echo
+log "FLEET REDEPLOY COMPLETE — ${#P_NAME[@]} pair(s) on ${TARGET_COMMIT:0:7}"
+log "  K=${NEW_K}"
+log "  T=${NEW_T}"
+echo "Final fleet:" | tee -a "${LOG_DIR}/run.log"
+rt "${ROUTER}/pairs" | python3 -c "
+import json,sys
+for p in json.load(sys.stdin).get('pairs',[]):
+    print('  ', p['id'][:8], p.get('teek_addr'), 'ready' if p.get('ready_at') else 'NOTREADY', 'active='+str(p.get('active_sessions')), 'K='+str(p.get('teek_image_digest'))[:20])" | tee -a "${LOG_DIR}/run.log"
+log "image-history.json already pins ${TARGET_COMMIT:0:7} (recorded pre-deploy); nothing to commit."
+log "Logs: ${LOG_DIR}"
