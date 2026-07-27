@@ -77,10 +77,9 @@ func (a *AttestationHealth) RecordFailure(err error) {
 			zap.Bool("healthy", !terminal && n < attestUnhealthyAfter),
 			zap.Bool("terminal_wedge", terminal),
 			zap.Error(err))
-		if captureDiag {
-			logger.Error("attestation failure diagnostics", captureAttestationDiag(err)...)
-		}
 	}
+	// Recovery fires before diagnostics: captureAttestationDiag touches the wedged
+	// device, so it must never sit in front of the self-reset.
 	if selfHeal {
 		if logger != nil {
 			reason := "attestation wedged past self-heal threshold; self-resetting VM"
@@ -91,6 +90,9 @@ func (a *AttestationHealth) RecordFailure(err error) {
 			logger.Sync()
 		}
 		go attestSelfReset(logger)
+	}
+	if logger != nil && captureDiag {
+		logger.Error("attestation failure diagnostics", captureAttestationDiag(err)...)
 	}
 }
 

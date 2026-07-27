@@ -43,29 +43,31 @@ func captureAttestationDiag(err error) []zap.Field {
 	return fields
 }
 
-// kmsgTail replays /dev/kmsg non-blocking and returns up to the last 20 lines
-// whose text contains any of the given lowercase substrings.
+// kmsgTail replays /dev/kmsg via raw non-blocking syscalls and returns up to the
+// last 20 lines matching any lowercase substring. Raw reads are used (not os.File)
+// because Go's netpoller would park on EAGAIN and hang until the next kernel line.
 func kmsgTail(match ...string) []string {
-	f, err := os.OpenFile("/dev/kmsg", os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	fd, err := syscall.Open("/dev/kmsg", syscall.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return []string{"kmsg open: " + err.Error()}
 	}
-	defer f.Close()
+	defer syscall.Close(fd)
 	buf := make([]byte, 8192)
 	var hits []string
-	for {
-		n, rerr := f.Read(buf)
-		if n > 0 {
-			low := strings.ToLower(string(buf[:n]))
-			for _, m := range match {
-				if strings.Contains(low, m) {
-					hits = append(hits, strings.TrimSpace(string(buf[:n])))
-					break
-				}
-			}
+	for i := 0; i < 100000; i++ {
+		n, rerr := syscall.Read(fd, buf)
+		if errors.Is(rerr, syscall.EPIPE) {
+			continue
 		}
-		if rerr != nil {
+		if rerr != nil || n <= 0 {
 			break
+		}
+		low := strings.ToLower(string(buf[:n]))
+		for _, m := range match {
+			if strings.Contains(low, m) {
+				hits = append(hits, strings.TrimSpace(string(buf[:n])))
+				break
+			}
 		}
 	}
 	if len(hits) > 20 {
