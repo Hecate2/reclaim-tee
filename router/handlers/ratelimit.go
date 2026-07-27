@@ -90,18 +90,22 @@ func (l *ipRateLimiter) evictOldestLocked(_ time.Time) {
 	}
 }
 
-// clientIP picks the best identity available for rate-limiting. Behind
-// GCP HTTPS LB, X-Forwarded-For's leftmost entry is what the client sent
-// (attacker-controllable). Using it for AUTH is unsafe; using it for rate
-// limiting is OK — an attacker rotating spoofed IPs still pays 1 token
-// per identity, and the map cap+eviction bounds memory. Falls back to
-// r.RemoteAddr (the LB's IP) when XFF is absent, which is acceptable for
-// local-dev and direct-Cloud-Run access where the platform sets it.
+// trustedProxyHops is how many trailing X-Forwarded-For entries the GCP
+// HTTPS LB writes itself: "<client-supplied>, <client-ip>, <lb-ip>".
+const trustedProxyHops = 2
+
+// Only the last two XFF entries are LB-written; keying on the caller-supplied
+// leftmost one mints a fresh full burst per request. Falls back to RemoteAddr.
 func clientIP(r *http.Request) string {
 	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		first, _, _ := strings.Cut(xff, ",")
-		if ip := strings.TrimSpace(first); ip != "" {
-			return ip
+		parts := strings.Split(xff, ",")
+		if len(parts) >= trustedProxyHops {
+			if vouched := strings.TrimSpace(parts[len(parts)-trustedProxyHops]); vouched != "" {
+				if ip := net.ParseIP(vouched); ip != nil {
+					return ip.String()
+				}
+				return vouched
+			}
 		}
 	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)

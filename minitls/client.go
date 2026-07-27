@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"crypto/sha512"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -18,6 +19,27 @@ import (
 
 	"go.uber.org/zap"
 )
+
+// errHelloRetryRequest signals that the ServerHello carried the HRR magic
+// random. Sentinel rather than a string match so callers can errors.Is it.
+var errHelloRetryRequest = errors.New("HELLO_RETRY_REQUEST")
+
+// maxHandshakeMsgLen caps a single reassembled handshake message. The wire
+// field allows 2^24; Go uses 64 KiB and no real server needs more.
+const maxHandshakeMsgLen = 65536
+
+// hrrRandom is the HelloRetryRequest magic ServerHello.random (RFC 8446
+// 4.1.3): SHA-256 of "HelloRetryRequest".
+var hrrRandom = []byte{
+	0xCF, 0x21, 0xAD, 0x74, 0xE5, 0x9A, 0x61, 0x11,
+	0xBE, 0x1D, 0x8C, 0x02, 0x1E, 0x65, 0xB8, 0x91,
+	0xC2, 0xA2, 0x11, 0x16, 0x7A, 0xBB, 0x8C, 0x5E,
+	0x07, 0x9E, 0x09, 0xE2, 0xC8, 0xA8, 0x33, 0x9C,
+}
+
+// downgradeSentinelTLS12 is the trailing ServerHello.random value a TLS 1.3
+// capable server sets when it negotiates 1.2 (RFC 8446 4.1.3).
+var downgradeSentinelTLS12 = []byte{0x44, 0x4F, 0x57, 0x4E, 0x47, 0x52, 0x44, 0x01}
 
 type Client struct {
 	conn net.Conn
@@ -37,12 +59,12 @@ type Client struct {
 	tls12AEAD         *TLS12AEADContext // TLS 1.2 AEAD context
 
 	// Handshake state
-	transcript           []byte // Running transcript of all handshake messages
-	finishedTranscript   []byte // Transcript for Finished message verification
-	readBuffer           []byte // Buffer for incoming TLS records
-	handshakeBuffer      []byte // Buffer for reassembling handshake messages
-	pendingHandshakeData []byte // Buffer for leftover handshake data from coalesced TLS 1.2 records
-	cipherSuite          uint16 // Negotiated cipher suite
+	offeredCipherSuites  []uint16 // Exactly what the last ClientHello advertised
+	transcript           []byte   // Running transcript of all handshake messages
+	finishedTranscript   []byte   // Transcript for Finished message verification
+	handshakeBuffer      []byte   // Buffer for reassembling handshake messages
+	pendingHandshakeData []byte   // Buffer for leftover handshake data from coalesced TLS 1.2 records
+	cipherSuite          uint16   // Negotiated cipher suite
 
 	// Count of TLS-1.3 App records this lib decrypted as handshake (EE/Cert/CertVerify/Finished).
 	handshakeAppRecordsConsumed uint32
@@ -139,11 +161,18 @@ func (c *Client) Handshake(serverName string) error {
 	// Step 3: Detect negotiated TLS version and route to appropriate implementation
 	negotiatedVersion, cipherSuite, err := c.detectTLSVersion(serverHello)
 	if err != nil {
-		if err.Error() == "HELLO_RETRY_REQUEST" {
+		if errors.Is(err, errHelloRetryRequest) {
 			// Handle HelloRetryRequest - this completes the full handshake
 			return c.handleHelloRetryRequestFlow(serverHello, serverName)
 		}
 		return fmt.Errorf("failed to detect TLS version: %v", err)
+	}
+
+	if err := c.checkNegotiated(negotiatedVersion, cipherSuite); err != nil {
+		return err
+	}
+	if err := c.checkDowngradeSentinel(negotiatedVersion, serverHello); err != nil {
+		return err
 	}
 
 	c.negotiatedVersion = negotiatedVersion
@@ -254,6 +283,9 @@ func (c *Client) processHandshakeBuffer() (bool, error) {
 		}
 
 		msgLen := uint32(c.handshakeBuffer[1])<<16 | uint32(c.handshakeBuffer[2])<<8 | uint32(c.handshakeBuffer[3])
+		if msgLen > maxHandshakeMsgLen {
+			return false, fmt.Errorf("handshake message of %d bytes exceeds %d cap", msgLen, maxHandshakeMsgLen)
+		}
 		totalMsgLen := 4 + msgLen
 
 		// Check if the full message is in the buffer.
@@ -612,8 +644,11 @@ func (c *Client) buildClientHello(serverName string) ([]byte, error) {
 			{group: secp384r1, data: publicKeyBytesP384},
 			{group: secp521r1, data: publicKeyBytesP521},
 		},
-		alpnProtocols: alpnProtocols, // RFC 7301 - Application-Layer Protocol Negotiation
+		alpnProtocols:        alpnProtocols, // RFC 7301 - Application-Layer Protocol Negotiation
+		extendedMasterSecret: true,          // RFC 7627 - binds the TLS 1.2 master secret to the transcript
 	}
+
+	c.offeredCipherSuites = cipherSuites
 
 	// Fill random bytes using cryptographically secure randomness
 	if _, err := rand.Read(hello.random); err != nil {
@@ -717,13 +752,18 @@ func (c *Client) detectTLSVersionFromData(serverHello []byte) (uint16, uint16, e
 		return 0, 0, fmt.Errorf("ServerHello payload too short")
 	}
 
+	// RFC 8446 4.1.4: the server may send at most one HelloRetryRequest.
+	if bytes.Equal(payload[2:34], hrrRandom) {
+		return 0, 0, fmt.Errorf("server sent a second HelloRetryRequest")
+	}
+
 	// Parse ServerHello: version(2) + random(32) + session_id_len(1) + session_id + cipher_suite(2) + compression(1)
 	offset := 0
 
 	// Skip version (2 bytes)
 	offset += 2
 
-	// Skip random (32 bytes) - real ServerHello should not have HRR magic random
+	// Skip random (32 bytes)
 	offset += 32
 
 	// Parse session ID
@@ -764,18 +804,9 @@ func (c *Client) detectTLSVersion(serverHello []byte) (uint16, uint16, error) {
 	}
 
 	// Check for HelloRetryRequest (HRR) - special ServerHello with magic random value
-	hrrRandom := []byte{
-		0xCF, 0x21, 0xAD, 0x74, 0xE5, 0x9A, 0x61, 0x11,
-		0xBE, 0x1D, 0x8C, 0x02, 0x1E, 0x65, 0xB8, 0x91,
-		0xC2, 0xA2, 0x11, 0x16, 0x7A, 0xBB, 0x8C, 0x5E,
-		0x07, 0x9E, 0x09, 0xE2, 0xC8, 0xA8, 0x33, 0x9C,
-	}
-
-	serverRandom := payload[2:34]
-	if bytes.Equal(serverRandom, hrrRandom) {
-		// This is actually called from detectTLSVersion which doesn't have serverName
-		// We need to handle this differently - return a special indicator
-		return 0, 0, fmt.Errorf("HELLO_RETRY_REQUEST")
+	if bytes.Equal(payload[2:34], hrrRandom) {
+		// Caller has the serverName needed to build the second ClientHello
+		return 0, 0, errHelloRetryRequest
 	}
 
 	// Parse ServerHello: version(2) + random(32) + session_id_len(1) + session_id + cipher_suite(2) + compression(1)
@@ -813,6 +844,34 @@ func (c *Client) detectTLSVersion(serverHello []byte) (uint16, uint16, error) {
 	default:
 		return 0, 0, fmt.Errorf("unsupported cipher suite: 0x%04x", cipherSuite)
 	}
+}
+
+// Without this, Config.MinVersion/MaxVersion and ForceCipherSuite are
+// advisory: the server picks whatever it likes and we follow.
+func (c *Client) checkNegotiated(version, cipherSuite uint16) error {
+	if !slices.Contains(c.Config.supportedVersions(), version) {
+		return fmt.Errorf("server negotiated TLS 0x%04x, outside configured range", version)
+	}
+	if len(c.offeredCipherSuites) > 0 && !slices.Contains(c.offeredCipherSuites, cipherSuite) {
+		return fmt.Errorf("server selected cipher suite 0x%04x which was not offered", cipherSuite)
+	}
+	return nil
+}
+
+// RFC 8446 4.1.3 MUST. Only meaningful when we offered 1.3: a client pinned to
+// 1.2 sees the sentinel from any 1.3-capable server and must not abort.
+func (c *Client) checkDowngradeSentinel(negotiatedVersion uint16, serverHello []byte) error {
+	if negotiatedVersion != VersionTLS12 || !slices.Contains(c.Config.supportedVersions(), VersionTLS13) {
+		return nil
+	}
+	if len(serverHello) < 38 {
+		return fmt.Errorf("ServerHello too short to check downgrade sentinel")
+	}
+	serverRandom := serverHello[6:38]
+	if bytes.Equal(serverRandom[24:], downgradeSentinelTLS12) {
+		return fmt.Errorf("TLS 1.3 downgrade detected: server signalled DOWNGRD sentinel while negotiating TLS 1.2")
+	}
+	return nil
 }
 
 // continueTLS12Handshake continues with TLS 1.2 handshake after version detection
@@ -978,6 +1037,9 @@ func (c *Client) readServerHello() ([]byte, error) {
 
 			// Extract handshake message length
 			handshakeMsgLen = int(recordData[1])<<16 | int(recordData[2])<<8 | int(recordData[3])
+			if handshakeMsgLen > maxHandshakeMsgLen {
+				return nil, fmt.Errorf("ServerHello of %d bytes exceeds %d cap", handshakeMsgLen, maxHandshakeMsgLen)
+			}
 			firstRecord = false
 
 			c.logger.Debug("ServerHello handshake message",
@@ -1217,35 +1279,6 @@ func (c *Client) parseServerHelloExtensions(extensionsData []byte) (*ecdh.Public
 	}
 
 	return serverPublicKey, nil
-}
-
-func (c *Client) parseKeyShareExtension(extensionsData []byte) (*ecdh.PublicKey, error) {
-	offset := 0
-	for offset < len(extensionsData) {
-		if offset+4 > len(extensionsData) {
-			break
-		}
-
-		extType := uint16(extensionsData[offset])<<8 | uint16(extensionsData[offset+1])
-		extLen := int(extensionsData[offset+2])<<8 | int(extensionsData[offset+3])
-		offset += 4
-
-		if extType == 51 { // key_share
-			if offset+extLen > len(extensionsData) {
-				return nil, fmt.Errorf("invalid key_share extension length")
-			}
-
-			keyShareData := extensionsData[offset : offset+extLen]
-			c.logger.Debug("Found key_share extension",
-				zap.Int("extension_length", extLen),
-				zap.String("hex_data", fmt.Sprintf("%x", keyShareData)))
-			return c.parseKeyShare(keyShareData)
-		}
-
-		offset += extLen
-	}
-
-	return nil, fmt.Errorf("key_share extension not found")
 }
 
 func (c *Client) parseKeyShare(data []byte) (*ecdh.PublicKey, error) {
@@ -1585,17 +1618,27 @@ func (c *Client) handleHelloRetryRequestFlow(hrrData []byte, serverName string) 
 	c.logger.Info("Processing HelloRetryRequest flow")
 
 	// Parse the HRR to extract the selected key group
-	selectedGroup, cookie, err := c.parseHelloRetryRequest(hrrData)
+	selectedGroup, hrrCipherSuite, cookie, err := c.parseHelloRetryRequest(hrrData)
 	if err != nil {
 		return fmt.Errorf("failed to parse HelloRetryRequest: %v", err)
 	}
 
+	// HRR is TLS 1.3 only, so its suite must be one we offered and must be a
+	// 1.3 suite before it is allowed to pick the transcript hash.
+	if !IsTLS13CipherSuite(hrrCipherSuite) {
+		return fmt.Errorf("HelloRetryRequest selected non-TLS-1.3 cipher suite 0x%04x", hrrCipherSuite)
+	}
+	if len(c.offeredCipherSuites) > 0 && !slices.Contains(c.offeredCipherSuites, hrrCipherSuite) {
+		return fmt.Errorf("HelloRetryRequest selected cipher suite 0x%04x which was not offered", hrrCipherSuite)
+	}
+
 	c.logger.Debug("HelloRetryRequest parsed",
 		zap.Uint16("selected_group", selectedGroup),
+		zap.Uint16("cipher_suite", hrrCipherSuite),
 		zap.Bool("has_cookie", len(cookie) > 0))
 
 	// Update transcript: transcript = hash(ClientHello1 + HelloRetryRequest)
-	if err := c.updateTranscriptForHRR(hrrData); err != nil {
+	if err := c.updateTranscriptForHRR(hrrData, hrrCipherSuite); err != nil {
 		return fmt.Errorf("failed to update transcript for HRR: %v", err)
 	}
 
@@ -1634,6 +1677,18 @@ func (c *Client) handleHelloRetryRequestFlow(hrrData []byte, serverName string) 
 		return fmt.Errorf("failed to detect TLS version from real ServerHello: %v", err)
 	}
 
+	// RFC 8446 4.1.4: the second ServerHello must keep the HRR's cipher suite,
+	// and HRR is 1.3-only so a 1.2 outcome here is always bogus.
+	if negotiatedVersion != VersionTLS13 {
+		return fmt.Errorf("server negotiated TLS 0x%04x after HelloRetryRequest; HRR is TLS 1.3 only", negotiatedVersion)
+	}
+	if cipherSuite != hrrCipherSuite {
+		return fmt.Errorf("ServerHello cipher suite 0x%04x differs from HelloRetryRequest 0x%04x", cipherSuite, hrrCipherSuite)
+	}
+	if err := c.checkNegotiated(negotiatedVersion, cipherSuite); err != nil {
+		return err
+	}
+
 	c.negotiatedVersion = negotiatedVersion
 	c.cipherSuite = cipherSuite
 
@@ -1641,35 +1696,24 @@ func (c *Client) handleHelloRetryRequestFlow(hrrData []byte, serverName string) 
 		zap.Uint16("version", negotiatedVersion),
 		zap.Uint16("cipher_suite", cipherSuite))
 
-	// Continue with the appropriate handshake implementation
-	switch negotiatedVersion {
-	case VersionTLS12:
-		c.logger.Debug("Proceeding with TLS 1.2 handshake after HRR")
-		if err := c.extractServerRandomTLS12(realServerHello); err != nil {
-			return fmt.Errorf("failed to extract server random: %v", err)
-		}
-		return c.continueTLS12Handshake()
-	case VersionTLS13:
-		c.logger.Debug("Proceeding with TLS 1.3 handshake after HRR")
-		return c.continueTLS13Handshake(cipherSuite)
-	default:
-		return fmt.Errorf("unsupported TLS version: 0x%04x", negotiatedVersion)
-	}
+	c.logger.Debug("Proceeding with TLS 1.3 handshake after HRR")
+	return c.continueTLS13Handshake(cipherSuite)
 }
 
-// parseHelloRetryRequest parses a HelloRetryRequest message
-func (c *Client) parseHelloRetryRequest(hrrData []byte) (selectedGroup uint16, cookie []byte, err error) {
+// Returns the cipher suite because the HRR transcript hash depends on it and
+// c.cipherSuite is still zero at this point.
+func (c *Client) parseHelloRetryRequest(hrrData []byte) (selectedGroup uint16, cipherSuite uint16, cookie []byte, err error) {
 	if len(hrrData) < 4 {
-		return 0, nil, fmt.Errorf("HelloRetryRequest too short")
+		return 0, 0, nil, fmt.Errorf("HelloRetryRequest too short")
 	}
 
 	if HandshakeType(hrrData[0]) != typeServerHello {
-		return 0, nil, fmt.Errorf("invalid message type: expected ServerHello")
+		return 0, 0, nil, fmt.Errorf("invalid message type: expected ServerHello")
 	}
 
 	payload := hrrData[4:]
 	if len(payload) < 38 {
-		return 0, nil, fmt.Errorf("HelloRetryRequest payload too short")
+		return 0, 0, nil, fmt.Errorf("HelloRetryRequest payload too short")
 	}
 
 	// Parse ServerHello structure: version(2) + random(32) + session_id_len(1) + session_id + cipher_suite(2) + compression(1) + extensions_len(2) + extensions
@@ -1686,7 +1730,11 @@ func (c *Client) parseHelloRetryRequest(hrrData []byte) (selectedGroup uint16, c
 	offset++
 	offset += int(sessionIDLen)
 
-	// Skip cipher suite (2 bytes)
+	if len(payload) < offset+3 {
+		return 0, 0, nil, fmt.Errorf("HelloRetryRequest missing cipher suite")
+	}
+
+	cipherSuite = uint16(payload[offset])<<8 | uint16(payload[offset+1])
 	offset += 2
 
 	// Skip compression method (1 byte)
@@ -1694,14 +1742,14 @@ func (c *Client) parseHelloRetryRequest(hrrData []byte) (selectedGroup uint16, c
 
 	// Parse extensions
 	if len(payload) < offset+2 {
-		return 0, nil, fmt.Errorf("HelloRetryRequest missing extensions length")
+		return 0, 0, nil, fmt.Errorf("HelloRetryRequest missing extensions length")
 	}
 
 	extensionsLen := int(payload[offset])<<8 | int(payload[offset+1])
 	offset += 2
 
 	if len(payload) < offset+extensionsLen {
-		return 0, nil, fmt.Errorf("HelloRetryRequest extensions length exceeds payload")
+		return 0, 0, nil, fmt.Errorf("HelloRetryRequest extensions length exceeds payload")
 	}
 
 	extensionsData := payload[offset : offset+extensionsLen]
@@ -1739,27 +1787,22 @@ func (c *Client) parseHelloRetryRequest(hrrData []byte) (selectedGroup uint16, c
 	}
 
 	if selectedGroup == 0 {
-		return 0, nil, fmt.Errorf("HelloRetryRequest missing key_share extension")
+		return 0, 0, nil, fmt.Errorf("HelloRetryRequest missing key_share extension")
 	}
 
-	return selectedGroup, cookie, nil
+	return selectedGroup, cipherSuite, cookie, nil
 }
 
 // updateTranscriptForHRR updates the transcript according to HRR rules
-func (c *Client) updateTranscriptForHRR(hrrData []byte) error {
+func (c *Client) updateTranscriptForHRR(hrrData []byte, cipherSuite uint16) error {
 	// For HelloRetryRequest, the transcript becomes:
 	// Hash(ClientHello1 + HelloRetryRequest) where ClientHello1 is replaced by a synthetic message
 
-	// Create synthetic ClientHello1 message: type(1) + length(3) + Hash(ClientHello1)
-	// We need to hash the original ClientHello first
-	hashFunc := c.getHashForCipherSuite(c.cipherSuite)
+	// Synthetic ClientHello1: type(1) + length(3) + Hash(ClientHello1). Hash comes
+	// from the HRR's suite; defaulting to SHA-256 breaks every SHA-384 suite.
+	hashFunc := c.getHashForCipherSuite(cipherSuite)
 	if hashFunc == nil {
-		// Default to SHA256 if cipher suite not known yet
-		hashFunc = func() []byte {
-			h := sha256.New()
-			h.Write(c.transcript)
-			return h.Sum(nil)
-		}
+		return fmt.Errorf("HelloRetryRequest selected unsupported cipher suite 0x%04x", cipherSuite)
 	}
 
 	clientHelloHash := hashFunc()
@@ -1789,43 +1832,32 @@ func (c *Client) buildClientHelloForHRR(serverName string, selectedGroup uint16,
 		zap.Uint16("selected_group", selectedGroup),
 		zap.Bool("has_cookie", len(cookie) > 0))
 
-	// Generate key pair for the selected group
-	var privateKey *ecdh.PrivateKey
-	var publicKeyBytes []byte
-	var err error
+	// Reuse the key generated for this group in ClientHello1 when present.
+	// CH1 offers all four groups, so the server may legitimately pick any.
+	var stored **ecdh.PrivateKey
+	var curve ecdh.Curve
 
 	switch selectedGroup {
 	case X25519: // 0x001d = 29
-		if c.clientPrivateKeyX25519 != nil {
-			// Reuse existing key if available
-			privateKey = c.clientPrivateKeyX25519
-			publicKeyBytes = privateKey.PublicKey().Bytes()
-		} else {
-			curve := ecdh.X25519()
-			privateKey, err = curve.GenerateKey(rand.Reader)
-			if err != nil {
-				return nil, fmt.Errorf("failed to generate X25519 key: %v", err)
-			}
-			publicKeyBytes = privateKey.PublicKey().Bytes()
-			c.clientPrivateKeyX25519 = privateKey
-		}
+		stored, curve = &c.clientPrivateKeyX25519, ecdh.X25519()
 	case secp256r1: // 0x0017 = 23
-		if c.clientPrivateKeyP256 != nil {
-			// Reuse existing key if available
-			privateKey = c.clientPrivateKeyP256
-			publicKeyBytes = privateKey.PublicKey().Bytes()
-		} else {
-			curve := ecdh.P256()
-			privateKey, err = curve.GenerateKey(rand.Reader)
-			if err != nil {
-				return nil, fmt.Errorf("failed to generate P-256 key: %v", err)
-			}
-			publicKeyBytes = privateKey.PublicKey().Bytes()
-			c.clientPrivateKeyP256 = privateKey
-		}
+		stored, curve = &c.clientPrivateKeyP256, ecdh.P256()
+	case secp384r1: // 0x0018 = 24
+		stored, curve = &c.clientPrivateKeyP384, ecdh.P384()
+	case secp521r1: // 0x0019 = 25
+		stored, curve = &c.clientPrivateKeyP521, ecdh.P521()
 	default:
 		return nil, fmt.Errorf("unsupported key group in HelloRetryRequest: 0x%04x", selectedGroup)
 	}
+
+	if *stored == nil {
+		key, err := curve.GenerateKey(rand.Reader)
+		if err != nil {
+			return nil, fmt.Errorf("failed to generate key for group 0x%04x: %v", selectedGroup, err)
+		}
+		*stored = key
+	}
+	publicKeyBytes := (*stored).PublicKey().Bytes()
 
 	c.selectedKeyGroup = selectedGroup
 
@@ -1833,6 +1865,12 @@ func (c *Client) buildClientHelloForHRR(serverName string, selectedGroup uint16,
 	cipherSuites := c.getCipherSuites()
 	if len(cipherSuites) == 0 {
 		cipherSuites = []uint16{TLS_CHACHA20_POLY1305_SHA256, TLS_AES_256_GCM_SHA384, TLS_AES_128_GCM_SHA256}
+	}
+
+	// RFC 8446 4.1.2: CH2 must mirror CH1's extensions, ALPN included.
+	alpnProtocols := c.Config.NextProtos
+	if len(alpnProtocols) == 0 {
+		alpnProtocols = []string{"http/1.1"}
 	}
 
 	hello := &ClientHelloMsg{
@@ -1864,18 +1902,26 @@ func (c *Client) buildClientHelloForHRR(serverName string, selectedGroup uint16,
 		keyShares: []keyShare{
 			{group: selectedGroup, data: publicKeyBytes},
 		},
-		cookie: cookie, // Include cookie if provided
+		cookie:               cookie, // Include cookie if provided
+		alpnProtocols:        alpnProtocols,
+		extendedMasterSecret: true,
 	}
 
 	// Generate new random values (required for second ClientHello)
 	if _, err := rand.Read(hello.random); err != nil {
 		return nil, fmt.Errorf("failed to generate random bytes: %v", err)
 	}
+	// Keep the cached copy in step with what CH2 actually carries
+	c.clientRandom = make([]byte, len(hello.random))
+	copy(c.clientRandom, hello.random)
+
 	// Use the same session ID as the original ClientHello (RFC 8446 requirement)
 	if len(c.originalSessionId) == 0 {
 		return nil, fmt.Errorf("original session ID not available for HelloRetryRequest")
 	}
 	copy(hello.sessionId, c.originalSessionId)
+
+	c.offeredCipherSuites = cipherSuites
 
 	c.logger.Debug("Generated key share for HRR",
 		zap.Uint16("group", selectedGroup),

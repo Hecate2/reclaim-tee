@@ -8,6 +8,9 @@ import (
 // TLS 1.2 Handshake Messages Implementation
 // Following RFC 5246 and focusing on ECDHE-AEAD cipher suites
 
+// ecCurveTypeNamedCurve is the only ECCurveType we accept (RFC 4492 5.4).
+const ecCurveTypeNamedCurve uint8 = 3
+
 // ServerKeyExchangeMsg represents the TLS 1.2 ServerKeyExchange message
 type ServerKeyExchangeMsg struct {
 	curveType  uint8
@@ -33,7 +36,9 @@ func ParseServerKeyExchange(data []byte) (*ServerKeyExchangeMsg, error) {
 	}
 
 	msg := &ServerKeyExchangeMsg{}
-	payload := data[4:]
+	// Bound by the declared length so a short length field can't let parsing
+	// run into a handshake message coalesced into the same buffer.
+	payload := data[4 : 4+msgLen]
 	offset := 0
 
 	// Parse ECDH server params
@@ -43,6 +48,11 @@ func ParseServerKeyExchange(data []byte) (*ServerKeyExchangeMsg, error) {
 
 	msg.curveType = payload[offset]
 	offset++
+
+	// RFC 4492 5.4: named_curve is the only curve_type we parse this way.
+	if msg.curveType != ecCurveTypeNamedCurve {
+		return nil, fmt.Errorf("ServerKeyExchange: unsupported curve_type %d", msg.curveType)
+	}
 
 	msg.namedCurve = binary.BigEndian.Uint16(payload[offset : offset+2])
 	offset += 2
@@ -164,6 +174,11 @@ func ParseServerHelloDone(data []byte) (*ServerHelloDoneMsg, error) {
 
 	if HandshakeType(data[0]) != typeServerHelloDone {
 		return nil, fmt.Errorf("invalid message type")
+	}
+
+	msgLen := uint32(data[1])<<16 | uint32(data[2])<<8 | uint32(data[3])
+	if msgLen != 0 {
+		return nil, fmt.Errorf("ServerHelloDone must have an empty body, got %d bytes", msgLen)
 	}
 
 	return &ServerHelloDoneMsg{}, nil

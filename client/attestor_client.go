@@ -29,7 +29,6 @@ type AttestorClient struct {
 	privateKey *ecdsa.PrivateKey
 	address    shared.Address
 	logger     *shared.Logger
-	mu         sync.Mutex
 	connOnce   sync.Once // Ensure connection happens only once
 	// authRequest is forwarded to the attestor in the InitRequest when non-nil.
 	authRequest *teeproto.AuthenticationRequest
@@ -165,112 +164,6 @@ type ClaimTeeBundleParams struct {
 	Provider   string                        // Provider name (e.g., "http")
 	Parameters *providers.HTTPProviderParams // Provider-specific parameters
 	Context    string                        // Optional context (JSON string)
-}
-
-// logAttestorViewOfRedactedResponse reconstructs what the attestor will see as the redacted response
-func (ac *AttestorClient) logAttestorViewOfRedactedResponse(bundle *teeproto.VerificationBundle) {
-	ac.logger.Info("=== ATTESTOR VIEW: Reconstructing redacted response ===")
-
-	// Extract TEE_K payload (contains keystream and redaction ranges)
-	if bundle.TeekSigned == nil {
-		ac.logger.Error("No TEE_K signed message in bundle")
-		return
-	}
-
-	var kPayload teeproto.KOutputPayload
-	if err := proto.Unmarshal(bundle.TeekSigned.GetBody(), &kPayload); err != nil {
-		ac.logger.Error("Failed to unmarshal TEE_K payload", zap.Error(err))
-		return
-	}
-
-	keystream := kPayload.GetConsolidatedResponseKeystream()
-	redactionRanges := kPayload.GetResponseRedactionRanges()
-
-	ac.logger.Info("TEE_K data extracted",
-		zap.Int("keystream_bytes", len(keystream)),
-		zap.Int("redaction_ranges", len(redactionRanges)))
-
-	// Extract TEE_T payload (contains ciphertext)
-	if bundle.TeetSigned == nil {
-		ac.logger.Error("No TEE_T signed message in bundle")
-		return
-	}
-
-	var tPayload teeproto.TOutputPayload
-	if err := proto.Unmarshal(bundle.TeetSigned.GetBody(), &tPayload); err != nil {
-		ac.logger.Error("Failed to unmarshal TEE_T payload", zap.Error(err))
-		return
-	}
-
-	ciphertext := tPayload.GetConsolidatedResponseCiphertext()
-	ac.logger.Info("TEE_T data extracted",
-		zap.Int("ciphertext_bytes", len(ciphertext)))
-
-	// Check length match
-	if len(keystream) != len(ciphertext) {
-		ac.logger.Error("Keystream and ciphertext length mismatch",
-			zap.Int("keystream_len", len(keystream)),
-			zap.Int("ciphertext_len", len(ciphertext)))
-		return
-	}
-
-	// Step 1: XOR to get plaintext
-	plaintext := make([]byte, len(ciphertext))
-	for i := range ciphertext {
-		plaintext[i] = ciphertext[i] ^ keystream[i]
-	}
-
-	ac.logger.Info("Plaintext reconstructed via XOR",
-		zap.Int("plaintext_bytes", len(plaintext)))
-
-	// Step 2: Apply redactions (replace with asterisks)
-	redactedResponse := make([]byte, len(plaintext))
-	copy(redactedResponse, plaintext)
-
-	totalRedacted := 0
-	for _, r := range redactionRanges {
-		start := int(r.Start)
-		length := int(r.Length)
-		end := start + length
-
-		if end > len(redactedResponse) {
-			ac.logger.Warn("Redaction range exceeds response length",
-				zap.Int("start", start),
-				zap.Int("length", length),
-				zap.Int("end", end),
-				zap.Int("response_len", len(redactedResponse)))
-			end = len(redactedResponse)
-			length = end - start
-		}
-
-		for i := start; i < end; i++ {
-			redactedResponse[i] = '*'
-		}
-		totalRedacted += length
-	}
-
-	// totalRevealed := len(redactedResponse) - totalRedacted
-
-	// Debug logging (commented out for production)
-	// ac.logger.Info("=== ATTESTOR REDACTION STATISTICS ===",
-	// 	zap.Int("total_bytes", len(redactedResponse)),
-	// 	zap.Int("redacted_bytes", totalRedacted),
-	// 	zap.Int("revealed_bytes", totalRevealed),
-	// 	zap.Int("num_ranges", len(redactionRanges)))
-
-	// Log each range
-	// for i, r := range redactionRanges {
-	// 	ac.logger.Info("Attestor Redaction Range",
-	// 		zap.Int("index", i),
-	// 		zap.Int32("start", r.Start),
-	// 		zap.Int32("length", r.Length),
-	// 		zap.Int32("end", r.Start+r.Length))
-	// }
-
-	// Log the full redacted response as attestor sees it
-	// ac.logger.Info("=== ATTESTOR VIEW: FULL REDACTED RESPONSE (asterisks show redacted parts) ===")
-	// ac.logger.Info(string(redactedResponse))
-	// ac.logger.Info("=== END ATTESTOR VIEW ===")
 }
 
 // SubmitTeeBundle submits a TEE verification bundle to attestor-core for claim validation

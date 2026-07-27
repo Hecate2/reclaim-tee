@@ -40,7 +40,6 @@ type cidrEntry struct {
 var (
 	mu      sync.RWMutex
 	entries []cidrEntry
-	loaded  bool
 )
 
 // Load fetches the AWS + GCP IP-range lists and builds the CIDR->region index.
@@ -61,7 +60,6 @@ func Load(ctx context.Context, client *http.Client) error {
 	})
 	mu.Lock()
 	entries = all
-	loaded = true
 	mu.Unlock()
 	return nil
 }

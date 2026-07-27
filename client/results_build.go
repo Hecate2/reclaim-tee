@@ -1,8 +1,6 @@
 package client
 
 import (
-	"bytes"
-	"fmt"
 	"time"
 
 	teeproto "github.com/reclaimprotocol/reclaim-tee/proto"
@@ -87,40 +85,4 @@ func (c *Client) buildTranscriptValidationResults() *TranscriptValidationResults
 	teekValid := c.teekSignedMessage != nil
 	teetValid := c.teetSignedMessage != nil
 	return &TranscriptValidationResults{ClientCapturedData: 0, ClientCapturedBytes: 0, TEEKValidation: TranscriptDataValidation{DataReceived: 1, DataMatched: 1, ValidationPassed: teekValid}, TEETValidation: TranscriptDataValidation{DataReceived: 1, DataMatched: 1, ValidationPassed: teetValid}, OverallValid: bothReceived && teekValid && teetValid, Summary: "Transcript validation based on SignedMessage reception and verification"}
-}
-
-func (c *Client) buildTEEValidationDetails(source string, data [][]byte) TranscriptDataValidation {
-	if data == nil {
-		return TranscriptDataValidation{DataReceived: 0, DataMatched: 0, ValidationPassed: false, DataDetails: []DataValidationDetail{}}
-	}
-	c.capturedTrafficMu.Lock()
-	captured := append([][]byte(nil), c.capturedTraffic...)
-	c.capturedTrafficMu.Unlock()
-	var details []DataValidationDetail
-	dataMatched := 0
-	for i, dataEntry := range data {
-		var dataType string
-		if len(dataEntry) > 0 {
-			dataType = fmt.Sprintf("0x%02x", dataEntry[0])
-		} else {
-			dataType = "empty"
-		}
-		matchedCapture := false
-		captureIndex := -1
-		for j, capturedChunk := range captured {
-			if len(dataEntry) == len(capturedChunk) && bytes.Equal(dataEntry, capturedChunk) {
-				matchedCapture = true
-				captureIndex = j
-				dataMatched++
-				break
-			}
-		}
-		detail := DataValidationDetail{DataIndex: i, DataSize: len(dataEntry), DataType: dataType, MatchedCapture: matchedCapture}
-		if matchedCapture {
-			detail.CaptureIndex = captureIndex
-		}
-		details = append(details, detail)
-	}
-	requiredMatches := len(data)
-	return TranscriptDataValidation{DataReceived: len(data), DataMatched: dataMatched, ValidationPassed: dataMatched == requiredMatches, DataDetails: details}
 }

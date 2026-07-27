@@ -490,29 +490,6 @@ func TestSerializationEmpty(t *testing.T) {
 	})
 }
 
-// TestBigIntTo32Bytes tests the bigIntTo32Bytes helper
-func TestBigIntTo32Bytes(t *testing.T) {
-	testCases := []struct {
-		name     string
-		input    *big.Int
-		expected int
-	}{
-		{"nil", nil, 32},
-		{"zero", big.NewInt(0), 32},
-		{"small", big.NewInt(255), 32},
-		{"large", new(big.Int).Lsh(big.NewInt(1), 256), 32}, // 2^256
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			result := bigIntTo32Bytes(tc.input)
-			if len(result) != tc.expected {
-				t.Errorf("expected length %d, got %d", tc.expected, len(result))
-			}
-		})
-	}
-}
-
 // TestSerializationBytesEqual tests that serialization is deterministic
 func TestSerializationBytesEqual(t *testing.T) {
 	masks := []DualMask{

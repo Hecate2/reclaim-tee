@@ -9,7 +9,19 @@ import (
 var (
 	customRootPool *x509.CertPool
 	rootPoolMu     sync.RWMutex
+
+	sysPoolOnce sync.Once
+	sysPool     *x509.CertPool
 )
+
+// Loaded once; SystemCertPool clones per call. Error dropped on purpose: a nil
+// pool means "system default". Shared pointer, so treat it as read-only.
+func systemRootPool() *x509.CertPool {
+	sysPoolOnce.Do(func() {
+		sysPool, _ = x509.SystemCertPool()
+	})
+	return sysPool
+}
 
 // SetRootCAPool sets a custom root CA pool to use globally.
 func SetRootCAPool(pool *x509.CertPool) {
@@ -28,9 +40,8 @@ func GetRootCAPool() *x509.CertPool {
 		return pool
 	}
 
-	// Fall back to system pool
-	sysPool, _ := x509.SystemCertPool()
-	return sysPool
+	// Fall back to system pool; nil makes crypto/tls use its own default
+	return systemRootPool()
 }
 
 // IsCustomRootCAPool returns true if a custom root CA pool is set.

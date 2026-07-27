@@ -309,75 +309,6 @@ func (c *Client) handleTEETMessages() {
 	}
 }
 
-// sendMessage sends a message to TEE_K
-func (c *Client) sendMessage(msg *shared.Message) error {
-	c.wsWriteMutex.Lock()
-	defer c.wsWriteMutex.Unlock()
-
-	conn := c.wsConn
-
-	if conn == nil {
-		return fmt.Errorf("no websocket connection")
-	}
-
-	// Add session ID if available and not already set
-	c.sessionMutex.RLock()
-	sessionID := c.sessionID
-	c.sessionMutex.RUnlock()
-
-	if sessionID != "" && msg.SessionID == "" {
-		msg.SessionID = sessionID
-	}
-
-	// Build protobuf envelope directly
-	env := &teeproto.Envelope{SessionId: msg.SessionID, TimestampMs: time.Now().UnixMilli()}
-	switch msg.Type {
-	case shared.MsgRequestConnection:
-		if d, ok := msg.Data.(shared.RequestConnectionData); ok {
-			env.Payload = &teeproto.Envelope_RequestConnection{RequestConnection: &teeproto.RequestConnection{
-				Hostname:         d.Hostname,
-				Port:             int32(d.Port),
-				Sni:              d.SNI,
-				Alpn:             d.ALPN,
-				ForceTlsVersion:  d.ForceTLSVersion,
-				ForceCipherSuite: d.ForceCipherSuite,
-			}}
-		}
-	case shared.MsgTCPReady:
-		if d, ok := msg.Data.(shared.TCPReadyData); ok {
-			env.Payload = &teeproto.Envelope_TcpReady{TcpReady: &teeproto.TCPReady{Success: d.Success}}
-		}
-	case shared.MsgTCPData, shared.MsgSendTCPData:
-		if d, ok := msg.Data.(shared.TCPData); ok {
-			env.Payload = &teeproto.Envelope_TcpData{TcpData: &teeproto.TCPData{Data: d.Data}}
-		}
-	case shared.MsgRedactedRequest:
-		if d, ok := msg.Data.(shared.RedactedRequestData); ok {
-			// Convert ranges
-			ranges := make([]*teeproto.RequestRedactionRange, 0, len(d.RedactionRanges))
-			for _, r := range d.RedactionRanges {
-				ranges = append(ranges, &teeproto.RequestRedactionRange{Start: int32(r.Start), Length: int32(r.Length), Type: r.Type})
-			}
-			env.Payload = &teeproto.Envelope_RedactedRequest{RedactedRequest: &teeproto.RedactedRequest{
-				RedactedRequest: d.RedactedRequest,
-				RedactionRanges: ranges,
-			}}
-		}
-	case shared.MsgError:
-		if d, ok := msg.Data.(shared.ErrorData); ok {
-			env.Payload = &teeproto.Envelope_Error{Error: &teeproto.ErrorData{Message: d.Message}}
-		}
-	default:
-		// Unknown/unsupported send type
-	}
-
-	data, err := proto.Marshal(env)
-	if err != nil {
-		return err
-	}
-	return shared.WriteWSBinary(conn, data)
-}
-
 // sendEnvelope sends a protobuf envelope directly to TEE_K
 func (c *Client) sendEnvelope(env *teeproto.Envelope) error {
 	c.wsWriteMutex.Lock()
@@ -402,11 +333,6 @@ func (c *Client) sendEnvelope(env *teeproto.Envelope) error {
 		return err
 	}
 	return shared.WriteWSBinary(conn, data)
-}
-
-// isEnclaveMode checks if the client is running in enclave mode
-func (c *Client) isEnclaveMode() bool {
-	return c.clientMode == ModeEnclave
 }
 
 // sendEnvelopeToTEET sends a protobuf envelope directly to TEE_T
@@ -436,22 +362,6 @@ func (c *Client) sendEnvelopeToTEET(env *teeproto.Envelope) error {
 		return err
 	}
 	return nil
-}
-
-// sendError sends an error message to TEE_K (fail-fast implementation)
-func (c *Client) sendError(errMsg string) {
-	env := &teeproto.Envelope{
-		TimestampMs: time.Now().UnixMilli(),
-		Payload: &teeproto.Envelope_Error{
-			Error: &teeproto.ErrorData{Message: errMsg},
-		},
-	}
-
-	// sendEnvelope already has mutex protection, so no need to lock here
-	if err := c.sendEnvelope(env); err != nil {
-		c.terminateConnectionWithError("Failed to send error message", err)
-		return
-	}
 }
 
 // sendPendingConnectionRequest sends the stored connection request with the session ID

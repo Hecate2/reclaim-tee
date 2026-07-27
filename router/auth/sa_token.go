@@ -97,6 +97,13 @@ type jwksCache struct {
 	fetched time.Time
 }
 
+// Google's JWKS is a few KB; these bound what a compromised or misbehaving
+// endpoint can make the router allocate or accept as a verification key.
+const (
+	maxJWKSBytes      = 1 << 20
+	minRSAModulusBits = 2048
+)
+
 func NewGoogleJWKSFetcher() *GoogleJWKSFetcher {
 	return &GoogleJWKSFetcher{
 		url:        "https://www.googleapis.com/oauth2/v3/certs",
@@ -162,7 +169,7 @@ func (g *GoogleJWKSFetcher) fetchAndCache(ctx context.Context) error {
 	var doc struct {
 		Keys []rawJWK `json:"keys"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&doc); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxJWKSBytes)).Decode(&doc); err != nil {
 		return fmt.Errorf("decode jwks: %w", err)
 	}
 	keys := make(map[string]any, len(doc.Keys))
@@ -205,5 +212,12 @@ func (j rawJWK) toKey() (any, error) {
 	for _, b := range eBytes {
 		e = e<<8 + int(b)
 	}
-	return &rsa.PublicKey{N: new(big.Int).SetBytes(nBytes), E: e}, nil
+	key := &rsa.PublicKey{N: new(big.Int).SetBytes(nBytes), E: e}
+	if key.N.BitLen() < minRSAModulusBits {
+		return nil, fmt.Errorf("RSA modulus of %d bits is below the %d-bit floor", key.N.BitLen(), minRSAModulusBits)
+	}
+	if key.E < 3 || key.E%2 == 0 {
+		return nil, fmt.Errorf("invalid RSA exponent %d", key.E)
+	}
+	return key, nil
 }

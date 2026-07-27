@@ -281,13 +281,20 @@ func ParseCipherSuite(cipherSuite string) (uint16, error) {
 		return 0, fmt.Errorf("empty cipher suite")
 	}
 
-	// Try parsing as hex first (e.g., "0x1301" or "1301")
+	// Try parsing as hex first (e.g., "0x1301" or "1301"). A well-formed hex
+	// value still has to name a suite we actually implement.
 	cipherSuite = strings.TrimSpace(cipherSuite)
 	if strings.HasPrefix(strings.ToLower(cipherSuite), "0x") {
 		if val, err := strconv.ParseUint(cipherSuite[2:], 16, 16); err == nil {
+			if GetCipherSuiteInfo(uint16(val)) == nil {
+				return 0, fmt.Errorf("unknown cipher suite '%s'", cipherSuite)
+			}
 			return uint16(val), nil
 		}
 	} else if val, err := strconv.ParseUint(cipherSuite, 16, 16); err == nil {
+		if GetCipherSuiteInfo(uint16(val)) == nil {
+			return 0, fmt.Errorf("unknown cipher suite '%s'", cipherSuite)
+		}
 		return uint16(val), nil
 	}
 
@@ -439,27 +446,19 @@ const (
 )
 
 type ClientHelloMsg struct {
-	vers                             uint16
-	random                           []byte
-	sessionId                        []byte
-	cipherSuites                     []uint16
-	compressionMethods               []uint8
-	serverName                       string
-	supportedCurves                  []uint16
-	supportedPoints                  []uint8
-	ticketSupported                  bool
-	sessionTicket                    []byte
-	supportedSignatureAlgorithms     []uint16
-	supportedSignatureAlgorithmsCert []uint16
-	secureRenegotiationSupported     bool
-	secureRenegotiation              []byte
-	alpnProtocols                    []string
-	scts                             bool
-	supportedVersions                []uint16
-	cookie                           []byte
-	pskModes                         []uint8
-	keyShares                        []keyShare
-	extendedMasterSecret             bool
+	vers                         uint16
+	random                       []byte
+	sessionId                    []byte
+	cipherSuites                 []uint16
+	compressionMethods           []uint8
+	serverName                   string
+	supportedCurves              []uint16
+	supportedSignatureAlgorithms []uint16
+	alpnProtocols                []string
+	supportedVersions            []uint16
+	cookie                       []byte
+	keyShares                    []keyShare
+	extendedMasterSecret         bool
 }
 
 func (m *ClientHelloMsg) Marshal() []byte {

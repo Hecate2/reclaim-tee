@@ -64,8 +64,18 @@ func TestRecordProcessingStateRace(t *testing.T) {
 
 	var wg sync.WaitGroup
 	wg.Add(2)
-	go func() { defer wg.Done(); for _, r := range aRecs { a.processTLSRecordFromData(r) } }()
-	go func() { defer wg.Done(); for _, r := range bRecs { b.processTLSRecordFromData(r) } }()
+	go func() {
+		defer wg.Done()
+		for _, r := range aRecs {
+			a.processTLSRecordFromData(r)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for _, r := range bRecs {
+			b.processTLSRecordFromData(r)
+		}
+	}()
 	wg.Wait()
 
 	assertPure(t, "A", a, 'A', n)

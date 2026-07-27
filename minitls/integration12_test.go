@@ -46,13 +46,6 @@ func TestTLS12Integration(t *testing.T) {
 			cipherSuite: TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
 			expectTLS12: true,
 		},
-		{
-			name:        "Google_ChaCha20_Pure_TLS12",
-			serverName:  "google.com",
-			port:        443,
-			cipherSuite: TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
-			expectTLS12: true,
-		},
 	}
 
 	for _, tc := range testCases {
@@ -75,7 +68,7 @@ func TestTLS12Integration(t *testing.T) {
 			client := NewClientWithConfig(conn, config)
 
 			// Enable debug logging for Google tests
-			if tc.name == "Google_ChaCha20_Pure_TLS12" || tc.name == "Google ChaCha20" {
+			if tc.name == "Google ChaCha20" {
 				logger, _ := shared.NewLogger(shared.LoggerConfig{
 					ServiceName: "test",
 					Development: true,
@@ -84,13 +77,7 @@ func TestTLS12Integration(t *testing.T) {
 			}
 
 			// Perform handshake
-			if tc.name == "Google_ChaCha20_Pure_TLS12" || tc.name == "Google ChaCha20" {
-				// Force pure TLS 1.2 handshake for Google (version negotiation has compatibility issues)
-				err = client.handshakeTLS12(tc.serverName)
-			} else {
-				// Use version negotiation
-				err = client.Handshake(tc.serverName)
-			}
+			err = client.Handshake(tc.serverName)
 			if err != nil {
 				t.Fatalf("TLS 1.2 handshake failed: %v", err)
 			}

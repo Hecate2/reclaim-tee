@@ -150,18 +150,13 @@ type Client struct {
 	attestorAuthRequest *teeproto.AuthenticationRequest // Optional auth request forwarded to the attestor
 
 	// Phase 4: Response handling
-	responseSeqNum       uint64 // TLS sequence number for response AEAD
-	firstApplicationData bool   // Track if this is the first ApplicationData record
-	requestSeqNum        uint64 // TLS sequence number for request AEAD (starts at 1 after handshake)
-	fragmentsReceived    int    // Number of request fragments received from TEE_T
-	expectedFragments    int    // Total number of request fragments expected (set by first fragment)
+	responseSeqNum uint64 // TLS sequence number for response AEAD
+	requestSeqNum  uint64 // TLS sequence number for request AEAD (starts at 1 after handshake)
 
 	// Protocol completion signaling
 	completionChan chan error // Signals when protocol is complete (nil = success, non-nil = error)
 
 	completionOnce sync.Once // Ensures completion channel is only closed once
-
-	completionFlags int64 // Atomic bit flags for completion state tracking
 
 	protocolPhase          ProtocolPhase // Current protocol phase
 	teeKTranscriptReceived bool          // TEE_K transcript received
@@ -219,7 +214,6 @@ type Client struct {
 	consolidatedResponseCiphertext []byte // ciphertext
 
 	redactedRequestPlain    []byte // R_red plaintext sent to TEE_K
-	fullRedactedResponse    []byte // final redacted HTTP response (concatenated)
 	expectedRedactedStreams int    // expected number of redacted streams from response sequences
 
 	// Request data from libreclaim library
@@ -250,11 +244,10 @@ func NewClient(teekURL string) *Client {
 	logger := GetLogger("client", false)
 
 	return &Client{
-		logger:          logger,
-		teekURL:         teekURL,
-		teetURL:         "wss://tee-t-gcp.reclaimprotocol.org/ws", // Default TEE_T URL (enclave mode)
-		completionChan:  make(chan error, 1),                      // buffered to avoid blocking
-		completionFlags: 0,
+		logger:         logger,
+		teekURL:        teekURL,
+		teetURL:        "wss://tee-t-gcp.reclaimprotocol.org/ws", // Default TEE_T URL (enclave mode)
+		completionChan: make(chan error, 1),                      // buffered to avoid blocking
 
 		protocolPhase:          PhaseHandshaking,
 		teeKTranscriptReceived: false,
@@ -394,51 +387,6 @@ func (c *Client) RequestHTTP() error {
 	return nil
 }
 
-// setCompletionFlag atomically sets a completion flag
-func (c *Client) setCompletionFlag(flag int64) {
-	atomic.StoreInt64(&c.completionFlags, atomic.LoadInt64(&c.completionFlags)|flag)
-}
-
-// hasCompletionFlag atomically checks if a completion flag is set
-func (c *Client) hasCompletionFlag(flag int64) bool {
-	return atomic.LoadInt64(&c.completionFlags)&flag != 0
-}
-
-// setCompletionFlags atomically sets multiple completion flags
-func (c *Client) setCompletionFlags(flags int64) {
-	atomic.StoreInt64(&c.completionFlags, atomic.LoadInt64(&c.completionFlags)|flags)
-}
-
-// hasAllCompletionFlags atomically checks if all specified completion flags are set
-func (c *Client) hasAllCompletionFlags(flags int64) bool {
-	return atomic.LoadInt64(&c.completionFlags)&flags == flags
-}
-
-// getBatchState returns current batch state based on protocol phase (thread-safe)
-func (c *Client) getBatchState() (collectionComplete, sentToTEET, decryptionReceived bool) {
-	c.protocolStateMutex.RLock()
-	defer c.protocolStateMutex.RUnlock()
-
-	// Derive batch state from protocol phase
-	collectionComplete = c.protocolPhase >= PhaseReceivingDecryption
-	sentToTEET = c.protocolPhase >= PhaseReceivingDecryption
-	decryptionReceived = c.protocolPhase >= PhaseSendingRedaction
-	return
-}
-
-// isBatchProcessingComplete checks if all batch operations are complete
-func (c *Client) isBatchProcessingComplete() bool {
-	collection, sent, decryption := c.getBatchState()
-	return collection && sent && decryption
-}
-
-// getCurrentPhase returns the current protocol phase (thread-safe)
-func (c *Client) getCurrentPhase() ProtocolPhase {
-	c.protocolStateMutex.RLock()
-	defer c.protocolStateMutex.RUnlock()
-	return c.protocolPhase
-}
-
 // advanceToPhase transitions to a new protocol phase (thread-safe)
 func (c *Client) advanceToPhase(newPhase ProtocolPhase) {
 	c.protocolStateMutex.Lock()
@@ -499,23 +447,6 @@ func (c *Client) checkForProtocolCompletion() {
 	} else {
 		c.logger.Info("Waiting for both transcripts...")
 	}
-}
-
-// getProtocolState returns current phase and transcript count (thread-safe)
-func (c *Client) getProtocolState() (ProtocolPhase, int) {
-	c.protocolStateMutex.RLock()
-	defer c.protocolStateMutex.RUnlock()
-
-	// Convert boolean flags to count for backward compatibility
-	count := 0
-	if c.teeKTranscriptReceived {
-		count++
-	}
-	if c.teeTTranscriptReceived {
-		count++
-	}
-
-	return c.protocolPhase, count
 }
 
 // getResponseRedactions generates automatic response redactions using provider params

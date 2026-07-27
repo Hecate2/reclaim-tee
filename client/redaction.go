@@ -307,35 +307,6 @@ func (c *Client) logRedactionRanges(context string, ranges []shared.ResponseReda
 	}
 }
 
-// applyRedactionRangesToContent applies redaction ranges to a content segment
-func (c *Client) applyRedactionRangesToContent(content []byte, baseOffset int, ranges []shared.ResponseRedactionRange) []byte {
-	result := make([]byte, len(content))
-	copy(result, content)
-
-	// Apply each redaction range that overlaps with this content
-	for _, r := range ranges {
-		rangeStart := r.Start
-		rangeEnd := r.Start + r.Length
-		contentStart := baseOffset
-		contentEnd := baseOffset + len(content)
-
-		// Check for overlap
-		overlapStart := max(rangeStart, contentStart)
-		overlapEnd := min(rangeEnd, contentEnd)
-
-		if overlapStart < overlapEnd {
-			// Apply redaction (replace with asterisks)
-			localStart := overlapStart - contentStart
-			localEnd := overlapEnd - contentStart
-			for i := localStart; i < localEnd; i++ {
-				result[i] = '*'
-			}
-		}
-	}
-
-	return result
-}
-
 // logRedactedResponseWithAsterisks reconstructs the full response and logs it with redacted parts as asterisks
 func (c *Client) logRedactedResponseWithAsterisks(ranges []shared.ResponseRedactionRange) {
 	// Debug logging disabled for production - uncomment if needed for debugging

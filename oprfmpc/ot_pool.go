@@ -2,11 +2,9 @@
 package oprfmpc
 
 import (
-	"crypto/elliptic"
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"io"
 	"math/big"
 	"sync"
 
@@ -18,6 +16,17 @@ import (
 // (0x02 even / 0x03 odd Y) + 32-byte big-endian X. Half the raw X||Y size;
 // Y is recovered on decode from the curve equation.
 const compressedPointLen = 33
+
+// Both halves pin elliptic.P256(), so any other wire value means the peer
+// disagrees about the group and its points must not be decoded.
+const otCurveName = "P-256"
+
+func checkOTCurveName(name string) error {
+	if name != otCurveName {
+		return fmt.Errorf("unexpected OT curve %q, want %q", name, otCurveName)
+	}
+	return nil
+}
 
 // compressPoint encodes (x, y) as a 33-byte SEC1 compressed P-256 point.
 func compressPoint(x, y *big.Int) []byte {
@@ -83,31 +92,6 @@ func NewOTPool(capacity int) *OTPool {
 		totalCount: 0,
 		usedCount:  0,
 	}
-}
-
-// GenerateEntries generates new OT entries and adds them to the pool
-// This should be called during precomputation phase
-func (p *OTPool) GenerateEntries(rng io.Reader, curve elliptic.Curve, count int) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	startIdx := p.totalCount
-	for i := range count {
-		setup, err := ot.GenerateCOSenderSetup(rng, curve)
-		if err != nil {
-			return fmt.Errorf("failed to generate OT setup at index %d: %w", startIdx+i, err)
-		}
-
-		entry := &OTPoolEntry{
-			SenderSetup: setup,
-			Index:       startIdx + i,
-			Used:        false,
-		}
-		p.entries = append(p.entries, entry)
-	}
-
-	p.totalCount += count
-	return nil
 }
 
 // Reserve reserves count OT entries from the pool
@@ -375,6 +359,10 @@ func DeserializeBulkCOSenderSetup(data []byte) ([]SenderPublicSetup, error) {
 		curveName := string(data[offset : offset+int(curveNameLen)])
 		offset += int(curveNameLen)
 
+		if err := checkOTCurveName(curveName); err != nil {
+			return nil, fmt.Errorf("entry %d: %w", i, err)
+		}
+
 		ax, ay, err := decompressPoint(data[offset : offset+compressedPointLen])
 		if err != nil {
 			return nil, fmt.Errorf("entry %d: %w", i, err)
@@ -443,6 +431,10 @@ func DeserializeBulkOTReceiverData(data []byte) (*OTReceiverData, error) {
 
 	curveName := string(data[offset : offset+int(curveNameLen)])
 	offset += int(curveNameLen)
+
+	if err := checkOTCurveName(curveName); err != nil {
+		return nil, err
+	}
 
 	// A point (compressed)
 	ax, ay, err := decompressPoint(data[offset : offset+compressedPointLen])
@@ -547,21 +539,4 @@ func DeserializeDualMasks(data []byte) ([]DualMask, error) {
 	}
 
 	return masks, nil
-}
-
-// bigIntTo32Bytes converts a big.Int to exactly 32 bytes (zero-padded)
-// If the number is larger than 32 bytes, it truncates to the least significant 32 bytes
-func bigIntTo32Bytes(n *big.Int) []byte {
-	buf := make([]byte, 32)
-	if n != nil {
-		bytes := n.Bytes()
-		if len(bytes) > 32 {
-			// Truncate to least significant 32 bytes
-			copy(buf, bytes[len(bytes)-32:])
-		} else {
-			// Zero-pad to 32 bytes
-			copy(buf[32-len(bytes):], bytes)
-		}
-	}
-	return buf
 }
