@@ -54,7 +54,7 @@ func kmsgTail(match ...string) []string {
 	defer syscall.Close(fd)
 	buf := make([]byte, 8192)
 	var hits []string
-	for i := 0; i < 100000; i++ {
+	for range 100000 {
 		n, rerr := syscall.Read(fd, buf)
 		if errors.Is(rerr, syscall.EPIPE) {
 			continue
