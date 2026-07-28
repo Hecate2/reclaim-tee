@@ -97,7 +97,7 @@ func (t *TEET) checkFinishedCondition(sessionID string) error {
 		}
 
 		if len(ciphertext) == 0 {
-			t.logger.WarnIf("No consolidated response ciphertext to sign for session",
+			t.logger.Warn("No consolidated response ciphertext to sign for session",
 				zap.String("session_id", sessionID))
 			// This is not an error - just means no response data to sign
 			return nil

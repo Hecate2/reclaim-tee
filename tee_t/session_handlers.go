@@ -807,7 +807,7 @@ func (t *TEET) addSingleResponseToTranscript(sessionID string, encryptedResp *sh
 	}
 	recordLength := len(payload)
 	if recordLength > 0xFFFF {
-		t.logger.WarnIf("TLS record too large, truncating length",
+		t.logger.Warn("TLS record too large, truncating length",
 			zap.String("session_id", sessionID),
 			zap.Int("original_length", recordLength),
 			zap.Int("truncated_length", 0xFFFF))

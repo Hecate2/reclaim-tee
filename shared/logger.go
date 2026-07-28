@@ -24,7 +24,6 @@ type LoggerConfig struct {
 type Logger struct {
 	*zap.Logger
 	serviceName string
-	enclaveMode bool
 }
 
 // gcpCore implements zapcore.Core and writes to GCP Cloud Logging
@@ -160,6 +159,10 @@ func NewLogger(config LoggerConfig) (*Logger, error) {
 	var err error
 	level := logLevelFromEnv()
 
+	// Reported platform label and cloud-sink gate: any attested TEE, since
+	// config.EnclaveMode alone only covers Confidential Space.
+	attested := config.EnclaveMode || IsSEVSNPMode()
+
 	switch {
 	case IsAWSSEVSNP():
 		// AWS SEV-SNP: ship to CloudWatch Logs via the instance IAM role.
@@ -169,12 +172,12 @@ func NewLogger(config LoggerConfig) (*Logger, error) {
 	default:
 		// GCP Cloud Logging for CS enclaves AND SEV-SNP-on-GCP, when a project
 		// ID is set (VM needs an SA with roles/logging.logWriter + cloud scope).
-		if pid := gcpProjectID(); pid != "" && (config.EnclaveMode || IsSEVSNPMode()) {
+		if pid := gcpProjectID(); pid != "" && attested {
 			if client, cerr := logging.NewClient(context.Background(), pid); cerr == nil {
 				zapLogger = zap.New(&gcpCore{
 					logger:      client.Logger(config.ServiceName),
 					serviceName: config.ServiceName,
-					enclaveMode: config.EnclaveMode,
+					enclaveMode: attested,
 					level:       level,
 				})
 			}
@@ -199,19 +202,17 @@ func NewLogger(config LoggerConfig) (*Logger, error) {
 	// Add service-specific fields
 	zapLogger = zapLogger.With(
 		zap.String("service", config.ServiceName),
-		zap.Bool("enclave_mode", config.EnclaveMode),
+		zap.Bool("enclave_mode", attested),
 	)
 
 	return &Logger{
 		Logger:      zapLogger,
 		serviceName: config.ServiceName,
-		enclaveMode: config.EnclaveMode,
 	}, nil
 }
 
 // NewLoggerFromEnv creates a logger using environment variables. EnclaveMode
-// is auto-detected from the presence of the GCP Confidential Space launcher
-// socket (same signal as RA-TLS attestation generation).
+// is the Confidential Space signal; SEV-SNP is detected separately in NewLogger.
 func NewLoggerFromEnv(serviceName string) (*Logger, error) {
 	config := LoggerConfig{
 		ServiceName: serviceName,
@@ -288,13 +289,6 @@ func (l *Logger) SessionTerminated(sessionID string, reason string, fields ...za
 		zap.Bool("session_terminated", true),
 	}
 	l.Logger.Error("Session terminated", append(baseFields, fields...)...)
-}
-
-// Conditional warning logging - respects enclave mode settings
-func (l *Logger) WarnIf(msg string, fields ...zap.Field) {
-	if !l.enclaveMode {
-		l.Logger.Warn(msg, fields...)
-	}
 }
 
 // Sync flushes any buffered log entries

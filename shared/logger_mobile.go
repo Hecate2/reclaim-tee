@@ -20,7 +20,6 @@ type LoggerConfig struct {
 type Logger struct {
 	*zap.Logger
 	serviceName string
-	enclaveMode bool
 }
 
 // NewLogger creates a new logger instance (mobile version - console only)
@@ -57,7 +56,6 @@ func NewLogger(config LoggerConfig) (*Logger, error) {
 	return &Logger{
 		Logger:      zapLogger,
 		serviceName: config.ServiceName,
-		enclaveMode: config.EnclaveMode,
 	}, nil
 }
 
@@ -118,13 +116,6 @@ func (l *Logger) SessionTerminated(sessionID string, reason string, fields ...za
 		zap.Bool("session_terminated", true),
 	}
 	l.Logger.Error("Session terminated", append(baseFields, fields...)...)
-}
-
-// Conditional warning logging - respects enclave mode settings
-func (l *Logger) WarnIf(msg string, fields ...zap.Field) {
-	if !l.enclaveMode {
-		l.Logger.Warn(msg, fields...)
-	}
 }
 
 // Sync flushes any buffered log entries

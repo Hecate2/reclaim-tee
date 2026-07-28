@@ -120,7 +120,7 @@ func (t *TEET) getCachedAttestation(sessionID string) (*teeproto.AttestationRepo
 		return cached, nil
 	}
 
-	t.logger.WarnIf("Cached attestation expired or missing, coalescing refresh",
+	t.logger.Warn("Cached attestation expired or missing, coalescing refresh",
 		zap.String("session_id", sessionID))
 	val, err, _ := t.attestationSF.Do("refresh", func() (any, error) {
 		// Re-check inside the singleflight in case another caller just
