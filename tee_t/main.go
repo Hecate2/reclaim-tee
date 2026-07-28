@@ -108,8 +108,8 @@ func setupRoutes(teet *TEET) *http.ServeMux {
 	mux.HandleFunc("/ws", teet.handleClientWebSocket)
 
 	// Per-session connection architecture (TEEs work in pairs)
-	mux.HandleFunc("/ws/control", teet.handleControlWebSocket)  // Control: attestation, OT, session lifecycle
-	mux.HandleFunc("/ws/session", teet.handleSessionWebSocket)  // Per-session: all session data
+	mux.HandleFunc("/ws/control", teet.handleControlWebSocket) // Control: attestation, OT, session lifecycle
+	mux.HandleFunc("/ws/session", teet.handleSessionWebSocket) // Per-session: all session data
 
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)

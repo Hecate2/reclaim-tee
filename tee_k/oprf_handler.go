@@ -123,7 +123,7 @@ func (t *TEEK) initiateOPRFForRange(sessionID string, teekState *TEEKSessionStat
 
 	// Generate online payload using precomputed OT
 	// Use the curve from OT precomputation state
-	curve := t.otPrecomputeState.curve
+	curve := oprfmpc.Curve()
 	payload, garblerSession, err := oprfmpc.CMACGarblerOnline(rand.Reader, curve, garblerInput, otEntries, startIdx)
 	if err != nil {
 		return fmt.Errorf("CMACGarblerOnline failed: %w", err)
@@ -318,28 +318,4 @@ func (t *TEEK) handleCiphertextReady(sessionID string, msg *teeproto.CiphertextR
 	t.logger.WithSession(sessionID).Debug("Ciphertext ready confirmed")
 
 	return nil
-}
-
-// sendCiphertextReadyToTEET notifies TEE_T that ciphertext consolidation is complete
-func (t *TEEK) sendCiphertextReadyToTEET(sessionID string, totalLength int) error {
-	if t.connManager == nil {
-		return fmt.Errorf("connection manager not initialized")
-	}
-
-	env := &teeproto.Envelope{
-		SessionId:   sessionID,
-		TimestampMs: time.Now().UnixMilli(),
-		Payload: &teeproto.Envelope_CiphertextReady{
-			CiphertextReady: &teeproto.CiphertextReady{
-				SessionId:   sessionID,
-				TotalLength: int32(totalLength),
-			},
-		},
-	}
-
-	t.logger.WithSession(sessionID).Info("Sending to TEE_T",
-		zap.String("type", "CiphertextReady"))
-
-	// Send on per-session connection
-	return t.connManager.SendOnSession(sessionID, env)
 }

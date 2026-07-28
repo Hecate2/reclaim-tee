@@ -11,17 +11,6 @@ import (
 	"go.uber.org/zap"
 )
 
-// getCurrentCertRaw returns the bytes of the RA-TLS certificate currently
-// being served on this TEE_T's TLS endpoint (rotated by RATLSManager.Refresh).
-// Returns an error in standalone mode (no RA-TLS).
-func (t *TEET) getCurrentCertRaw() ([]byte, error) {
-	raw := t.ratls.CertificateRaw()
-	if raw == nil {
-		return nil, fmt.Errorf("RA-TLS cert not yet available")
-	}
-	return raw, nil
-}
-
 // generateAttestationDoc produces a fresh GCP attestation token bound to
 // the supplied nonces, against the launcher socket on the host.
 func (t *TEET) generateAttestationDoc(ctx context.Context, nonces ...string) ([]byte, error) {
@@ -155,10 +144,6 @@ func (t *TEET) getCachedAttestation(sessionID string) (*teeproto.AttestationRepo
 		return nil, err
 	}
 	return val.(*teeproto.AttestationReport), nil
-}
-
-func (t *TEET) generateAttestationReport(sessionID string) (*teeproto.AttestationReport, error) {
-	return t.getCachedAttestation(sessionID)
 }
 
 // signingEpoch returns a consistent snapshot of {signing keypair, attestation}

@@ -132,9 +132,7 @@ func (t *TEET) handleOPRFOnlineFull(sessionID string, msg *teeproto.OPRFOnlineFu
 	payload.DualMasks = dualMasks
 
 	// Evaluate the garbled circuit using 2-round online function
-	// Use the curve from OT receiver state
-	curve := t.otReceiverState.curve
-	result, err := oprfmpc.CMACEvaluatorOnline(curve, payload, evaluatorInput, otEntries)
+	result, err := oprfmpc.CMACEvaluatorOnline(oprfmpc.Curve(), payload, evaluatorInput, otEntries)
 	if err != nil {
 		return fmt.Errorf("CMACEvaluatorOnline failed: %w", err)
 	}

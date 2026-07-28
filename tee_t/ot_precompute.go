@@ -4,7 +4,6 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"fmt"
-	"sync"
 	"time"
 
 	"github.com/markkurossi/mpc/ot"
@@ -19,10 +18,8 @@ import (
 
 // OTReceiverState holds the OT receiver state for a TEE_K connection
 type OTReceiverState struct {
-	mu    sync.Mutex
 	pool  *oprfmpc.OTReceiverPool
 	ready bool
-	curve elliptic.Curve
 	epoch string // Pool identity from TEE_K; matched on resume to confirm same pool
 }
 
@@ -31,7 +28,6 @@ func NewOTReceiverState() *OTReceiverState {
 	return &OTReceiverState{
 		pool:  oprfmpc.NewOTReceiverPool(oprfmpc.OTPoolInitialSize),
 		ready: false,
-		curve: elliptic.P256(),
 	}
 }
 
@@ -72,7 +68,7 @@ func (t *TEET) handleOTPrecomputeRequest(conn *shared.WSConnection, msg *teeprot
 
 	// Generate receiver choices for each OT
 	startTime := time.Now()
-	receiverData, entries, err := t.generateReceiverChoices(senderSetups, receiverState.curve)
+	receiverData, entries, err := t.generateReceiverChoices(senderSetups, oprfmpc.Curve())
 	if err != nil {
 		return fmt.Errorf("failed to generate receiver choices: %w", err)
 	}

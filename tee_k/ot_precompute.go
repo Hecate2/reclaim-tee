@@ -1,7 +1,6 @@
 package main
 
 import (
-	"crypto/elliptic"
 	"crypto/rand"
 	"fmt"
 	"sync"
@@ -22,7 +21,6 @@ type OTPrecomputeState struct {
 	mu           sync.Mutex
 	pool         *oprfmpc.OTPool
 	ready        bool
-	curve        elliptic.Curve
 	epoch        string     // Pool identity (UUID); minted on each initial precompute, retained for resume
 	responseChan chan error // Signals when OT response is received
 	resumeChan   chan bool  // Signals OTResumeResponse.accepted from TEE_T
@@ -39,7 +37,6 @@ func NewOTPrecomputeState() *OTPrecomputeState {
 	return &OTPrecomputeState{
 		pool:         oprfmpc.NewOTPool(oprfmpc.OTPoolInitialSize),
 		ready:        false,
-		curve:        elliptic.P256(),
 		responseChan: make(chan error, 1),
 		resumeChan:   make(chan bool, 1),
 	}
@@ -208,7 +205,7 @@ func (t *TEEK) generateAndSerializeOTSetups(count int, isInitial bool) ([]byte, 
 	setups := make([]ot.COSenderSetup, count)
 
 	for i := range count {
-		setup, err := ot.GenerateCOSenderSetup(rand.Reader, state.curve)
+		setup, err := ot.GenerateCOSenderSetup(rand.Reader, oprfmpc.Curve())
 		if err != nil {
 			return nil, fmt.Errorf("failed to generate OT setup at index %d: %w", i, err)
 		}

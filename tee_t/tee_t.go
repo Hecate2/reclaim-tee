@@ -41,8 +41,6 @@ type TEET struct {
 	logger            *shared.Logger
 	sessionTerminator *shared.SessionTerminator
 
-	ready bool
-
 	// Single Session Mode: ECDSA signing keys
 	signingKeyPair *shared.SigningKeyPair // ECDSA key pair for signing transcripts
 
@@ -85,8 +83,8 @@ type TEET struct {
 	jwtPubKey               *ecdsa.PublicKey   // verifies client allocation JWTs (nil = no JWT check, local dev)
 	expectedJWTIssuer       string             // expected iss claim on client allocation JWTs
 	jtiTracker              *shared.JTITracker // replay guard for allocation-JWT jti (nil in standalone)
-	expectedPeerImageDigest string           // sha256:... of TEE_K container image, for RA-TLS peer verification
-	expectedPeerBaseDigest  string           // snp-base:<PCR11> of TEE_K's per-cloud base UKI (SEV-SNP only)
+	expectedPeerImageDigest string             // sha256:... of TEE_K container image, for RA-TLS peer verification
+	expectedPeerBaseDigest  string             // snp-base:<PCR11> of TEE_K's per-cloud base UKI (SEV-SNP only)
 
 	// Heartbeat observation state — same shape as TEEK's. Written by the
 	// connection manager / OT code; read by the heartbeat goroutine.
@@ -185,18 +183,6 @@ func initializeOPRFKeyShare(logger *shared.Logger) []byte {
 		log.Fatalf("[TEE_T] CRITICAL: load OPRF share: %v", err)
 	}
 	return share
-}
-
-// Helper functions to access session state
-func (t *TEET) getSessionRedactionState(sessionID string) (*shared.RedactionSessionState, error) {
-	session, err := t.sessionManager.GetSession(sessionID)
-	if err != nil {
-		return nil, err
-	}
-	if session.RedactionState == nil {
-		session.RedactionState = &shared.RedactionSessionState{}
-	}
-	return session.RedactionState, nil
 }
 
 func (t *TEET) getTEETSessionState(sessionID string) (*TEETSessionState, error) {

@@ -2,6 +2,7 @@
 package oprfmpc
 
 import (
+	"crypto/elliptic"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -17,9 +18,13 @@ import (
 // Y is recovered on decode from the curve equation.
 const compressedPointLen = 33
 
-// Both halves pin elliptic.P256(), so any other wire value means the peer
-// disagrees about the group and its points must not be decoded.
-const otCurveName = "P-256"
+// Curve is the single curve the OT/OPRF stack runs on. Both halves of the pair
+// call this rather than each carrying their own copy.
+func Curve() elliptic.Curve { return elliptic.P256() }
+
+// Derived from Curve() so the wire name can never drift from the group in use.
+// Any other value means the peer disagrees and its points must not be decoded.
+var otCurveName = Curve().Params().Name
 
 func checkOTCurveName(name string) error {
 	if name != otCurveName {

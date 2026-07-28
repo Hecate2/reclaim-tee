@@ -1136,7 +1136,7 @@ func TestGetResponseRedactions_XPathRedaction(t *testing.T) {
 	// HTML response with XPath target
 	htmlResponse := `HTTP/1.1 200 OK
 Content-Type: text/html; charset=UTF-8
-Content-Length: 174
+Content-Length: 183
 
 <!DOCTYPE html>
 <html>
@@ -1331,11 +1331,6 @@ func TestGetResponseRedactions_NonSuccess_ShouldThrow(t *testing.T) {
 
 func contains(s, substr string) bool {
 	return strings.Contains(s, substr)
-}
-
-//go:fix inline
-func stringPtr(s string) *string {
-	return new(s)
 }
 
 func TestValidateHTTPParams_Success(t *testing.T) {

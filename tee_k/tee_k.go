@@ -219,11 +219,11 @@ func initializeOPRFKeyShare(logger *shared.Logger) []byte {
 
 // PairID / Router / ControlHealthy / OTReady / ActiveSessions satisfy
 // shared.HeartbeatTarget so router heartbeat logic lives in shared/.
-func (t *TEEK) PairID() string                { return t.pairID }
-func (t *TEEK) Router() *shared.RouterClient  { return t.router }
-func (t *TEEK) ControlHealthy() bool          { return t.controlHealthy.Load() && t.attestHealth.Healthy() }
-func (t *TEEK) OTReady() bool                 { return t.otReady.Load() }
-func (t *TEEK) ActiveSessions() int           { return int(t.activeSessions.Load()) }
+func (t *TEEK) PairID() string               { return t.pairID }
+func (t *TEEK) Router() *shared.RouterClient { return t.router }
+func (t *TEEK) ControlHealthy() bool         { return t.controlHealthy.Load() && t.attestHealth.Healthy() }
+func (t *TEEK) OTReady() bool                { return t.otReady.Load() }
+func (t *TEEK) ActiveSessions() int          { return int(t.activeSessions.Load()) }
 
 // SetTEETURL sets the TEE_T connection URL
 func (t *TEEK) SetTEETURL(url string) {

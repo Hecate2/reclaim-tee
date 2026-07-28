@@ -12,17 +12,6 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-// getCurrentCertRaw returns the bytes of the RA-TLS certificate currently
-// being served on this TEE_K's TLS endpoint (rotated by RATLSManager.Refresh).
-// Returns an error in standalone mode (no RA-TLS).
-func (t *TEEK) getCurrentCertRaw() ([]byte, error) {
-	raw := t.ratls.CertificateRaw()
-	if raw == nil {
-		return nil, fmt.Errorf("RA-TLS cert not yet available")
-	}
-	return raw, nil
-}
-
 // generateAttestationDoc produces a fresh GCP attestation token bound to
 // the supplied nonces, against the launcher socket on the host.
 func (t *TEEK) generateAttestationDoc(ctx context.Context, nonces ...string) ([]byte, error) {
@@ -171,12 +160,6 @@ func (t *TEEK) getCachedAttestation(sessionID string) (*teeproto.AttestationRepo
 		return nil, err
 	}
 	return val.(*teeproto.AttestationReport), nil
-}
-
-// generateAttestationReport generates an AttestationReport for enclave mode (uses cache for performance)
-func (t *TEEK) generateAttestationReport(sessionID string) (*teeproto.AttestationReport, error) {
-	// Use cached attestation for performance
-	return t.getCachedAttestation(sessionID)
 }
 
 // signingEpoch returns a consistent snapshot of {signing keypair, attestation}

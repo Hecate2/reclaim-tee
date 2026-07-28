@@ -189,24 +189,6 @@ func isNetworkShutdownError(err error) bool {
 		strings.Contains(errStr, "broken pipe")
 }
 
-// sendErrorToTEEK sends an error message to TEE_K on control connection
-// Uses control connection because session connection may be dead when error occurs
-func (t *TEET) sendErrorToTEEK(sessionID string, errMsg string) {
-	env := &teeproto.Envelope{SessionId: sessionID, TimestampMs: time.Now().UnixMilli(),
-		Payload: &teeproto.Envelope_Error{Error: &teeproto.ErrorData{Message: errMsg}},
-	}
-	if t.connManager == nil {
-		t.logger.Error("Cannot send error to TEE_K: connection manager not initialized",
-			zap.String("session_id", sessionID))
-		return
-	}
-	if err := t.connManager.SendOnControl(env); err != nil {
-		t.logger.Error("Failed to send error message to TEE_K on control",
-			zap.String("session_id", sessionID),
-			zap.Error(err))
-	}
-}
-
 // sendErrorToClient sends an error message to a client
 func (t *TEET) sendErrorToClient(sessionID, errMsg string) {
 	env := &teeproto.Envelope{SessionId: sessionID, TimestampMs: time.Now().UnixMilli(),
