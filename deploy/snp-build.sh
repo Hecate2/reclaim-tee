@@ -123,10 +123,20 @@ package_aws() {
     tmp="$(mktemp -d)"; vmdk="${tmp}/disk.vmdk"
     echo "[image] raw -> deterministic streamOptimized VMDK..."
     qemu-img convert -f raw -O vmdk -o subformat=streamOptimized "${RAW}" "${vmdk}"
+    # qemu writes CID with %x, so a value under 0x10000000 is short and an
+    # unanchored 8-hex-digit match lands on parentCID instead -> AWS rejects it
+    # as a parentless delta disk. Anchor both fields to the descriptor region.
     python3 - "${vmdk}" <<'PY'
-import re,sys
+import re,struct,sys
 p=sys.argv[1]; b=bytearray(open(p,'rb').read())
-m=re.search(rb'CID=[0-9a-f]{8}', b); b[m.start():m.end()]=b'CID=00000001'
+if bytes(b[:4])!=b'KDMV': raise SystemExit('[image] not a VMDK sparse extent')
+off=struct.unpack_from('<Q',b,28)[0]*512; size=struct.unpack_from('<Q',b,36)[0]*512
+desc=bytes(b[off:off+size]).rstrip(b'\x00')
+desc,n1=re.subn(rb'(?m)^CID=[0-9a-fA-F]+$',b'CID=00000001',desc)
+desc,n2=re.subn(rb'(?m)^parentCID=[0-9a-fA-F]+$',b'parentCID=ffffffff',desc)
+if n1!=1 or n2!=1: raise SystemExit(f'[image] CID patch failed (CID={n1} parentCID={n2})')
+if len(desc)>size: raise SystemExit('[image] descriptor overflow')
+b[off:off+size]=desc+b'\x00'*(size-len(desc))
 open(p,'wb').write(b)
 PY
     echo "[image] uploading s3://${bucket}/${key}..."
