@@ -29,6 +29,8 @@ set -euo pipefail
 #   SNP_DISCOVER_ONLY=1 ./deploy/snp-redeploy-fleet.sh   # preflight+discover only
 #   SNP_YES=1 ./deploy/snp-redeploy-fleet.sh             # skip the confirm prompt
 #   SNP_BUILD_COMMIT=<sha> ./deploy/snp-redeploy-fleet.sh # ad-hoc (skips json assert)
+#   SNP_ONLY=snp-sg-1 ./deploy/snp-redeploy-fleet.sh      # resume: only these pair(s), comma-separated
+#   SNP_SKIP_BUILD=1 ./deploy/snp-redeploy-fleet.sh       # reuse registered images (digest asserts still run)
 #
 # Requires docker+buildx and authenticated gcloud + aws (checked in preflight).
 # =============================================================================
@@ -120,6 +122,23 @@ discover() {
   local pairs; mapfile -t pairs < <(cut -d'|' -f1 "${tmp}" | sort -u)
   [[ ${#pairs[@]} -gt 0 ]] || { rm -f "${tmp}"; die "no SNP pairs discovered from cloud resources"; }
 
+  # SNP_ONLY narrows the fleet to named pairs (resume a partial rollout without
+  # re-draining healthy ones). Unknown name = typo, so fail rather than no-op.
+  if [[ -n "${SNP_ONLY:-}" ]]; then
+    local want=() keep=() w p found
+    IFS=',' read -r -a want <<<"${SNP_ONLY}"
+    for w in "${want[@]}"; do
+      found=0
+      for p in "${pairs[@]}"; do [[ "${p}" == "${w}" ]] && { found=1; break; }; done
+      (( found )) || { rm -f "${tmp}"; die "SNP_ONLY names unknown pair '${w}' (discovered: ${pairs[*]})"; }
+    done
+    for p in "${pairs[@]}"; do
+      for w in "${want[@]}"; do [[ "${p}" == "${w}" ]] && { keep+=("${p}"); break; }; done
+    done
+    pairs=("${keep[@]}")
+    log "  SNP_ONLY=${SNP_ONLY} — limiting to ${#pairs[@]} pair(s): ${pairs[*]}"
+  fi
+
   local routerjson; routerjson="$(rt "${ROUTER}/pairs" || echo '{}')"
   local pn kline tline kcloud kloc kip tcloud tloc tip row
   for pn in "${pairs[@]}"; do
@@ -175,6 +194,10 @@ NEW_K=""; NEW_T=""
 build_and_verify() {
   declare -A need; local i
   for i in "${!P_NAME[@]}"; do need["k:${P_KCLOUD[$i]}"]=1; need["t:${P_TCLOUD[$i]}"]=1; done
+  if [[ "${SNP_SKIP_BUILD:-0}" == 1 ]]; then
+    log "  SNP_SKIP_BUILD=1 — reusing already-registered cloud images for: ${!need[*]}"
+    log "  WARNING: assumes those images were built from snp-digests.env's COMMIT; only safe right after a successful build."
+  else
   log "Building commit ${TARGET_COMMIT:0:7} for: ${!need[*]}"
   local rc role cloud blog
   for rc in "${!need[@]}"; do
@@ -182,6 +205,7 @@ build_and_verify() {
     log "  build ${role} ${cloud}  (log: ${blog})"
     ( export http_proxy="${SNP_PROXY}" https_proxy="${SNP_PROXY}" SNP_BUILD_COMMIT="${TARGET_COMMIT}"; "${SCRIPT_DIR}/snp-build.sh" "${role}" "${cloud}" ) > "${blog}" 2>&1 || die "build ${role} ${cloud} failed — see ${blog}"
   done
+  fi
   set -a; source "${SCRIPT_DIR}/snp-digests.env"; set +a
   [[ "${COMMIT}" == "${TARGET_COMMIT}" ]] || die "snp-digests.env COMMIT ${COMMIT:0:7} != target ${TARGET_COMMIT:0:7}"
   NEW_K="${SNP_K_DIGEST:?missing K digest after build}"; NEW_T="${SNP_T_DIGEST:?missing T digest after build}"
