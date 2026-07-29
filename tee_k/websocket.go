@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"strings"
@@ -20,6 +21,11 @@ import (
 // MaxWebSocketMessageSize is the maximum allowed WebSocket message size (30 MB)
 // Sized for OT precomputation: 100,000 COSenderSetups at ~200 bytes each = ~20 MB
 const MaxWebSocketMessageSize = 30 * 1024 * 1024
+
+// HandshakeReadTimeout bounds a single minitls read of the client-relayed target
+// stream. Matches the client's own handshake-stall guard (client/tcp.go) so TEE_K
+// is never the first to abandon a handshake the client still considers live.
+const HandshakeReadTimeout = 15 * time.Second
 
 var teekUpgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool {
@@ -437,7 +443,9 @@ func (w *WebSocketConn) Read(p []byte) (int, error) {
 		}
 
 		return n, nil
-	case <-time.After(2 * time.Second):
+	case <-w.done:
+		return 0, io.EOF
+	case <-time.After(HandshakeReadTimeout):
 		return 0, fmt.Errorf("timeout reading from websocket")
 	}
 }
