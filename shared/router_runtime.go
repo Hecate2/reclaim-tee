@@ -34,10 +34,9 @@ const RouterHeartbeatInterval = 5 * time.Second
 
 // InitialRegisterRetryWindow bounds how long startRouterMode keeps
 // retrying /register before giving up. A transient router 5xx or a
-// stale source-IP check during router redeploy shouldn't kill the TEE
-// VM (tee-restart-policy=Never means a process exit terminates the VM
-// permanently). 2 minutes covers a Cloud Run revision swap plus a
-// bit of slack.
+// stale source-IP check during router redeploy shouldn't cost a boot
+// cycle. Exhausting it is fatal and reboots the guest (FatalBootReset).
+// 2 minutes covers a Cloud Run revision swap plus a bit of slack.
 const InitialRegisterRetryWindow = 2 * time.Minute
 
 // RATLSRefreshInterval is how often each side regenerates its RA-TLS
@@ -139,9 +138,8 @@ func RunHeartbeats(
 // RegisterWithRetry calls the supplied register fn with exponential
 // backoff up to InitialRegisterRetryWindow. Use at boot so a transient
 // router error (5xx, a stale source-IP check during router redeploy,
-// etc.) doesn't kill the TEE process — which would terminate the VM
-// permanently under tee-restart-policy=Never. Returns the last error
-// only if the window is exhausted.
+// etc.) doesn't cost a boot cycle. Returns the last error only if the
+// window is exhausted; callers treat that as fatal.
 func RegisterWithRetry(ctx context.Context, register func(context.Context) error, logger *Logger) error {
 	deadline := time.Now().Add(InitialRegisterRetryWindow)
 	backoff := 1 * time.Second

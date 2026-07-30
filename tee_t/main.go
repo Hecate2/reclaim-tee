@@ -37,16 +37,21 @@ func main() {
 
 	// Router mode is the production path (multi-pair, RA-TLS, router-mediated).
 	// Standalone mode remains for local dev only — no TLS, no attestation.
+	// Armed before any fatal path can be reached; disarmed once serving.
+	boot := shared.NewBootGuard(logger, shared.BootReadyDeadline)
+
 	if config.RouterMode() {
-		startRouterMode(context.Background(), config, logger)
+		if err := startRouterMode(context.Background(), config, logger, boot); err != nil {
+			shared.FatalBootReset(logger, err)
+		}
 		return
 	}
 
 	logger.Info("Starting TEE_T in standalone mode")
-	startStandaloneMode(config, logger)
+	startStandaloneMode(config, logger, boot)
 }
 
-func startStandaloneMode(config *TEETConfig, logger *shared.Logger) {
+func startStandaloneMode(config *TEETConfig, logger *shared.Logger, boot *shared.BootGuard) {
 	teet := NewTEETWithLogger(config.Port, logger)
 	teet.sessionManager.StartCleanupRoutine()
 
@@ -86,6 +91,8 @@ func startStandaloneMode(config *TEETConfig, logger *shared.Logger) {
 	}()
 
 	// Wait for interrupt signal
+	boot.MarkReady()
+
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 	<-sigChan

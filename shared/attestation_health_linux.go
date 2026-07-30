@@ -79,7 +79,7 @@ func kmsgTail(match ...string) []string {
 // attestSelfReset warm-reboots the guest (LINUX_REBOOT_CMD_RESTART) — the only
 // known recovery for a wedged SEV report path. Best-effort: on missing
 // CAP_SYS_BOOT it logs and returns (router health-gate + alert cover it). It
-// must NOT os.Exit — tee-restart-policy=Never would leave the VM powered off.
+// must NOT os.Exit: as PID 1 that panics the guest into a RUNNING-but-dead VM.
 func attestSelfReset(logger *Logger) {
 	if os.Getenv("SNP_ATTEST_SELFHEAL") == "0" {
 		if logger != nil {

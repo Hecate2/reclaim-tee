@@ -24,7 +24,7 @@ import (
 // attestation JWT. In local dev (no launcher socket) it serves plain
 // HTTP / dials plain ws:// and registers with a sentinel image digest —
 // the JWT / pair-assignment / OPRF / session protocol all still run.
-func startRouterMode(parent context.Context, config *TEEKConfig, logger *shared.Logger) {
+func startRouterMode(parent context.Context, config *TEEKConfig, logger *shared.Logger, boot *shared.BootGuard) error {
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
 
@@ -39,8 +39,7 @@ func startRouterMode(parent context.Context, config *TEEKConfig, logger *shared.
 	}
 
 	if err := validateRouterConfig(config); err != nil {
-		logger.Critical("router-mode config invalid", zap.Error(err))
-		return
+		return fmt.Errorf("router-mode config invalid: %w", err)
 	}
 
 	// Discover own external IP from GCE metadata if SELF_ADDR was not
@@ -50,8 +49,7 @@ func startRouterMode(parent context.Context, config *TEEKConfig, logger *shared.
 	if config.SelfAddr == "" {
 		ip, err := shared.DiscoverGCEExternalIP(ctx)
 		if err != nil {
-			logger.Critical("SELF_ADDR not set and GCE metadata unreachable", zap.Error(err))
-			return
+			return fmt.Errorf("SELF_ADDR not set and GCE metadata unreachable: %w", err)
 		}
 		config.SelfAddr = fmt.Sprintf("%s:%d", ip, config.Port)
 		logger.Info("Discovered SELF_ADDR from GCE metadata", zap.String("self_addr", config.SelfAddr))
@@ -65,8 +63,7 @@ func startRouterMode(parent context.Context, config *TEEKConfig, logger *shared.
 		var err error
 		ratls, err = shared.NewRATLSManager(ctx, "tee_k", nil)
 		if err != nil {
-			logger.Critical("RA-TLS manager init failed", zap.Error(err))
-			return
+			return fmt.Errorf("RA-TLS manager init failed: %w", err)
 		}
 		logger.Info("RA-TLS manager initialized",
 			zap.String("spki_hash", fmt.Sprintf("%x", ratls.SPKIHash())))
@@ -137,8 +134,7 @@ func startRouterMode(parent context.Context, config *TEEKConfig, logger *shared.
 	}
 
 	if err := shared.RegisterWithRetry(ctx, register, logger); err != nil {
-		logger.Critical("router registration failed after retries", zap.Error(err))
-		return
+		return fmt.Errorf("router registration failed after retries: %w", err)
 	}
 
 	teek.attestHealth = shared.NewAttestationHealth(logger)
@@ -182,6 +178,7 @@ func startRouterMode(parent context.Context, config *TEEKConfig, logger *shared.
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 	logger.Info("TEE_K router-mode bootstrap complete",
 		zap.String("pair_id", teek.pairID))
+	boot.MarkReady()
 	<-sigChan
 	logger.Info("shutting down router-mode TEE_K")
 
@@ -190,6 +187,7 @@ func startRouterMode(parent context.Context, config *TEEKConfig, logger *shared.
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		logger.Error("HTTP server shutdown error", zap.Error(err))
 	}
+	return nil
 }
 
 // validateRouterConfig surfaces missing router-mode env vars at boot

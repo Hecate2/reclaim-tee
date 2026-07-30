@@ -27,7 +27,7 @@ import (
 // launcher socket) the server is HTTPS over RA-TLS + mTLS for peer
 // connections. In local dev the server is plain HTTP; JWT validation
 // and pair-assignment exchange still happen.
-func startRouterMode(parent context.Context, config *TEETConfig, logger *shared.Logger) {
+func startRouterMode(parent context.Context, config *TEETConfig, logger *shared.Logger, boot *shared.BootGuard) error {
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
 
@@ -42,8 +42,7 @@ func startRouterMode(parent context.Context, config *TEETConfig, logger *shared.
 	}
 
 	if err := validateRouterConfig(config); err != nil {
-		logger.Critical("router-mode config invalid", zap.Error(err))
-		return
+		return fmt.Errorf("router-mode config invalid: %w", err)
 	}
 
 	// Discover own external IP from GCE metadata if SELF_ADDR was not
@@ -51,8 +50,7 @@ func startRouterMode(parent context.Context, config *TEETConfig, logger *shared.
 	if config.SelfAddr == "" {
 		ip, err := shared.DiscoverGCEExternalIP(ctx)
 		if err != nil {
-			logger.Critical("SELF_ADDR not set and GCE metadata unreachable", zap.Error(err))
-			return
+			return fmt.Errorf("SELF_ADDR not set and GCE metadata unreachable: %w", err)
 		}
 		config.SelfAddr = fmt.Sprintf("%s:%d", ip, config.Port)
 		logger.Info("Discovered SELF_ADDR from GCE metadata", zap.String("self_addr", config.SelfAddr))
@@ -63,8 +61,7 @@ func startRouterMode(parent context.Context, config *TEETConfig, logger *shared.
 		var err error
 		ratls, err = shared.NewRATLSManager(ctx, "tee_t", nil)
 		if err != nil {
-			logger.Critical("RA-TLS manager init failed", zap.Error(err))
-			return
+			return fmt.Errorf("RA-TLS manager init failed: %w", err)
 		}
 		logger.Info("RA-TLS manager initialized",
 			zap.String("spki_hash", fmt.Sprintf("%x", ratls.SPKIHash())))
@@ -82,8 +79,7 @@ func startRouterMode(parent context.Context, config *TEETConfig, logger *shared.
 	if config.JWTPublicKey != "" {
 		pubKey, err := shared.ParseECDSAPublicKeyPEM([]byte(config.JWTPublicKey))
 		if err != nil {
-			logger.Critical("parse JWT_PUBLIC_KEY failed", zap.Error(err))
-			return
+			return fmt.Errorf("parse JWT_PUBLIC_KEY failed: %w", err)
 		}
 		teet.jwtPubKey = pubKey
 		teet.expectedJWTIssuer = config.ExpectedJWTIssuer
@@ -159,8 +155,7 @@ func startRouterMode(parent context.Context, config *TEETConfig, logger *shared.
 			pairMu.Unlock()
 			go func() {
 				if err := shared.RegisterWithRetry(ctx, register, logger); err != nil {
-					logger.Critical("router registration failed after retries", zap.Error(err))
-					return
+					shared.FatalBootReset(logger, fmt.Errorf("router registration failed after retries: %w", err))
 				}
 				shared.RunHeartbeats(ctx, teet, "T", logger, register, shared.RouterHeartbeatInterval)
 			}()
@@ -248,6 +243,7 @@ func startRouterMode(parent context.Context, config *TEETConfig, logger *shared.
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 	logger.Info("TEE_T router-mode bootstrap complete; awaiting peer")
+	boot.MarkReady()
 	<-sigChan
 	logger.Info("shutting down router-mode TEE_T")
 
@@ -256,6 +252,7 @@ func startRouterMode(parent context.Context, config *TEETConfig, logger *shared.
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		logger.Error("HTTP server shutdown error", zap.Error(err))
 	}
+	return nil
 }
 
 // enforcePeerMTLS gates the peer routes (/ws/control, /ws/session) on a

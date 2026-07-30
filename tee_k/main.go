@@ -40,16 +40,23 @@ func main() {
 
 	config := LoadTEEKConfig()
 
+	// Armed before any fatal path can be reached; disarmed once serving.
+	boot := shared.NewBootGuard(logger, shared.BootReadyDeadline)
+
 	if config.RouterMode() {
-		startRouterMode(context.Background(), config, logger)
+		if err := startRouterMode(context.Background(), config, logger, boot); err != nil {
+			shared.FatalBootReset(logger, err)
+		}
 		return
 	}
 
 	logger.Info("=== TEE_K Standalone Mode ===")
-	startStandaloneMode(config, logger)
+	if err := startStandaloneMode(config, logger, boot); err != nil {
+		shared.FatalBootReset(logger, err)
+	}
 }
 
-func startStandaloneMode(config *TEEKConfig, logger *shared.Logger) {
+func startStandaloneMode(config *TEEKConfig, logger *shared.Logger, boot *shared.BootGuard) error {
 	teek := NewTEEKWithConfig(config)
 	teek.sessionManager.StartCleanupRoutine()
 
@@ -60,8 +67,7 @@ func startStandaloneMode(config *TEEKConfig, logger *shared.Logger) {
 
 	// Only start HTTP server AFTER OT pool is ready
 	if !teek.isOTPoolReady() {
-		logger.Critical("OT pool not ready after establishSharedTEETConnection - this should not happen")
-		return
+		return errors.New("OT pool not ready after establishSharedTEETConnection")
 	}
 
 	// Start periodic connection status logging (every minute)
@@ -103,6 +109,7 @@ func startStandaloneMode(config *TEEKConfig, logger *shared.Logger) {
 	logger.Info("TEE_K ready to accept clients",
 		zap.String("teet_url", config.TEETURL),
 		zap.String("tls_version", config.ForceTLSVersion))
+	boot.MarkReady()
 
 	// Wait for interrupt signal
 	sigChan := make(chan os.Signal, 1)
@@ -120,6 +127,7 @@ func startStandaloneMode(config *TEEKConfig, logger *shared.Logger) {
 	}
 
 	logger.Info("Shutdown complete")
+	return nil
 }
 
 func setupRoutes(teek *TEEK) *http.ServeMux {
