@@ -1,0 +1,117 @@
+theory Redaction_NegCtl_AppKeyLeaked
+begin
+
+/*
+  What does the attestor (and any third-party verifier, and the public --
+  the proof is publicly verifiable) learn from a proof?
+
+  Claim to test, in both directions:
+    it learns EXACTLY the revealed data, and NOTHING about the redacted data.
+
+  Everyone here is honest. The adversary IS the attestor/public: the only
+  thing it gets is the published proof plus the network traffic. TEE
+  compromise is a different question, covered in splitaead_privacy*.spthy.
+
+  Grounded in code, not the whitepaper:
+    - The signed response keystream is the REDACTED one, built from
+      RedactedStreams with random bytes at sensitive positions
+      (tee_k/crypto.go:531-569). The un-redacted keystream stays in
+      TEEKSessionState for OPRF only (crypto.go:578-587), never signed.
+      Modelled as ~rnd, a fresh value, rather than the whitepaper's '*'.
+    - ServerAppKey is stripped from the attestor bundle
+      (client/verification_bundle.go:292-304), so it is not modelled as
+      published. If it were, every lemma below would fail.
+    - Both payloads carry session_id (proto/signing.proto:12,32).
+
+  NOT modelled, and a real caveat on the "nothing more" direction:
+  OPRF outputs (KOutputPayload.oprf_outputs) are SHA256(CMAC) over
+  ranges of the UN-redacted plaintext. Symbolically a hash hides its
+  preimage, so a model including them would still report secrecy -- but
+  they are a deterministic function of redacted data and therefore permit
+  equality testing and linking across proofs. That disclosure is by design
+  and is outside what this theory can speak to.
+*/
+
+builtins: xor, signing
+functions: ks/3
+
+restriction Equality: "All x y #i. Eq(x,y) @ i ==> x = y"
+
+rule Register_TEEs:
+  [ Fr(~skK), Fr(~skT) ]
+  --[ Register() ]->
+  [ !LtkK(~skK), !LtkT(~skT), Out(<pk(~skK), pk(~skT)>) ]
+
+restriction OnePair: "All #i #j. Register() @ i & Register() @ j ==> #i = #j"
+
+// The record nonce is PUBLIC: it is derived from the TLS sequence number.
+// Modelling it as secret would make a leaked key look harmless.
+rule Session:
+  [ Fr(~sid), Fr(~kdec), Fr(~nr) ]
+  -->
+  [ K_S(~sid, ~kdec, ~nr), W_S(~sid, ~kdec, ~nr), U_S(~sid), T_S(~sid)
+  , Out(~nr) ]
+
+// User splits its request into the three classes and masks the two
+// sensitive ones (Algorithm 3).
+rule U_Request:
+  [ U_S(~sid), Fr(~rns), Fr(~rs), Fr(~rsp), Fr(~strS), Fr(~strSP) ]
+  --[ ReqParts(~sid, ~rns, ~rs, ~rsp) ]->
+  [ K_Req(~sid, <~rns, ~rs ⊕ ~strS, ~rsp ⊕ ~strSP>)
+  , T_Streams(~sid, ~strSP) ]
+
+// Website response: one revealed segment, one that the user will redact.
+rule W_Respond:
+  let respenc = < ~rpub ⊕ ks(~kdec, ~nr, '1')
+                , ~rsec ⊕ ks(~kdec, ~nr, '2') >
+  in
+  [ W_S(~sid, ~kdec, ~nr), Fr(~rpub), Fr(~rsec) ]
+  --[ RespParts(~sid, ~rpub, ~rsec) ]->
+  [ T_Resp(~sid, respenc), Out(respenc), Out(~kdec) ]
+
+// Phase 5: TEE_K redacts the decryption keystream at the sensitive range
+// and signs. ~rnd is the random filler the code writes there.
+rule K_Sign:
+  let strdecred = < ks(~kdec, ~nr, '1'), ~rnd >
+      body      = <'KOut', ~sid, rred, strdecred, 'cert'>
+  in
+  [ K_S(~sid, ~kdec, ~nr), K_Req(~sid, rred), Fr(~rnd), !LtkK(~skK) ]
+  --[ SignedK(~sid) ]->
+  [ Out(<body, sign(body, ~skK)>) ]
+
+rule T_Sign:
+  let body = <'TOut', ~sid, respenc, ~strSP> in
+  [ T_S(~sid), T_Resp(~sid, respenc), T_Streams(~sid, ~strSP), !LtkT(~skT) ]
+  --[ SignedT(~sid) ]->
+  [ Out(<body, sign(body, ~skT)>) ]
+
+// ------------------------------------------------------------- lemmas
+
+// "Nothing more": the attestor never learns the redacted response bytes.
+lemma attestor_cannot_see_redacted_response:
+  all-traces
+  "All sid rpub rsec #i. RespParts(sid, rpub, rsec) @ i
+     ==> not (Ex #k. K(rsec) @ k)"
+
+// "Nothing more": nor the request data marked sensitive-not-revealed.
+lemma attestor_cannot_see_RS:
+  all-traces
+  "All sid rns rs rsp #i. ReqParts(sid, rns, rs, rsp) @ i
+     ==> not (Ex #k. K(rs) @ k)"
+
+// "Exactly what was revealed": the attestor MUST be able to read the
+// non-redacted response, or the proof is useless. Anti-vacuity for the two
+// lemmas above -- if these fail, secrecy above is meaningless.
+lemma attestor_sees_revealed_response:
+  exists-trace
+  "Ex sid rpub rsec #i #k. RespParts(sid, rpub, rsec) @ i & K(rpub) @ k"
+
+lemma attestor_sees_RSP:
+  exists-trace
+  "Ex sid rns rs rsp #i #k. ReqParts(sid, rns, rs, rsp) @ i & K(rsp) @ k"
+
+lemma attestor_sees_RNS:
+  exists-trace
+  "Ex sid rns rs rsp #i #k. ReqParts(sid, rns, rs, rsp) @ i & K(rns) @ k"
+
+end

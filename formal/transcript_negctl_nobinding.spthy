@@ -1,0 +1,108 @@
+theory Transcript_NegCtl_NoBinding
+begin
+
+/*
+  NEGATIVE CONTROL -- not the protocol. Identical to transcript.spthy except
+  that the session id is removed from both signed payloads.
+
+  Its only purpose is to show that the cross-TEE session binding is
+  load-bearing rather than incidental: with it, non-repudiation holds; without
+  it, the lemmas below fail. Same role as the two redaction negative controls.
+
+  Do not read this file as a description of anything that ships.
+*/
+
+builtins: xor, signing
+functions: ks/2, tagsec/1, mac/2
+
+restriction Equality:   "All x y #i. Eq(x,y) @ i ==> x = y"
+restriction Inequality: "All x #i. Neq(x,x) @ i ==> F"
+
+rule Register_TEEs:
+  [ Fr(~skK), Fr(~skT) ]
+  --[ Register() ]->
+  [ !LtkK(~skK), !LtkT(~skT), !PkK(pk(~skK)), !PkT(pk(~skT))
+  , Out(<pk(~skK), pk(~skT)>) ]
+
+restriction OnePair: "All #i #j. Register() @ i & Register() @ j ==> #i = #j"
+
+// ---- session against the honest website ----
+
+rule Session_Honest:
+  [ Fr(~sid), Fr(~kdec), Fr(~nr) ]
+  --[ StartHonest(~sid) ]->
+  [ K_S(~sid, 'bank', ~kdec, ~nr)
+  , W_S(~sid, ~kdec, ~nr)
+  , T_S(~sid, ~kdec) ]
+
+rule W_Send:
+  let re = ~content ⊕ ks(~kdec, ~nr)
+      tr = mac(tagsec(~kdec), re)
+  in
+  [ W_S(~sid, ~kdec, ~nr), Fr(~content) ]
+  --[ Genuine('bank', ~content) ]->
+  [ Out(<re, tr>) ]
+
+// ---- session against a site the user controls ----
+
+rule Session_Evil:
+  [ Fr(~sid), Fr(~kdec), Fr(~nr) ]
+  --[ Neq($E, 'bank'), StartEvil(~sid) ]->
+  [ K_S(~sid, $E, ~kdec, ~nr)
+  , T_S(~sid, ~kdec)
+  , Out(<~kdec, ~nr>) ]
+
+// ---- TEE_A: verify the response tag, then sign ----
+
+rule T_Accept:
+  [ T_S(~sid, ~kdec), In(<re, tr>) ]
+  --[ Eq(tr, mac(tagsec(~kdec), re)) ]->
+  [ T_Ready(~sid, re) ]
+
+rule T_Sign:
+  let body = <'TOut', re> in
+  [ T_Ready(~sid, re), !LtkT(~skT) ]
+  --[ SignedT(~sid) ]->
+  [ Out(<body, sign(body, ~skT)>) ]
+
+// ---- TEE_K: release the keystream and sign ----
+
+rule K_Sign:
+  let sdr  = ks(~kdec, ~nr)
+      body = <'KOut', cert, sdr>
+  in
+  [ K_S(~sid, cert, ~kdec, ~nr), !LtkK(~skK) ]
+  --[ SignedK(~sid, cert) ]->
+  [ Out(<body, sign(body, ~skK)>) ]
+
+// ---- verifier (Algorithm 6) ----
+
+rule Verifier:
+  let bodyK = <'KOut', cert, sdr>
+      bodyT = <'TOut', re>
+  in
+  [ In(<bodyK, sigK, bodyT, sigT>), !PkK(pkK), !PkT(pkT) ]
+  --[ Eq(verify(sigK, bodyK, pkK), true)
+    , Eq(verify(sigT, bodyT, pkT), true)
+    , Accept(cert, re ⊕ sdr) ]->
+  [ ]
+
+// Non-repudiation (whitepaper Property 4, line 305): if a verifier accepts
+// content attributed to the honest site, that site really sent it.
+lemma no_forged_transcript:
+  all-traces
+  "All content #i. Accept('bank', content) @ i
+     ==> Ex #j. Genuine('bank', content) @ j"
+
+lemma sanity_honest_run:
+  exists-trace
+  "Ex content #i #j. Genuine('bank', content) @ i & Accept('bank', content) @ j"
+
+
+// Sharper form: can the user make a verifier accept a value the user picked
+// outright, attributed to the honest site?
+lemma chosen_content_forgery:
+  exists-trace
+  "Ex #i. Accept('bank', 'attacker_chosen') @ i"
+
+end

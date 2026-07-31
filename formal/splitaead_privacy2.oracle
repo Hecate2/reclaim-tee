@@ -1,0 +1,80 @@
+#!/usr/bin/env python3
+"""
+Proof oracle for the *_against_TEEA secrecy lemmas.
+
+Written against a goal profile collected with a pass-through logging oracle
+(28k goals over 240s on secrecy_RS_against_TEEA). The profile showed the
+search drowning in two goal classes:
+
+    !KU( (z (+) <term>) )   ~1100 hits, z an UNCONSTRAINED variable
+    splitEqs(6..14)         ~4800 hits combined
+
+Those are Tamarin trying every way to assemble an XOR term out of a free
+variable. They are the explosion. Everything else is comparatively rare.
+
+Strategy:
+  - Push hard on goals that CLOSE branches: bare keystream terms ks(...),
+    which no rule ever emits, so resolving them kills a branch outright.
+  - Then protocol state facts, which pin the trace down.
+  - Then the target secret itself.
+  - Bury the free-variable XOR constructions and high-index splitEqs.
+  - splitEqs is ranked by index, low first, matching the reference oracles
+    in tamarin-prover/examples/jcs19-xor (LD07.oracle, LAK06_state.oracle).
+"""
+import re
+import sys
+
+lines = sys.stdin.readlines()
+lemma = sys.argv[1]
+
+MAXPRIO = 70
+rank = [[] for _ in range(MAXPRIO)]
+
+TARGET = ("secrecy_RS_against_TEEA", "secrecy_RSP_against_TEEA",
+          "secrecy_RS_against_TEEK", "secrecy_RSP_against_TEEK")
+
+if lemma not in TARGET:
+    # No opinion: leave the default heuristic in charge.
+    sys.exit(0)
+
+for line in lines:
+    num = line.split(':')[0]
+    body = line.split(':', 1)[1] if ':' in line else line
+
+    has_xor = '⊕' in body
+
+    # Bare keystream: unproducible, so resolving it closes the branch.
+    if re.search(r'!KU\(\s*ks\(', body) and not has_xor:
+        rank[60].append(num)
+    # Tag secrets, likewise unproducible on their own.
+    elif re.search(r'!KU\(\s*tagsec\(', body) and not has_xor:
+        rank[58].append(num)
+    # Protocol state facts constrain which traces are possible.
+    elif re.search(r'(K1|T1|U1|ChUK|ChUT|ChKT|KView|TView)\(', body):
+        rank[55].append(num)
+    # Masks the adversary legitimately holds: cheap, resolve them.
+    elif re.search(r'!KU\(\s*~(strS|strSP)\s*\)', body):
+        rank[52].append(num)
+    # The secret under attack.
+    elif re.search(r'!KU\(\s*~(rs|rsp|rsec)', body) and not has_xor:
+        rank[50].append(num)
+    # Equation splits: low index first, mirroring the reference oracles.
+    elif re.search(r'splitEqs\((\d+)', body):
+        idx = int(re.search(r'splitEqs\((\d+)', body).group(1))
+        rank[max(20, 45 - idx)].append(num)
+    # Deconstruction chains.
+    elif '~~>' in body:
+        rank[40].append(num)
+    elif re.search(r'!KD\(', body):
+        rank[30].append(num)
+    # THE EXPLOSION: adversary assembling an XOR term around a free variable.
+    elif has_xor and re.search(r'!KU\(\s*\(\s*z', body):
+        rank[2].append(num)
+    elif has_xor and re.search(r'!KU\(', body):
+        rank[6].append(num)
+    else:
+        rank[15].append(num)
+
+for bucket in reversed(rank):
+    for goal in bucket:
+        print(goal)

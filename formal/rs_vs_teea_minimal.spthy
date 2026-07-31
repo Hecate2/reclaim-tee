@@ -1,0 +1,45 @@
+theory RS_vs_TEEA_Minimal
+begin
+
+/*
+  The irreducible core of "TEE_A cannot see R_S", stripped of everything else:
+  no response phase, no tags, no signatures, no second segment, no R_NS.
+
+  TEE_A's entire view of the sensitive segment is
+      c     = rs XOR strS XOR ks     (ciphertext from TEE_K)
+      strS                            (mask, from the user)
+      c XOR strS = rs XOR ks          (what it forwards to the website)
+  and it never has ks. So rs must stay secret.
+
+  Used to locate the point where Tamarin's XOR unification stops
+  terminating: every *_against_TEEA lemma in the larger models exhausted
+  the heap, while every *_against_TEEK lemma verified in under 30s.
+*/
+
+builtins: xor
+functions: ks/2
+
+rule Session:
+  [ Fr(~sid), Fr(~kenc), Fr(~n), Fr(~rs), Fr(~strS) ]
+  --[ SecretS(~rs) ]->
+  [ K1(~sid, ~kenc, ~n, ~rs ⊕ ~strS)
+  , TStreams(~sid, ~strS)
+  , Out(~n) ]
+
+rule K_Encrypt:
+  [ K1(~sid, ~kenc, ~n, m) ]
+  -->
+  [ ChKT(~sid, m ⊕ ks(~kenc, ~n)) ]
+
+// TEE_A fully compromised: its entire view goes to the adversary, along
+// with the record it puts on the wire.
+rule T_Compromised:
+  [ ChKT(~sid, c), TStreams(~sid, ~strS) ]
+  --[ RevealT() ]->
+  [ Out(<c, ~strS, c ⊕ ~strS>) ]
+
+lemma secrecy_RS_against_TEEA:
+  all-traces
+  "All rs #i. SecretS(rs) @ i ==> not (Ex #k. K(rs) @ k)"
+
+end

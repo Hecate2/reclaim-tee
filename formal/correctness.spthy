@@ -1,0 +1,175 @@
+theory SplitAEAD_Correctness
+begin
+
+/*
+  CORRECTNESS of split-AEAD request/response masking, as shipped (whitepaper section 3.2,
+  Algorithms 3 and 4, minus the HMAC redaction commitments which are
+  deprecated in proto/transport.proto:152,163,176,182).
+
+  Modelled:
+    R = <rns, rs, rsp>            non-sensitive / sensitive / sensitive-provable
+    User masks:  rred = <rns, rs ⊕ strS, rsp ⊕ strSP>
+    TEE_K:       renc = rred ⊕ keystream        (never sees rs, rsp)
+    TEE_A:       final = renc ⊕ <0, strS, strSP>  (never sees the key)
+    Website:     recovers R exactly, tag verifies
+
+  Abstractions (each one is an assumption, not a result):
+    - TLS handshake is not modelled; kenc/kdec appear as fresh shared secrets.
+    - Keystream slices ks(k,n,i) are independent free terms, not slices of one
+      PRF stream. Justified by PRF security, NOT proved here.
+    - tagsec/2 and mac/2 are free function symbols: TagSecrets leak nothing
+      about the key (whitepaper line 228) and the tag is unforgeable. Assumed.
+    - One record per direction; no per-record counters.
+    - Record nonces are PUBLIC (from the TLS sequence number). Modelling them
+      secret makes a compromised TEE_K look harmless; see the corrected
+      K-direction results in request_privacy2.spthy / splitaead_privacy2.spthy,
+      which supersede the *_against_TEEK lemmas below.
+    - Channels U<->K, K<->A, U<->A are secure (whitepaper:152), so they are
+      direct state facts rather than network messages.
+
+  This is the only model carrying the website's own decrypt-and-verify path,
+  which is what makes correctness_request meaningful. Secrecy lives in
+  request_privacy2.spthy (request phase) and splitaead_privacy2.spthy
+  (response phase); the *_against_* lemmas that used to sit here were
+  duplicates and have been removed.
+*/
+
+builtins: xor, signing
+functions: ks/3, tagsec/2, mac/2
+
+restriction Equality:
+  "All x y #i. Eq(x,y) @ i ==> x = y"
+
+// ---------------------------------------------------------------- setup
+
+rule Register_TEEs:
+  [ Fr(~skK), Fr(~skT) ]
+  --[ Register() ]->
+  [ !LtkK(~skK), !LtkT(~skT), Out(<pk(~skK), pk(~skT)>) ]
+
+restriction OnePair:
+  "All #i #j. Register() @ i & Register() @ j ==> #i = #j"
+
+// Phase 2, abstracted: TEE_K and the website end up sharing kenc/kdec.
+rule Handshake:
+  [ Fr(~sid), Fr(~kenc), Fr(~kdec), Fr(~n), Fr(~iv), Fr(~nr), Fr(~ivr) ]
+  --[ Start(~sid) ]->
+  [ K1(~sid, ~kenc, ~kdec, ~n, ~iv, ~nr, ~ivr)
+  , W1(~sid, ~kenc, ~kdec, ~n, ~iv, ~nr, ~ivr)
+  , U1(~sid)
+  , T1(~sid)
+  , Out(<~n, ~nr>) ]
+
+// -------------------------------------------------- Phase 3: request
+
+rule U_Request:
+  [ U1(~sid), Fr(~rns), Fr(~rs), Fr(~rsp), Fr(~strS), Fr(~strSP) ]
+  --[ Req(~sid, <~rns, ~rs, ~rsp>), SecretS(~sid, ~rs), SecretSP(~sid, ~rsp) ]->
+  [ U2(~sid, ~rns, ~rs, ~rsp, ~strS, ~strSP)
+  , ChUK(~sid, <~rns, ~rs ⊕ ~strS, ~rsp ⊕ ~strSP>)
+  , ChUT(~sid, ~strS, ~strSP) ]
+
+rule K_Encrypt:
+  let renc = < rns ⊕ ks(~kenc, ~n, '1')
+             , ms  ⊕ ks(~kenc, ~n, '2')
+             , msp ⊕ ks(~kenc, ~n, '3') >
+      tgs  = tagsec(~kenc, ~iv)
+  in
+  [ K1(~sid, ~kenc, ~kdec, ~n, ~iv, ~nr, ~ivr)
+  , ChUK(~sid, <rns, ms, msp>) ]
+  --[ KEnc(~sid) ]->
+  [ K2(~sid, ~kenc, ~kdec, ~n, ~iv, ~nr, ~ivr, <rns, ms, msp>)
+  , ChKT(~sid, renc, tgs)
+  , !KSecret(~sid, <rns, ms, msp>)
+  , !KSecret(~sid, ~kenc)
+  , !KSecret(~sid, ~kdec) ]
+
+rule T_Tag:
+  let final = < c1, c2 ⊕ ~strS, c3 ⊕ ~strSP >
+      tag   = mac(tgs, final)
+  in
+  [ T1(~sid), ChKT(~sid, <c1, c2, c3>, tgs), ChUT(~sid, ~strS, ~strSP) ]
+  --[ TTag(~sid) ]->
+  [ T2(~sid, ~strS, ~strSP)
+  , Out(<final, tag>)
+  , !TSecret(~sid, <c1, c2, c3>)
+  , !TSecret(~sid, tgs)
+  , !TSecret(~sid, <~strS, ~strSP>) ]
+
+rule W_Receive:
+  let plain = < x1 ⊕ ks(~kenc, ~n, '1')
+              , x2 ⊕ ks(~kenc, ~n, '2')
+              , x3 ⊕ ks(~kenc, ~n, '3') >
+  in
+  [ W1(~sid, ~kenc, ~kdec, ~n, ~iv, ~nr, ~ivr), In(<<x1, x2, x3>, tag>) ]
+  --[ Eq(tag, mac(tagsec(~kenc, ~iv), <x1, x2, x3>))
+    , WRecv(~sid, plain) ]->
+  [ W2(~sid, ~kdec, ~nr, ~ivr) ]
+
+// ------------------------------------------------- Phase 4: response
+
+rule W_Respond:
+  let respenc = < ~rpub ⊕ ks(~kdec, ~nr, '1')
+                , ~rsec ⊕ ks(~kdec, ~nr, '2') >
+      tr      = mac(tagsec(~kdec, ~ivr), respenc)
+  in
+  [ W2(~sid, ~kdec, ~nr, ~ivr), Fr(~rpub), Fr(~rsec) ]
+  --[ Resp(~sid, ~rpub, ~rsec), SecretResp(~sid, ~rsec) ]->
+  [ Out(<respenc, tr>) ]
+
+rule T_RecvResponse:
+  [ T2(~sid, ~strS, ~strSP), In(<respenc, tr>) ]
+  --[ TRecv(~sid) ]->
+  [ T3(~sid, respenc, tr), ChTK_Len(~sid), !TSecret(~sid, respenc) ]
+
+rule K_TagSecretsResp:
+  let tgr = tagsec(~kdec, ~ivr) in
+  [ K2(~sid, ~kenc, ~kdec, ~n, ~iv, ~nr, ~ivr, rred), ChTK_Len(~sid) ]
+  -->
+  [ K3(~sid, ~kenc, ~kdec, ~n, ~iv, ~nr, ~ivr, rred)
+  , ChKT_Resp(~sid, tgr)
+  , !KSecret(~sid, tgr) ]
+
+rule T_VerifyTag:
+  [ T3(~sid, respenc, tr), ChKT_Resp(~sid, tgr) ]
+  --[ Eq(tr, mac(tgr, respenc)), TVerified(~sid) ]->
+  [ T4(~sid, respenc), ChTK_Ok(~sid), !TSecret(~sid, tgr) ]
+
+rule K_ReleaseStream:
+  let strdec = < ks(~kdec, ~nr, '1'), ks(~kdec, ~nr, '2') > in
+  [ K3(~sid, ~kenc, ~kdec, ~n, ~iv, ~nr, ~ivr, rred), ChTK_Ok(~sid) ]
+  --[ KRelease(~sid) ]->
+  [ K4(~sid, ~kdec, ~nr, rred)
+  , ChKU(~sid, strdec)
+  , !KSecret(~sid, strdec) ]
+
+rule U_Decrypt:
+  let plain = < e1 ⊕ s1, e2 ⊕ s2 > in
+  [ U2(~sid, ~rns, ~rs, ~rsp, ~strS, ~strSP)
+  , ChKU(~sid, <s1, s2>)
+  , In(<<e1, e2>, tr>) ]
+  --[ UGot(~sid, plain) ]->
+  [ U3(~sid) ]
+
+// ------------------------------------------- single-TEE compromise
+
+rule Reveal_TEEK:
+  [ !KSecret(sid, x) ] --[ RevealK(sid) ]-> [ Out(x) ]
+
+rule Reveal_TEEA:
+  [ !TSecret(sid, x) ] --[ RevealT(sid) ]-> [ Out(x) ]
+
+// ----------------------------------------------------------- lemmas
+
+// Sanity: an honest run completes and the website recovers EXACTLY the
+// user's request. This is the XOR reassociation that makes split-AEAD work:
+//   ((rs ⊕ strS) ⊕ ks) ⊕ strS  =  rs ⊕ ks
+lemma correctness_request:
+  exists-trace
+  "Ex sid r #i #j. Req(sid, r) @ i & WRecv(sid, r) @ j"
+
+// correctness_response is NOT proved here. It does not need the website's
+// decrypt path, and that rule makes the search blow up (heap-exhausted at
+// 8G/1401s). It is proved in splitaead_privacy2.spthy in 20s instead.
+
+end

@@ -1,0 +1,172 @@
+theory SplitAEAD_Privacy2
+begin
+
+/*
+  Same protocol as splitaead_privacy.spthy, restructured so the search is
+  tractable. Two changes, both of which make the model MORE faithful:
+
+    - Algorithm 4 line 2 is "User -> TEE_A: (Resp_enc, T_resp)". v1 had TEE_A
+      read the ciphertext from the network; here the user receives it once and
+      forwards its own copy over the secure U<->T channel.
+    - Algorithm 4 line 10 is the user decrypting the ciphertext it already
+      holds. v1 re-read it from the network; here it uses its stored copy.
+
+  CORRECTION: record nonces are PUBLIC (derived from the TLS sequence
+  number) and are published here. Modelling them as fresh secrets makes a
+  compromised TEE_K look harmless -- it holds the key but supposedly cannot
+  build the keystream -- which is wrong and inflates the K-direction results.
+
+  One genuine simplification: the website's request-side tag check is dropped
+  (it is irrelevant to response privacy and was the single most expensive rule
+  in the search). Request correctness including that check is proved
+  separately in splitaead_privacy.spthy :: correctness_request.
+
+  Assumptions are otherwise as in splitaead_privacy.spthy.
+*/
+
+builtins: xor, signing
+functions: ks/3, tagsec/2, mac/2
+
+restriction Equality:
+  "All x y #i. Eq(x,y) @ i ==> x = y"
+
+rule Register_TEEs:
+  [ Fr(~skK), Fr(~skT) ]
+  --[ Register() ]->
+  [ !LtkK(~skK), !LtkT(~skT), Out(<pk(~skK), pk(~skT)>) ]
+
+restriction OnePair:
+  "All #i #j. Register() @ i & Register() @ j ==> #i = #j"
+
+rule Handshake:
+  [ Fr(~sid), Fr(~kenc), Fr(~kdec), Fr(~n), Fr(~iv), Fr(~nr), Fr(~ivr) ]
+  --[ Start(~sid) ]->
+  [ K1(~sid, ~kenc, ~kdec, ~n, ~iv, ~nr, ~ivr)
+  , W1(~sid, ~kdec, ~nr, ~ivr)
+  , U1(~sid)
+  , T1(~sid)
+  , Out(<~n, ~nr>) ]
+
+// -------------------------------------------------- Phase 3: request
+
+rule U_Request:
+  [ U1(~sid), Fr(~rns), Fr(~rs), Fr(~rsp), Fr(~strS), Fr(~strSP) ]
+  --[ SecretS(~sid, ~rs), SecretSP(~sid, ~rsp) ]->
+  [ U2(~sid)
+  , ChUK(~sid, <~rns, ~rs ⊕ ~strS, ~rsp ⊕ ~strSP>)
+  , ChUT(~sid, ~strS, ~strSP) ]
+
+rule K_Encrypt:
+  let renc = < rns ⊕ ks(~kenc, ~n, '1')
+             , ms  ⊕ ks(~kenc, ~n, '2')
+             , msp ⊕ ks(~kenc, ~n, '3') >
+      tgs  = tagsec(~kenc, ~iv)
+  in
+  [ K1(~sid, ~kenc, ~kdec, ~n, ~iv, ~nr, ~ivr)
+  , ChUK(~sid, <rns, ms, msp>) ]
+  -->
+  [ K2(~sid, ~kdec, ~nr, ~ivr)
+  , ChKT(~sid, renc, tgs)
+  , !KSecret(~sid, <rns, ms, msp>)
+  , !KSecret(~sid, ~kenc)
+  , !KSecret(~sid, ~kdec) ]
+
+rule T_Tag:
+  let final = < c1, c2 ⊕ ~strS, c3 ⊕ ~strSP >
+  in
+  [ T1(~sid), ChKT(~sid, <c1, c2, c3>, tgs), ChUT(~sid, ~strS, ~strSP) ]
+  -->
+  [ T2(~sid)
+  , Out(<final, mac(tgs, final)>)
+  , !TSecret(~sid, <c1, c2, c3>)
+  , !TSecret(~sid, tgs)
+  , !TSecret(~sid, <~strS, ~strSP>) ]
+
+// ------------------------------------------------- Phase 4: response
+
+rule W_Respond:
+  let respenc = < ~rpub ⊕ ks(~kdec, ~nr, '1')
+                , ~rsec ⊕ ks(~kdec, ~nr, '2') >
+  in
+  [ W1(~sid, ~kdec, ~nr, ~ivr), Fr(~rpub), Fr(~rsec) ]
+  --[ Resp(~sid, ~rpub, ~rsec), SecretResp(~sid, ~rsec) ]->
+  [ Out(<respenc, mac(tagsec(~kdec, ~ivr), respenc)>) ]
+
+// Algorithm 4 line 2: the user receives the response and forwards its copy.
+rule U_RecvResponse:
+  [ U2(~sid), In(<respenc, tr>) ]
+  -->
+  [ U3(~sid, respenc), ChUT_Resp(~sid, respenc, tr) ]
+
+rule T_RecvResponse:
+  [ T2(~sid), ChUT_Resp(~sid, respenc, tr) ]
+  -->
+  [ T3(~sid, respenc, tr), ChTK_Len(~sid), !TSecret(~sid, respenc) ]
+
+rule K_TagSecretsResp:
+  let tgr = tagsec(~kdec, ~ivr) in
+  [ K2(~sid, ~kdec, ~nr, ~ivr), ChTK_Len(~sid) ]
+  -->
+  [ K3(~sid, ~kdec, ~nr), ChKT_Resp(~sid, tgr), !KSecret(~sid, tgr) ]
+
+rule T_VerifyTag:
+  [ T3(~sid, respenc, tr), ChKT_Resp(~sid, tgr) ]
+  --[ Eq(tr, mac(tgr, respenc)) ]->
+  [ ChTK_Ok(~sid), !TSecret(~sid, tgr) ]
+
+rule K_ReleaseStream:
+  let strdec = < ks(~kdec, ~nr, '1'), ks(~kdec, ~nr, '2') > in
+  [ K3(~sid, ~kdec, ~nr), ChTK_Ok(~sid) ]
+  -->
+  [ ChKU(~sid, strdec), !KSecret(~sid, strdec) ]
+
+// Algorithm 4 line 10: the user decrypts the copy it already holds.
+rule U_Decrypt:
+  let plain = < e1 ⊕ s1, e2 ⊕ s2 > in
+  [ U3(~sid, <e1, e2>), ChKU(~sid, <s1, s2>) ]
+  --[ UGot(~sid, plain) ]->
+  [ ]
+
+// ------------------------------------------- single-TEE compromise
+
+rule Reveal_TEEK: [ !KSecret(sid, x) ] --[ RevealK(sid) ]-> [ Out(x) ]
+rule Reveal_TEEA: [ !TSecret(sid, x) ] --[ RevealT(sid) ]-> [ Out(x) ]
+
+// ----------------------------------------------------------- lemmas
+
+lemma correctness_response:
+  exists-trace
+  "Ex sid rpub rsec #i #j.
+     Resp(sid, rpub, rsec) @ i & UGot(sid, <rpub, rsec>) @ j"
+
+lemma secrecy_RS_against_TEEA:
+  all-traces
+  "All sid rs #i. SecretS(sid, rs) @ i &
+     (not (Ex #r. RevealK(sid) @ r))
+   ==> not (Ex #k. K(rs) @ k)"
+
+lemma secrecy_RSP_against_TEEK:
+  all-traces
+  "All sid rsp #i. SecretSP(sid, rsp) @ i &
+     (not (Ex #r. RevealT(sid) @ r))
+   ==> not (Ex #k. K(rsp) @ k)"
+
+lemma secrecy_RSP_against_TEEA:
+  all-traces
+  "All sid rsp #i. SecretSP(sid, rsp) @ i &
+     (not (Ex #r. RevealK(sid) @ r))
+   ==> not (Ex #k. K(rsp) @ k)"
+
+lemma secrecy_response_against_TEEK:
+  all-traces
+  "All sid rsec #i. SecretResp(sid, rsec) @ i &
+     (not (Ex #r. RevealT(sid) @ r))
+   ==> not (Ex #k. K(rsec) @ k)"
+
+lemma secrecy_response_against_TEEA:
+  all-traces
+  "All sid rsec #i. SecretResp(sid, rsec) @ i &
+     (not (Ex #r. RevealK(sid) @ r))
+   ==> not (Ex #k. K(rsec) @ k)"
+
+end

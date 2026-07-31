@@ -1,0 +1,26 @@
+#!/usr/bin/env python3
+"""
+Pass-through oracle that logs every goal Tamarin considers, then returns them
+in the order given (i.e. changes nothing). Run this FIRST on a lemma that will
+not terminate, to find out which goal classes are drowning the search, then
+write a real ranking oracle against that profile.
+
+    ./run.sh <model>.spthy --prove=<lemma> \
+        --heuristic=o --oraclename=./probe.oracle
+    sort probe_goals.log | uniq -c | sort -rn | head
+
+See request_privacy2.oracle for what came out of doing exactly this.
+"""
+import os
+import sys
+
+lines = sys.stdin.readlines()
+lemma = sys.argv[1]
+log = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'probe_goals.log')
+
+with open(log, 'a') as f:
+    for l in lines:
+        f.write(f"[{lemma}] {l}")
+
+for l in lines:
+    print(l.split(':')[0])

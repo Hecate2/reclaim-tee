@@ -1,0 +1,10 @@
+# Proof output -- regenerable with ./verify_all.sh
+*.results
+RESULTS.txt
+
+# Tamarin run logs and oracle profiling scratch
+*.log
+probe_goals.log
+
+# Reference oracles fetched from tamarin-prover/examples/jcs19-xor
+ref/

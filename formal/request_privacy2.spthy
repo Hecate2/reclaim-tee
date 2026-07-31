@@ -1,0 +1,85 @@
+theory Request_Privacy2
+begin
+
+/*
+  Request phase (Algorithm 3), full three-segment split, with ONE change from
+  request_privacy.spthy: compromising a TEE publishes its whole view in a
+  single step, instead of a per-item reveal rule over persistent facts.
+
+  Compromise is not partial or ordered in reality: an attacker who owns the
+  enclave gets everything it holds at once, so this is the more faithful of
+  the two forms regardless.
+
+  HYPOTHESIS FALSIFIED: it is NOT the cost driver. The per-item reveal rule
+  was suspected of forcing Tamarin to explore every ordering and subset of
+  reveals, but consolidating it left both *_against_TEEA lemmas exhausting
+  the heap anyway (895s and 601s at 4G).
+
+  Actual driver, from bisecting rs_vs_teea_minimal.spthy upward: the number
+  of independently-masked request segments whose masks the adversary knows.
+  One masked segment verifies (183 steps; 208 with tag secrets added, so tags
+  are not implicated). secrecy_response_against_TEEA -- same T-direction, but
+  the response carries no user mask -- verifies in 8 steps. Two masked
+  segments is where it goes.
+*/
+
+builtins: xor
+functions: ks/3, tagsec/2, mac/2
+
+rule Session:
+  [ Fr(~sid), Fr(~kenc), Fr(~n), Fr(~iv) ]
+  -->
+  [ K1(~sid, ~kenc, ~n, ~iv), U1(~sid), T1(~sid), Out(~n) ]
+
+rule U_Request:
+  [ U1(~sid), Fr(~rns), Fr(~rs), Fr(~rsp), Fr(~strS), Fr(~strSP) ]
+  --[ SecretS(~sid, ~rs), SecretSP(~sid, ~rsp) ]->
+  [ ChUK(~sid, <~rns, ~rs ⊕ ~strS, ~rsp ⊕ ~strSP>)
+  , ChUT(~sid, ~strS, ~strSP) ]
+
+rule K_Encrypt:
+  let renc = < rns ⊕ ks(~kenc, ~n, '1')
+             , ms  ⊕ ks(~kenc, ~n, '2')
+             , msp ⊕ ks(~kenc, ~n, '3') >
+      tgs  = tagsec(~kenc, ~iv)
+  in
+  [ K1(~sid, ~kenc, ~n, ~iv), ChUK(~sid, <rns, ms, msp>) ]
+  -->
+  [ ChKT(~sid, renc, tgs)
+  , KView(~sid, <<rns, ms, msp>, ~kenc, tgs>) ]
+
+rule T_Tag:
+  let final = < c1, c2 ⊕ ~strS, c3 ⊕ ~strSP > in
+  [ T1(~sid), ChKT(~sid, <c1, c2, c3>, tgs), ChUT(~sid, ~strS, ~strSP) ]
+  -->
+  [ Out(<final, mac(tgs, final)>)
+  , TView(~sid, <<c1, c2, c3>, tgs, ~strS, ~strSP, final>) ]
+
+rule Reveal_TEEK: [ KView(sid, v) ] --[ RevealK(sid) ]-> [ Out(v) ]
+rule Reveal_TEEA: [ TView(sid, v) ] --[ RevealT(sid) ]-> [ Out(v) ]
+
+lemma secrecy_RS_against_TEEK:
+  all-traces
+  "All sid rs #i. SecretS(sid, rs) @ i & (not (Ex #r. RevealT(sid) @ r))
+   ==> not (Ex #k. K(rs) @ k)"
+
+lemma secrecy_RS_against_TEEA:
+  all-traces
+  "All sid rs #i. SecretS(sid, rs) @ i & (not (Ex #r. RevealK(sid) @ r))
+   ==> not (Ex #k. K(rs) @ k)"
+
+lemma secrecy_RSP_against_TEEK:
+  all-traces
+  "All sid rsp #i. SecretSP(sid, rsp) @ i & (not (Ex #r. RevealT(sid) @ r))
+   ==> not (Ex #k. K(rsp) @ k)"
+
+lemma secrecy_RSP_against_TEEA:
+  all-traces
+  "All sid rsp #i. SecretSP(sid, rsp) @ i & (not (Ex #r. RevealK(sid) @ r))
+   ==> not (Ex #k. K(rsp) @ k)"
+
+lemma both_compromised_breaks_RS:
+  exists-trace
+  "Ex sid rs #i #k. SecretS(sid, rs) @ i & K(rs) @ k"
+
+end

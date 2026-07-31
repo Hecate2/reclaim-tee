@@ -1,0 +1,149 @@
+theory SplitAEAD_Invariants
+begin
+
+/*
+  The split does not rest on either TEE being cryptographically unable to
+  decrypt. It rests on WHAT EACH TEE IS EVER GIVEN:
+
+    TEE_K holds every key and keystream, and must never receive Resp_enc
+          or either user mask.
+    TEE_A holds every ciphertext, and must never receive a key or a bare
+          keystream.
+
+  These are code-behaviour invariants. This theory states them precisely and
+  checks them over the HONEST protocol -- no compromise rules, no reveals.
+
+  EPISTEMIC STATUS, stated plainly: the model is hand-derived from the
+  whitepaper algorithms and the Go source, so proving these here shows the
+  DESIGN has the property and pins exactly what must hold. It does NOT show
+  the shipped binary has it. Nothing in a symbolic model can. That gap is
+  closed by reproducible builds + SEV-SNP measurement + RA-TLS peer checks,
+  which is a supply-chain and hardware-root-of-trust argument, not a protocol
+  theorem. The value here is that the invariant is now written down exactly,
+  so a future protocol change that breaks it fails a check instead of passing
+  review unnoticed.
+
+  Every value each TEE touches is tagged KHolds / THolds. If a rule is added
+  that hands a TEE something new, its action must be tagged too or these
+  lemmas stop meaning anything.
+*/
+
+builtins: xor
+functions: ks/3, tagsec/2, mac/2
+
+restriction Equality: "All x y #i. Eq(x,y) @ i ==> x = y"
+
+rule Handshake:
+  [ Fr(~sid), Fr(~kenc), Fr(~kdec), Fr(~n), Fr(~iv), Fr(~nr), Fr(~ivr) ]
+  --[ Keystream(~sid, ks(~kenc, ~n, '1'))
+    , Keystream(~sid, ks(~kenc, ~n, '2'))
+    , Keystream(~sid, ks(~kenc, ~n, '3'))
+    , Keystream(~sid, ks(~kdec, ~nr, '1'))
+    , Keystream(~sid, ks(~kdec, ~nr, '2'))
+    , Key(~sid, ~kenc), Key(~sid, ~kdec)
+    , KHolds(~sid, ~kenc), KHolds(~sid, ~kdec) ]->
+  [ K1(~sid, ~kenc, ~kdec, ~n, ~iv, ~nr, ~ivr)
+  , W1(~sid, ~kdec, ~nr, ~ivr)
+  , U1(~sid), T1(~sid), Out(<~n, ~nr>) ]
+
+rule U_Request:
+  [ U1(~sid), Fr(~rns), Fr(~rs), Fr(~rsp), Fr(~strS), Fr(~strSP) ]
+  --[ Mask(~sid, ~strS), Mask(~sid, ~strSP) ]->
+  [ U2(~sid)
+  , ChUK(~sid, <~rns, ~rs ⊕ ~strS, ~rsp ⊕ ~strSP>)
+  , ChUT(~sid, ~strS, ~strSP) ]
+
+rule K_Encrypt:
+  let renc = < rns ⊕ ks(~kenc, ~n, '1')
+             , ms  ⊕ ks(~kenc, ~n, '2')
+             , msp ⊕ ks(~kenc, ~n, '3') >
+      tgs  = tagsec(~kenc, ~iv)
+  in
+  [ K1(~sid, ~kenc, ~kdec, ~n, ~iv, ~nr, ~ivr), ChUK(~sid, <rns, ms, msp>) ]
+  --[ KHolds(~sid, <rns, ms, msp>), KHolds(~sid, rns)
+    , KHolds(~sid, ms), KHolds(~sid, msp)
+    , KHolds(~sid, renc), KHolds(~sid, tgs)
+    , KHolds(~sid, ks(~kenc, ~n, '1')), KHolds(~sid, ks(~kenc, ~n, '2'))
+    , KHolds(~sid, ks(~kenc, ~n, '3')) ]->
+  [ K2(~sid, ~kdec, ~nr, ~ivr), ChKT(~sid, renc, tgs) ]
+
+rule T_Tag:
+  let final = < c1, c2 ⊕ ~strS, c3 ⊕ ~strSP > in
+  [ T1(~sid), ChKT(~sid, <c1, c2, c3>, tgs), ChUT(~sid, ~strS, ~strSP) ]
+  --[ THolds(~sid, <c1, c2, c3>), THolds(~sid, c1)
+    , THolds(~sid, c2), THolds(~sid, c3)
+    , THolds(~sid, tgs), THolds(~sid, ~strS), THolds(~sid, ~strSP)
+    , THolds(~sid, final) ]->
+  [ T2(~sid), Out(<final, mac(tgs, final)>) ]
+
+rule W_Respond:
+  let respenc = < ~rpub ⊕ ks(~kdec, ~nr, '1')
+                , ~rsec ⊕ ks(~kdec, ~nr, '2') >
+  in
+  [ W1(~sid, ~kdec, ~nr, ~ivr), Fr(~rpub), Fr(~rsec) ]
+  --[ RespEnc(~sid, respenc) ]->
+  [ Out(<respenc, mac(tagsec(~kdec, ~ivr), respenc)>) ]
+
+rule U_RecvResponse:
+  [ U2(~sid), In(<respenc, tr>) ]
+  -->
+  [ U3(~sid, respenc), ChUT_Resp(~sid, respenc, tr) ]
+
+rule T_RecvResponse:
+  [ T2(~sid), ChUT_Resp(~sid, respenc, tr) ]
+  --[ THolds(~sid, respenc), THolds(~sid, tr) ]->
+  [ T3(~sid, respenc, tr), ChTK_Len(~sid) ]
+
+// Algorithm 4 line 3: TEE_A sends TEE_K the LENGTH only, never the ciphertext.
+rule K_TagSecretsResp:
+  let tgr = tagsec(~kdec, ~ivr) in
+  [ K2(~sid, ~kdec, ~nr, ~ivr), ChTK_Len(~sid) ]
+  --[ KHolds(~sid, tgr) ]->
+  [ K3(~sid, ~kdec, ~nr), ChKT_Resp(~sid, tgr) ]
+
+rule T_VerifyTag:
+  [ T3(~sid, respenc, tr), ChKT_Resp(~sid, tgr) ]
+  --[ Eq(tr, mac(tgr, respenc)), THolds(~sid, tgr) ]->
+  [ ChTK_Ok(~sid) ]
+
+rule K_ReleaseStream:
+  let strdec = < ks(~kdec, ~nr, '1'), ks(~kdec, ~nr, '2') > in
+  [ K3(~sid, ~kdec, ~nr), ChTK_Ok(~sid) ]
+  --[ KHolds(~sid, strdec)
+    , KHolds(~sid, ks(~kdec, ~nr, '1')), KHolds(~sid, ks(~kdec, ~nr, '2')) ]->
+  [ ChKU(~sid, strdec) ]
+
+rule U_Decrypt:
+  [ U3(~sid, <e1, e2>), ChKU(~sid, <s1, s2>) ]
+  --[ UGot(~sid, <e1 ⊕ s1, e2 ⊕ s2>) ]->
+  [ ]
+
+// ---------------------------------------------------------- invariants
+
+// The one the whole response-privacy argument rests on.
+lemma teek_never_holds_response_ciphertext:
+  all-traces
+  "not (Ex sid re #i #j. RespEnc(sid, re) @ i & KHolds(sid, re) @ j)"
+
+// The request-privacy counterpart: TEE_K never learns a user mask.
+lemma teek_never_holds_a_mask:
+  all-traces
+  "not (Ex sid m #i #j. Mask(sid, m) @ i & KHolds(sid, m) @ j)"
+
+// TEE_A holds ciphertext but never a key.
+lemma teea_never_holds_a_key:
+  all-traces
+  "not (Ex sid k #i #j. Key(sid, k) @ i & THolds(sid, k) @ j)"
+
+// TEE_A never holds a bare keystream block either -- it only ever sees
+// keystream already XORed into plaintext.
+lemma teea_never_holds_a_keystream:
+  all-traces
+  "not (Ex sid s #i #j. Keystream(sid, s) @ i & THolds(sid, s) @ j)"
+
+// Anti-vacuity: the honest protocol actually runs to completion.
+lemma sanity_protocol_completes:
+  exists-trace
+  "Ex sid p #i. UGot(sid, p) @ i"
+
+end
