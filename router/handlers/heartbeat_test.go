@@ -186,6 +186,26 @@ func TestHeartbeatRejectsUnknownPair(t *testing.T) {
 	}
 }
 
+// SEV-SNP TEEs hold no GCP SA and send no Authorization header, so an unknown
+// pair_id must still answer 404 (-> shared.ErrRouterNotFound -> re-register) and
+// never 401, which they would retry forever. Regression: 2026-08-04, one pair
+// spent 8h heartbeating a deleted pair_id because auth ran before the lookup.
+func TestHeartbeatUnknownPairIs404WithoutAuthHeader(t *testing.T) {
+	s := newTestServer(t)
+	w := doHeartbeat(t, s, heartbeatRequest{
+		PairID:         "00000000-0000-0000-0000-000000000099",
+		Role:           "K",
+		ControlHealthy: true,
+		OTReady:        true,
+	}, teekIP+":12345", "") // no Authorization header, as an SNP TEE sends
+	if w.Code == http.StatusUnauthorized {
+		t.Fatalf("got 401: auth ran before the pair lookup, so the TEE will retry forever instead of re-registering (body=%s)", w.Body.String())
+	}
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d body=%s", w.Code, w.Body.String())
+	}
+}
+
 func TestHeartbeatRejectsUnregisteredRole(t *testing.T) {
 	s := newTestServer(t)
 	// Only K registers.

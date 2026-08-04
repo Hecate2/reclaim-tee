@@ -49,19 +49,36 @@ func (s *Server) HandleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Resolve the pair BEFORE authenticating. An unknown pair_id must answer 404
+	// so the TEE re-registers (shared.ErrRouterNotFound); falling through to the
+	// SA check answers 401 instead, which SNP TEEs retry forever because they
+	// hold no SA to satisfy it. Cost one pair 8h of dead heartbeats 2026-08-04.
+	existing, gerr := s.Store.GetPair(ctx, req.PairID)
+	switch {
+	case errors.Is(gerr, store.ErrNotFound) || (gerr == nil && existing == nil):
+		log.Warn("heartbeat: unknown pair_id, answering 404 to trigger re-register",
+			zap.String("pair_id", req.PairID), zap.String("role", req.Role))
+		writeErr(w, http.StatusNotFound, "pair not found")
+		return
+	case gerr != nil:
+		// Transient store failure: 503 keeps the TEE retrying rather than
+		// re-registering against a store that may still hold the pair.
+		log.Error("heartbeat: pair lookup failed",
+			zap.String("pair_id", req.PairID), zap.Error(gerr))
+		writeErr(w, http.StatusServiceUnavailable, "pair lookup failed")
+		return
+	}
+
 	// SEV-SNP pairs hold no GCP SA (same as /register). Detect them by the
 	// role's already-registered, allowlisted snp-app: digest and skip the SA
 	// token; the allowlist re-check below still gates them. NOTE: heartbeats
 	// for SEV-SNP pairs are not yet individually authenticated — a signed
 	// heartbeat (RA-TLS key) is the pre-prod follow-up.
-	isSEVSNP := false
-	if existing, gerr := s.Store.GetPair(ctx, req.PairID); gerr == nil && existing != nil {
-		roleDigest := existing.TEEKImageDigest
-		if store.Role(req.Role) == store.RoleT {
-			roleDigest = existing.TEETImageDigest
-		}
-		isSEVSNP = strings.HasPrefix(roleDigest, shared.SEVSNPAppPrefix)
+	roleDigest := existing.TEEKImageDigest
+	if store.Role(req.Role) == store.RoleT {
+		roleDigest = existing.TEETImageDigest
 	}
+	isSEVSNP := strings.HasPrefix(roleDigest, shared.SEVSNPAppPrefix)
 
 	var saEmail string
 	if !s.Config.Standalone && !isSEVSNP {

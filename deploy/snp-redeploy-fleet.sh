@@ -11,8 +11,8 @@ set -euo pipefail
 #
 #   read target commit + expected digests from image-history.json ->
 #   build (that commit, per-cloud images) -> assert built digests == recorded ->
-#   allowlist -> for each pair: drain -> wait active_sessions==0 -> dead ->
-#     remove BOTH old halves (keep static IP / EIP) -> snp-pair.sh up ->
+#   allowlist -> for each pair: drain -> wait active_sessions==0 ->
+#     remove BOTH old halves (keep static IP / EIP) -> dead -> snp-pair.sh up ->
 #     wait Ready in router -> next pair -> trim old app digests.
 #
 # Intended workflow:  fix -> commit -> record digests in image-history.json
@@ -259,9 +259,7 @@ redeploy_pair() {
       log "    active=${active}, waiting ..."; sleep 5
     done
     [[ "${active}" == "0" ]] || die "${name}: ${active} sessions still active after ${DRAIN_TIMEOUT}s — aborting (never terminate live sessions)"
-    local code
-    for _ in 1 2 3 4 5; do code="$(rt -o /dev/null -w '%{http_code}' -X POST "${ROUTER}/pairs/${pid}/dead")"; case "${code}" in 204|404) break ;; *) sleep 2 ;; esac; done
-    log "  drained + dead."
+    log "  drained."
   else
     log "  no router pair_id matched ${kip}; skipping drain."
   fi
@@ -270,6 +268,15 @@ redeploy_pair() {
   # stale-digest peer overlap (else the new K logs a transient RA-TLS mismatch).
   remove_old_half "${kc}" "${kl}" "${name}" k
   remove_old_half "${tc}" "${tl}" "${name}" t
+
+  # /dead AFTER the VMs are gone. It deletes the pair record, and a live TEE that
+  # heartbeats a deleted pair_id gets 404 -> re-registers -> orphan pair on the
+  # OLD digest (which is still allowlisted). Deleting first closes that window.
+  if [[ "${pid}" != "<none>" ]]; then
+    local code
+    for _ in 1 2 3 4 5; do code="$(rt -o /dev/null -w '%{http_code}' -X POST "${ROUTER}/pairs/${pid}/dead")"; case "${code}" in 204|404) break ;; *) sleep 2 ;; esac; done
+    log "  marked dead (code ${code:-?})."
+  fi
 
   local ulog="${LOG_DIR}/up-${name}.log"
   log "  bringing up ${name} at new digests  (log: ${ulog}) ..."
