@@ -18,6 +18,9 @@ if [[ -f "${SCRIPT_DIR}/.env" ]]; then set -a; source "${SCRIPT_DIR}/.env"; set 
 source "${SCRIPT_DIR}/_lib.sh"
 set -a; source "${SCRIPT_DIR}/snp-image/pins.env"; set +a
 
+: "${SNP_LOADER_GO_TOOLCHAIN:?set SNP_LOADER_GO_TOOLCHAIN in snp-image/pins.env}"
+: "${SNP_TEE_GO_TOOLCHAIN:?set SNP_TEE_GO_TOOLCHAIN in snp-image/pins.env}"
+
 GCP_PROJECT="${GCP_PROJECT:?set GCP_PROJECT in deploy/.env}"
 IMG_DIR="${SCRIPT_DIR}/snp-image"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -43,7 +46,7 @@ build_loader() {
     mkdir -p "$(dirname "${dst}")"
     # -buildvcs=false: the loader (and thus the base UKI / PCR 11) must NOT embed
     # the repo commit, so the base is reproducible regardless of commit.
-    ( _np; cd "${IMG_DIR}/loader" && GOTOOLCHAIN="${SNP_GO_TOOLCHAIN}" GOFLAGS=-mod=readonly GOOS=linux GOARCH=amd64 CGO_ENABLED=0 \
+    ( _np; cd "${IMG_DIR}/loader" && GOTOOLCHAIN="${SNP_LOADER_GO_TOOLCHAIN}" GOFLAGS=-mod=readonly GOOS=linux GOARCH=amd64 CGO_ENABLED=0 \
         go build -trimpath -buildvcs=false -ldflags "-buildid=" -o "${dst}" . )
     chmod 0755 "${dst}"
     echo "[build] loader sha256: $(sha256sum "${dst}" | cut -d' ' -f1)"
@@ -56,13 +59,13 @@ build_bundle() {
     local dst="${IMG_DIR}/mkosi.extra/usr/local/bin/snp-tee${role}"
     echo "[build] compiling tee_${role}..."
     mkdir -p "$(dirname "${dst}")"
-    ( _np; cd "${REPO_ROOT}" && GOTOOLCHAIN="${SNP_GO_TOOLCHAIN}" GOFLAGS=-mod=readonly GOOS=linux GOARCH=amd64 CGO_ENABLED=0 \
+    ( _np; cd "${REPO_ROOT}" && GOTOOLCHAIN="${SNP_TEE_GO_TOOLCHAIN}" GOFLAGS=-mod=readonly GOOS=linux GOARCH=amd64 CGO_ENABLED=0 \
         go build -trimpath -tags 'enclave osusergo netgo static_build' \
         -ldflags "-s -w -buildid= -extldflags=-static" -o "${dst}" "./tee_${role}" )
     chmod 0755 "${dst}"
     local stage; stage="$(mktemp -d)"
     cp "${dst}" "${stage}/app"
-    local mpcdir; mpcdir="$( _np; cd "${REPO_ROOT}" && GOTOOLCHAIN="${SNP_GO_TOOLCHAIN}" GOFLAGS=-mod=readonly go list -m -f '{{.Dir}}' github.com/markkurossi/mpc )"
+    local mpcdir; mpcdir="$( _np; cd "${REPO_ROOT}" && GOTOOLCHAIN="${SNP_TEE_GO_TOOLCHAIN}" GOFLAGS=-mod=readonly go list -m -f '{{.Dir}}' github.com/markkurossi/mpc )"
     mkdir -p "${stage}/mpcl"; cp -r "${mpcdir}/pkg" "${stage}/mpcl/pkg"
     mkdir -p "${stage}/etc/ssl/certs"
     ${DOCKER} run --rm "${SNP_CA_IMAGE}" cat /etc/ssl/certs/ca-certificates.crt > "${stage}/etc/ssl/certs/ca-certificates.crt"

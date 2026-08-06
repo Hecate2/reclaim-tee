@@ -7,9 +7,11 @@ import (
 	"crypto"
 	"crypto/rsa"
 	"crypto/sha1"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/pem"
 	"fmt"
 	"io"
@@ -32,6 +34,15 @@ const (
 	maxPackageSize = 10 * 1024 * 1024 // 10MB max
 	maxIndexSize   = 5 * 1024 * 1024  // 5MB max
 	certsPathInPkg = "etc/ssl/certs/ca-certificates.crt"
+
+	// Every gzip member is fully consumed once while splitting so its checksum
+	// is verified and a compressed bomb cannot consume unbounded CPU. Individual
+	// files have tighter limits below.
+	maxGzipMemberExpandedSize = 64 * 1024 * 1024
+	maxIndexFileSize          = 16 * 1024 * 1024
+	maxPackageInfoSize        = 1 * 1024 * 1024
+	maxCABundleSize           = 4 * 1024 * 1024
+	maxSignatureSize          = 8 * 1024
 )
 
 // Alpine signing keys (4096-bit RSA)
@@ -69,7 +80,17 @@ rO5kbUxFeZUIDq+7Yv4kLWcCAwEAAQ==
 
 type pkgInfo struct {
 	filename string
+	name     string
+	version  string
+	arch     string
 	checksum []byte // SHA1 checksum
+}
+
+type packageMetadata struct {
+	name     string
+	version  string
+	arch     string
+	dataHash [sha256.Size]byte
 }
 
 // StartRootCAUpdater starts the background goroutine that updates root CAs.
@@ -150,22 +171,11 @@ func fetchAndVerifyAlpineCACerts(logger *shared.Logger) ([]byte, error) {
 		return nil, fmt.Errorf("fetch package: %w", err)
 	}
 
-	// 3. Verify package checksum (from signed index)
-	// The checksum is SHA1 of the control stream only (stream 2), not the whole file
-	controlStream, err := extractControlStream(pkgData)
+	// Verify the package signature and the complete APKINDEX -> control -> data
+	// hash chain before reading the CA bundle from the data member.
+	certsPEM, err := verifyAndExtractCACerts(pkgData, pkg, logger)
 	if err != nil {
-		return nil, fmt.Errorf("extract control stream: %w", err)
-	}
-	actualHash := sha1.Sum(controlStream)
-	if !bytes.Equal(actualHash[:], pkg.checksum) {
-		return nil, fmt.Errorf("checksum mismatch")
-	}
-	logger.Debug("Package checksum verified")
-
-	// 4. Extract ca-certificates.crt from package
-	certsPEM, err := extractCertsFromAPK(pkgData)
-	if err != nil {
-		return nil, fmt.Errorf("extract certs: %w", err)
+		return nil, fmt.Errorf("verify package: %w", err)
 	}
 
 	return certsPEM, nil
@@ -212,71 +222,80 @@ func fetchWithLimit(client *http.Client, url string, maxSize int64) ([]byte, err
 //
 // The signature is over the raw bytes of stream 2.
 func parseAndVerifyIndex(data []byte, logger *shared.Logger) (*pkgInfo, error) {
-	// Find the boundary between two gzip streams
-	streamBoundary, err := findGzipStreamBoundary(data)
+	members, err := splitGzipMembers(data, 2)
 	if err != nil {
-		return nil, fmt.Errorf("find stream boundary: %w", err)
+		return nil, fmt.Errorf("split index members: %w", err)
 	}
 
-	// Stream 1: signature
-	sigStream := data[:streamBoundary]
-	// Stream 2: signed index data
-	indexStream := data[streamBoundary:]
-
-	// Extract signature from stream 1
-	signature, keyName, err := extractSignatureFromStream(sigStream)
+	signature, keyName, err := extractSignatureFromMember(members[0])
 	if err != nil {
 		return nil, fmt.Errorf("extract signature: %w", err)
 	}
 
-	// Verify signature over stream 2 raw bytes
-	if err := verifySignature(indexStream, signature, keyName, logger); err != nil {
+	// Alpine signs the exact compressed index member, not its decompressed tar.
+	if err := verifySignature(members[1], signature, keyName, logger); err != nil {
 		return nil, fmt.Errorf("signature verification: %w", err)
 	}
 
-	// Parse stream 2 to get package info
-	return parseIndexStream(indexStream)
+	return parseIndexMember(members[1])
 }
 
-// findGzipStreamBoundary finds where the first gzip stream ends.
-// Gzip streams can be detected by decompressing and tracking position.
-func findGzipStreamBoundary(data []byte) (int, error) {
-	// Look for gzip magic (1f 8b 08) after position 0
-	// The boundary is where a valid gzip header appears after the first stream
-	for i := 1; i < len(data)-2; i++ {
-		if data[i] == 0x1f && data[i+1] == 0x8b && data[i+2] == 0x08 {
-			// Verify this is actually a stream boundary by checking
-			// if the previous 8 bytes could be a gzip footer
-			if i >= 8 {
-				// Try to decompress stream 1
-				gz, err := gzip.NewReader(bytes.NewReader(data[:i]))
-				if err == nil {
-					_, err = io.ReadAll(gz)
-					gz.Close()
-					if err == nil {
-						return i, nil
-					}
-				}
-			}
-		}
+// splitGzipMembers separates concatenated gzip members without searching for
+// gzip magic bytes inside compressed data. bytes.Reader implements io.ByteReader,
+// so Multistream(false) leaves it positioned exactly after each member.
+func splitGzipMembers(data []byte, expected int) ([][]byte, error) {
+	if len(data) == 0 {
+		return nil, fmt.Errorf("empty gzip input")
 	}
-	return 0, fmt.Errorf("no second gzip stream found")
+
+	r := bytes.NewReader(data)
+	members := make([][]byte, 0, expected)
+	for r.Len() > 0 {
+		if len(members) == expected {
+			return nil, fmt.Errorf("too many gzip members: expected %d", expected)
+		}
+		start := len(data) - r.Len()
+		gz, err := gzip.NewReader(r)
+		if err != nil {
+			return nil, fmt.Errorf("member %d header: %w", len(members)+1, err)
+		}
+		gz.Multistream(false)
+		n, readErr := io.Copy(io.Discard, io.LimitReader(gz, maxGzipMemberExpandedSize+1))
+		closeErr := gz.Close()
+		if readErr != nil {
+			return nil, fmt.Errorf("member %d decompress: %w", len(members)+1, readErr)
+		}
+		if closeErr != nil {
+			return nil, fmt.Errorf("member %d close: %w", len(members)+1, closeErr)
+		}
+		if n > maxGzipMemberExpandedSize {
+			return nil, fmt.Errorf("member %d expands beyond %d bytes", len(members)+1, maxGzipMemberExpandedSize)
+		}
+		end := len(data) - r.Len()
+		if end <= start {
+			return nil, fmt.Errorf("member %d made no progress", len(members)+1)
+		}
+		members = append(members, data[start:end])
+	}
+	if len(members) != expected {
+		return nil, fmt.Errorf("wrong gzip member count: got %d, want %d", len(members), expected)
+	}
+	return members, nil
 }
 
-// extractSignatureFromStream extracts the signature from the first gzip stream.
-func extractSignatureFromStream(data []byte) ([]byte, string, error) {
-	gz, err := gzip.NewReader(bytes.NewReader(data))
+// extractSignatureFromMember extracts the sole signature entry from a gzip
+// member. Alpine signature members are tar segments and may omit tar EOF blocks.
+func extractSignatureFromMember(member []byte) ([]byte, string, error) {
+	gz, err := gzip.NewReader(bytes.NewReader(member))
 	if err != nil {
 		return nil, "", fmt.Errorf("gzip reader: %w", err)
 	}
 	defer gz.Close()
+	gz.Multistream(false)
 
-	tarContent, err := io.ReadAll(gz)
-	if err != nil {
-		return nil, "", fmt.Errorf("decompress: %w", err)
-	}
-
-	tr := tar.NewReader(bytes.NewReader(tarContent))
+	tr := tar.NewReader(gz)
+	var signature []byte
+	var keyName string
 	for {
 		hdr, err := tr.Next()
 		if err == io.EOF {
@@ -286,17 +305,29 @@ func extractSignatureFromStream(data []byte) ([]byte, string, error) {
 			return nil, "", fmt.Errorf("tar read: %w", err)
 		}
 
-		if strings.HasPrefix(hdr.Name, ".SIGN.RSA.") {
-			sig, err := io.ReadAll(tr)
-			if err != nil {
-				return nil, "", fmt.Errorf("read signature: %w", err)
-			}
-			keyName := strings.TrimPrefix(hdr.Name, ".SIGN.RSA.")
-			return sig, keyName, nil
+		if !strings.HasPrefix(hdr.Name, ".SIGN.RSA.") {
+			return nil, "", fmt.Errorf("unexpected signature member entry %q", hdr.Name)
 		}
+		if signature != nil {
+			return nil, "", fmt.Errorf("multiple signature entries")
+		}
+		if hdr.Typeflag != tar.TypeReg && hdr.Typeflag != tar.TypeRegA {
+			return nil, "", fmt.Errorf("signature is not a regular file")
+		}
+		if hdr.Size <= 0 || hdr.Size > maxSignatureSize {
+			return nil, "", fmt.Errorf("signature size %d is invalid", hdr.Size)
+		}
+		signature, err = io.ReadAll(tr)
+		if err != nil {
+			return nil, "", fmt.Errorf("read signature: %w", err)
+		}
+		keyName = strings.TrimPrefix(hdr.Name, ".SIGN.RSA.")
 	}
 
-	return nil, "", fmt.Errorf("no signature file found")
+	if signature == nil {
+		return nil, "", fmt.Errorf("no signature file found")
+	}
+	return signature, keyName, nil
 }
 
 func verifySignature(data, signature []byte, keyName string, logger *shared.Logger) error {
@@ -326,38 +357,16 @@ func verifySignature(data, signature []byte, keyName string, logger *shared.Logg
 		return fmt.Errorf("signature invalid: %w", err)
 	}
 
-	logger.Debug("APKINDEX signature verified", zap.String("key", keyName))
+	logger.Debug("Alpine signature verified", zap.String("key", keyName))
 	return nil
 }
 
-// parseIndexStream parses the index gzip stream to find package info.
-func parseIndexStream(data []byte) (*pkgInfo, error) {
-	gz, err := gzip.NewReader(bytes.NewReader(data))
+func parseIndexMember(member []byte) (*pkgInfo, error) {
+	content, err := readTarMemberFile(member, "APKINDEX", maxIndexFileSize)
 	if err != nil {
-		return nil, fmt.Errorf("gzip reader: %w", err)
+		return nil, fmt.Errorf("read APKINDEX: %w", err)
 	}
-	defer gz.Close()
-
-	tr := tar.NewReader(gz)
-	for {
-		hdr, err := tr.Next()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return nil, fmt.Errorf("tar read: %w", err)
-		}
-
-		if hdr.Name == "APKINDEX" {
-			content, err := io.ReadAll(tr)
-			if err != nil {
-				return nil, fmt.Errorf("read APKINDEX: %w", err)
-			}
-			return findPackageInIndex(content)
-		}
-	}
-
-	return nil, fmt.Errorf("APKINDEX not found")
+	return findPackageInIndex(content)
 }
 
 func findPackageInIndex(content []byte) (*pkgInfo, error) {
@@ -369,13 +378,15 @@ func findPackageInIndex(content []byte) (*pkgInfo, error) {
 
 	for block := range blocks {
 		lines := strings.Split(block, "\n")
-		var name, version, checksumStr string
+		var name, version, arch, checksumStr string
 
 		for _, line := range lines {
 			if after, ok := strings.CutPrefix(line, "P:"); ok {
 				name = after
 			} else if after, ok := strings.CutPrefix(line, "V:"); ok {
 				version = after
+			} else if after, ok := strings.CutPrefix(line, "A:"); ok {
+				arch = after
 			} else if after, ok := strings.CutPrefix(line, "C:"); ok {
 				checksumStr = after
 			}
@@ -387,13 +398,22 @@ func findPackageInIndex(content []byte) (*pkgInfo, error) {
 				return nil, fmt.Errorf("unsupported checksum format: %s", checksumStr)
 			}
 
-			checksum, err := base64.StdEncoding.DecodeString(checksumStr[2:])
+			checksum, err := base64.StdEncoding.Strict().DecodeString(checksumStr[2:])
 			if err != nil {
 				return nil, fmt.Errorf("decode checksum: %w", err)
+			}
+			if len(checksum) != sha1.Size {
+				return nil, fmt.Errorf("checksum has %d bytes, want %d", len(checksum), sha1.Size)
+			}
+			if version == "" || arch == "" {
+				return nil, fmt.Errorf("package %s is missing version or architecture", name)
 			}
 
 			return &pkgInfo{
 				filename: fmt.Sprintf("%s-%s.apk", name, version),
+				name:     name,
+				version:  version,
+				arch:     arch,
 				checksum: checksum,
 			}, nil
 		}
@@ -402,56 +422,132 @@ func findPackageInIndex(content []byte) (*pkgInfo, error) {
 	return nil, fmt.Errorf("package %s not found in index", caCertsPkg)
 }
 
-// extractControlStream extracts the control stream (stream 2) from an APK package.
-// APK packages have 3 concatenated gzip streams:
-//   - Stream 1: Signature segment (.SIGN.RSA.*)
-//   - Stream 2: Control segment (.PKGINFO, scripts)
-//   - Stream 3: Data segment (actual files)
-//
-// The APKINDEX checksum is SHA1 of the raw bytes of stream 2.
-func extractControlStream(pkgData []byte) ([]byte, error) {
-	// Find all gzip stream boundaries (magic bytes: 1f 8b 08)
-	var boundaries []int
-	for i := 0; i < len(pkgData)-2; i++ {
-		if pkgData[i] == 0x1f && pkgData[i+1] == 0x8b && pkgData[i+2] == 0x08 {
-			boundaries = append(boundaries, i)
+// verifyAndExtractCACerts authenticates all three APK v2 members. The signed
+// index pins the compressed control member via Q1/SHA-1; the control member's
+// .PKGINFO pins the compressed data member via datahash/SHA-256.
+func verifyAndExtractCACerts(pkgData []byte, pkg *pkgInfo, logger *shared.Logger) ([]byte, error) {
+	members, err := splitGzipMembers(pkgData, 3)
+	if err != nil {
+		return nil, fmt.Errorf("split package members: %w", err)
+	}
+
+	signature, keyName, err := extractSignatureFromMember(members[0])
+	if err != nil {
+		return nil, fmt.Errorf("extract package signature: %w", err)
+	}
+	if err := verifySignature(members[1], signature, keyName, logger); err != nil {
+		return nil, fmt.Errorf("package signature: %w", err)
+	}
+
+	controlHash := sha1.Sum(members[1])
+	if !bytes.Equal(controlHash[:], pkg.checksum) {
+		return nil, fmt.Errorf("control checksum mismatch")
+	}
+
+	pkgInfoData, err := readTarMemberFile(members[1], ".PKGINFO", maxPackageInfoSize)
+	if err != nil {
+		return nil, fmt.Errorf("read .PKGINFO: %w", err)
+	}
+	metadata, err := parsePackageMetadata(pkgInfoData)
+	if err != nil {
+		return nil, fmt.Errorf("parse .PKGINFO: %w", err)
+	}
+	// The repository index uses its repository architecture for noarch packages
+	// (for example, x86_64 in APKINDEX and noarch in .PKGINFO). The signed index
+	// checksum already pins this exact control member, so compare the package
+	// identity fields that must be identical instead of rejecting valid noarch
+	// packages.
+	if metadata.name != pkg.name || metadata.version != pkg.version {
+		return nil, fmt.Errorf("package metadata mismatch: got %s-%s, want %s-%s",
+			metadata.name, metadata.version, pkg.name, pkg.version)
+	}
+
+	dataHash := sha256.Sum256(members[2])
+	if !bytes.Equal(dataHash[:], metadata.dataHash[:]) {
+		return nil, fmt.Errorf("datahash mismatch")
+	}
+
+	certs, err := readTarMemberFile(members[2], certsPathInPkg, maxCABundleSize)
+	if err != nil {
+		return nil, fmt.Errorf("extract CA bundle: %w", err)
+	}
+	if len(certs) == 0 {
+		return nil, fmt.Errorf("CA bundle is empty")
+	}
+	return certs, nil
+}
+
+func parsePackageMetadata(data []byte) (*packageMetadata, error) {
+	values := make(map[string]string)
+	for line := range strings.SplitSeq(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		key, value, ok := strings.Cut(line, " = ")
+		if !ok || key == "" || value == "" {
+			return nil, fmt.Errorf("malformed metadata line %q", line)
+		}
+		if key == "pkgname" || key == "pkgver" || key == "arch" || key == "datahash" {
+			if _, duplicate := values[key]; duplicate {
+				return nil, fmt.Errorf("duplicate %s field", key)
+			}
+			values[key] = value
 		}
 	}
 
-	if len(boundaries) < 3 {
-		return nil, fmt.Errorf("APK must have at least 3 gzip streams, found %d", len(boundaries))
+	for _, key := range []string{"pkgname", "pkgver", "arch", "datahash"} {
+		if values[key] == "" {
+			return nil, fmt.Errorf("missing %s field", key)
+		}
 	}
-
-	// Stream 2 is between boundaries[1] and boundaries[2]
-	stream2Start := boundaries[1]
-	stream2End := boundaries[2]
-
-	return pkgData[stream2Start:stream2End], nil
+	rawHash, err := hex.DecodeString(values["datahash"])
+	if err != nil || len(rawHash) != sha256.Size {
+		return nil, fmt.Errorf("datahash must be %d-byte hexadecimal SHA-256", sha256.Size)
+	}
+	metadata := &packageMetadata{name: values["pkgname"], version: values["pkgver"], arch: values["arch"]}
+	copy(metadata.dataHash[:], rawHash)
+	return metadata, nil
 }
 
-func extractCertsFromAPK(pkgData []byte) ([]byte, error) {
-	gz, err := gzip.NewReader(bytes.NewReader(pkgData))
+func readTarMemberFile(member []byte, wanted string, maxSize int64) ([]byte, error) {
+	gz, err := gzip.NewReader(bytes.NewReader(member))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("gzip reader: %w", err)
 	}
 	defer gz.Close()
+	gz.Multistream(false)
 
 	tr := tar.NewReader(gz)
+	var result []byte
 	for {
 		hdr, err := tr.Next()
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("tar read: %w", err)
 		}
-
-		// Look for the certs file
 		name := strings.TrimPrefix(hdr.Name, "./")
-		if name == certsPathInPkg {
-			return io.ReadAll(tr)
+		if name != wanted {
+			continue
+		}
+		if result != nil {
+			return nil, fmt.Errorf("duplicate %s entry", wanted)
+		}
+		if hdr.Typeflag != tar.TypeReg && hdr.Typeflag != tar.TypeRegA {
+			return nil, fmt.Errorf("%s is not a regular file", wanted)
+		}
+		if hdr.Size < 0 || hdr.Size > maxSize {
+			return nil, fmt.Errorf("%s size %d exceeds limit %d", wanted, hdr.Size, maxSize)
+		}
+		result, err = io.ReadAll(tr)
+		if err != nil {
+			return nil, fmt.Errorf("read %s: %w", wanted, err)
 		}
 	}
-
-	return nil, fmt.Errorf("certificate file not found in package")
+	if result == nil {
+		return nil, fmt.Errorf("%s not found", wanted)
+	}
+	return result, nil
 }
