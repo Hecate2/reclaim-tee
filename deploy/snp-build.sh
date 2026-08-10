@@ -20,6 +20,7 @@ set -a; source "${SCRIPT_DIR}/snp-image/pins.env"; set +a
 
 : "${SNP_LOADER_GO_TOOLCHAIN:?set SNP_LOADER_GO_TOOLCHAIN in snp-image/pins.env}"
 : "${SNP_TEE_GO_TOOLCHAIN:?set SNP_TEE_GO_TOOLCHAIN in snp-image/pins.env}"
+: "${SNP_APT_SNAPSHOT:?set SNP_APT_SNAPSHOT in snp-image/pins.env}"
 
 GCP_PROJECT="${GCP_PROJECT:?set GCP_PROJECT in deploy/.env}"
 IMG_DIR="${SCRIPT_DIR}/snp-image"
@@ -88,6 +89,7 @@ build_raw() {
     local priv="--privileged -v /dev:/dev" idonly=""
     [[ "${SNP_BUILD_ONLY:-0}" == 1 ]] && { priv=""; idonly="-e SNP_IDENTITY_ONLY=1"; }
     ( _np; ${DOCKER} build --build-arg KERNEL_PKG="$(kernel_for "$cloud")" \
+        --build-arg CA_IMAGE="${SNP_CA_IMAGE}" --build-arg APT_SNAPSHOT="${SNP_APT_SNAPSHOT}" \
         --build-arg UBUNTU_DIGEST="${SNP_UBUNTU_DIGEST}" \
         --build-arg SYSTEMD_BOOT_VER="${SNP_SYSTEMD_BOOT_VER}" --build-arg SYSTEMD_UKIFY_VER="${SNP_SYSTEMD_UKIFY_VER}" \
         --build-arg SYSTEMD_VER="${SNP_SYSTEMD_VER}" --build-arg ZSTD_VER="${SNP_ZSTD_VER}" \

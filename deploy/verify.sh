@@ -196,8 +196,9 @@ echo "============================================="
 # SEV-SNP verification. Identity-only builds (SNP_BUILD_ONLY=1) skip systemd-
 # repart, so they need no --privileged, no /dev, and no cloud creds (GCP_PROJECT
 # is unused once packaging is skipped). base_images are commit-independent ->
-# rebuilt from the CURRENT pins.env. sev-snp app_images track their sourceCommit
-# -> rebuilt in a worktree of that commit. App is cross-cloud, so we use gcp.
+# rebuilt from the CURRENT pins.env. sev-snp app_images track their sourceCommit;
+# snp-build.sh clones that commit for the app while retaining the current pinned
+# build infrastructure. App is cross-cloud, so we use gcp.
 # ---------------------------------------------------------------------------
 SNP_BUILD="${REPO_ROOT}/deploy/snp-build.sh"
 if [[ -x "${SNP_BUILD}" ]]; then
@@ -222,18 +223,13 @@ for b in json.load(open('${HISTORY}')).get('base_images', []):
         [[ -z "${ROLE}" ]] && continue
         log "Verifying SNP app (tee_${ROLE} @ ${COMMIT:0:12})..."
         git -C "${REPO_ROOT}" rev-parse --verify "${COMMIT}^{commit}" >/dev/null 2>&1 || { log "ERROR: sourceCommit ${COMMIT} not in repo"; PASS=false; continue; }
-        # Clone, NOT worktree: a linked worktree's .git is a file, which Go's
-        # buildvcs does not treat as a VCS repo -> it silently omits the commit
-        # stamp, so the app would never match the fleet build (which embeds it).
-        SRC="${TMPDIR}/snp-${ROLE}-${COMMIT}"
-        git clone -q "${REPO_ROOT}" "${SRC}"
-        git -C "${SRC}" checkout -q "${COMMIT}"
         APP_LOG="${TMPDIR}/snp-app-${ROLE}.log"
-        # Pin snp-build.sh to this entry's commit; otherwise its BUILD_COMMIT
-        # defaults to image-history.json's latest, building the wrong tree.
-        ( cd "${SRC}" && GCP_PROJECT=verify SNP_BUILD_ONLY=1 SNP_BUILD_COMMIT="${COMMIT}" ./deploy/snp-build.sh "${ROLE}" gcp ) >"${APP_LOG}" 2>&1 || true
+        # Use today's pinned builder, including its immutable package snapshot.
+        # SNP_BUILD_COMMIT makes snp-build.sh create a real clone of the recorded
+        # source commit so Go embeds the same VCS stamp as the fleet build.
+        GCP_PROJECT=verify SNP_BUILD_ONLY=1 SNP_BUILD_COMMIT="${COMMIT}" \
+            "${SNP_BUILD}" "${ROLE}" gcp >"${APP_LOG}" 2>&1 || true
         ACT_APP=$(sed -n 's/.*app digest *= *\(snp-app:[0-9a-f]*\).*/\1/p' "${APP_LOG}" | tail -1)
-        rm -rf "${SRC}"
         echo "SNP app tee_${ROLE}: expected ${EXP_APP:0:24}… actual ${ACT_APP:0:24}…"
         if [[ "${ACT_APP}" != "${EXP_APP}" ]]; then
             echo "  Result:   MISMATCH — snp-build.sh output (tail):"
