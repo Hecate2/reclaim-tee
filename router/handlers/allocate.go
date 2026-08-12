@@ -3,6 +3,7 @@ package handlers
 import (
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"slices"
 	"time"
@@ -117,12 +118,16 @@ func (s *Server) HandleAllocate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Structured allocation record for stats/dashboards: which attestation type
-	// was served (CS vs SEV-SNP) and whether the client is SNP-capable. A single
-	// stable source (the router sees every allocation) that survives pair
-	// redeploys, unlike instance-id-keyed TEE logs.
+	// Structured allocation record for stats/dashboards. pair_id identifies this
+	// boot, while the endpoint IPs and resolved regions let operators follow the
+	// same deployed pair across boots. The SNP deployment keeps each half's
+	// static IP/EIP when it redeploys in place.
 	log.Info("pair allocated",
 		zap.String("pair_id", picked.ID),
+		zap.String("teek_ip", endpointIP(picked.TEEKAddr)),
+		zap.String("teet_ip", endpointIP(picked.TEETAddr)),
+		zap.String("teek_region", picked.TEEKRegion),
+		zap.String("teet_region", picked.TEETRegion),
 		zap.String("attestation_type", selector.PairAttestationType(picked)),
 		zap.Bool("snp_capable", slices.Contains(accepts, shared.AttestationTypeSEVSNP)))
 
@@ -132,4 +137,12 @@ func (s *Server) HandleAllocate(w http.ResponseWriter, r *http.Request) {
 		TEETAddr: picked.TEETAddr,
 		JWT:      tokenStr,
 	})
+}
+
+func endpointIP(addr string) string {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return addr
+	}
+	return host
 }

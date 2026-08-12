@@ -11,6 +11,8 @@ import (
 	"github.com/reclaimprotocol/reclaim-tee/router/signer"
 
 	"github.com/golang-jwt/jwt/v5"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 func newTestServerWithSigner(t *testing.T) (*Server, *signer.LocalSigner) {
@@ -113,6 +115,44 @@ func TestAllocateHappyPath(t *testing.T) {
 	}
 	if claims.ID == "" {
 		t.Fatal("missing jti")
+	}
+}
+
+func TestAllocateLogsStablePairDimensions(t *testing.T) {
+	s, _ := newTestServerWithSigner(t)
+	bothSidesReady(t, s)
+
+	p, err := s.Store.GetPair(t.Context(), pairID)
+	if err != nil {
+		t.Fatalf("get pair: %v", err)
+	}
+	p.TEEKRegion = "asia-south2"
+	p.TEETRegion = "ap-south-1"
+	if err := s.Store.UpsertPair(t.Context(), p); err != nil {
+		t.Fatalf("update pair regions: %v", err)
+	}
+
+	core, logs := observer.New(zap.InfoLevel)
+	s.Logger = zap.New(core)
+	if w := doAllocate(t, s, "nonce-stable-dimensions"); w.Code != http.StatusOK {
+		t.Fatalf("allocate: got %d body=%s", w.Code, w.Body.String())
+	}
+
+	entries := logs.FilterMessage("pair allocated").All()
+	if len(entries) != 1 {
+		t.Fatalf("allocation logs: got %d, want 1", len(entries))
+	}
+	fields := entries[0].ContextMap()
+	want := map[string]string{
+		"teek_ip":     teekIP,
+		"teet_ip":     teetIP,
+		"teek_region": "asia-south2",
+		"teet_region": "ap-south-1",
+	}
+	for key, value := range want {
+		if fields[key] != value {
+			t.Errorf("%s: got %#v, want %q", key, fields[key], value)
+		}
 	}
 }
 
