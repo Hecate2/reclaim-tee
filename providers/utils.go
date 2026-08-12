@@ -60,20 +60,32 @@ type substituteResult struct {
 	HiddenURLParts  []hiddenPart
 }
 
-func substituteParamValues(current *HTTPProviderParams, secret *HTTPProviderSecretParams, ignoreMissing bool) substituteResult {
+func substituteParamValues(current *HTTPProviderParams, secret *HTTPProviderSecretParams, ignoreMissing bool) (substituteResult, error) {
+	if current == nil {
+		return substituteResult{}, fmt.Errorf("provider params are required")
+	}
+
 	logger.Info("Starting substituteParamValues", zap.String("component", "Utils"), zap.String("operation", "substituteParamValues"), zap.String("url", current.URL), zap.Bool("ignore_missing", ignoreMissing))
 
 	// deep copy via json
 	var params HTTPProviderParams
-	b, _ := json.Marshal(*current)
-	_ = json.Unmarshal(b, &params)
+	b, err := json.Marshal(*current)
+	if err != nil {
+		return substituteResult{}, fmt.Errorf("failed to copy provider params: %w", err)
+	}
+	if err := json.Unmarshal(b, &params); err != nil {
+		return substituteResult{}, fmt.Errorf("failed to copy provider params: %w", err)
+	}
 	logger.Debug("Parameters deep copied via JSON", zap.String("component", "Utils"), zap.String("operation", "substituteParamValues"))
 
 	extracted := map[string]string{}
 
 	// URL
 	hiddenURL := []hiddenPart{}
-	urlParams := extractAndReplaceTemplateValues(params.URL, &params, secret, ignoreMissing)
+	urlParams, err := extractAndReplaceTemplateValues(params.URL, &params, secret, ignoreMissing)
+	if err != nil {
+		return substituteResult{}, fmt.Errorf("url: %w", err)
+	}
 	if urlParams.NewParam != "" || len(urlParams.ExtractedValues) > 0 {
 		logger.Debug("URL substitution complete", zap.String("component", "Utils"), zap.String("operation", "substituteParamValues"), zap.Int("extracted_values", len(urlParams.ExtractedValues)), zap.Int("hidden_parts", len(urlParams.HiddenParts)))
 		params.URL = urlParams.NewParam
@@ -92,7 +104,10 @@ func substituteParamValues(current *HTTPProviderParams, secret *HTTPProviderSecr
 	hiddenBody := []hiddenPart{}
 	if params.Body != nil {
 		bodyStr := uint8ArrayToStr(normalizeBodyToBytes(params.Body))
-		br := extractAndReplaceTemplateValues(bodyStr, &params, secret, ignoreMissing)
+		br, err := extractAndReplaceTemplateValues(bodyStr, &params, secret, ignoreMissing)
+		if err != nil {
+			return substituteResult{}, fmt.Errorf("body: %w", err)
+		}
 		if br.NewParam != "" || len(br.ExtractedValues) > 0 {
 			logger.Debug("Body substitution complete", zap.String("component", "Utils"), zap.String("operation", "substituteParamValues"), zap.Int("extracted_values", len(br.ExtractedValues)), zap.Int("hidden_parts", len(br.HiddenParts)))
 			params.Body = br.NewParam
@@ -104,7 +119,10 @@ func substituteParamValues(current *HTTPProviderParams, secret *HTTPProviderSecr
 	}
 
 	// Geo
-	geoParams := extractAndReplaceTemplateValues(params.GeoLocation, &params, secret, ignoreMissing)
+	geoParams, err := extractAndReplaceTemplateValues(params.GeoLocation, &params, secret, ignoreMissing)
+	if err != nil {
+		return substituteResult{}, fmt.Errorf("geoLocation: %w", err)
+	}
 	if geoParams.NewParam != "" || len(geoParams.ExtractedValues) > 0 {
 		logger.Debug("GeoLocation substitution complete", zap.String("component", "Utils"), zap.String("operation", "substituteParamValues"), zap.Int("extracted_values", len(geoParams.ExtractedValues)))
 		params.GeoLocation = geoParams.NewParam
@@ -114,19 +132,28 @@ func substituteParamValues(current *HTTPProviderParams, secret *HTTPProviderSecr
 	if params.ResponseRedactions != nil {
 		for i := range params.ResponseRedactions {
 			if params.ResponseRedactions[i].Regex != "" {
-				regexParams := extractAndReplaceTemplateValues(params.ResponseRedactions[i].Regex, &params, secret, ignoreMissing)
+				regexParams, err := extractAndReplaceTemplateValues(params.ResponseRedactions[i].Regex, &params, secret, ignoreMissing)
+				if err != nil {
+					return substituteResult{}, fmt.Errorf("responseRedactions[%d].regex: %w", i, err)
+				}
 				params.ResponseRedactions[i].Regex = regexParams.NewParam
 				logger.Debug("Redaction regex substituted", zap.String("component", "Utils"), zap.String("operation", "substituteParamValues"), zap.String("level", "verbose"), zap.Int("redaction_index", i+1))
 			}
 
 			if params.ResponseRedactions[i].XPath != "" {
-				xpathParams := extractAndReplaceTemplateValues(params.ResponseRedactions[i].XPath, &params, secret, ignoreMissing)
+				xpathParams, err := extractAndReplaceTemplateValues(params.ResponseRedactions[i].XPath, &params, secret, ignoreMissing)
+				if err != nil {
+					return substituteResult{}, fmt.Errorf("responseRedactions[%d].xPath: %w", i, err)
+				}
 				params.ResponseRedactions[i].XPath = xpathParams.NewParam
 				logger.Debug("Redaction XPath substituted", zap.String("component", "Utils"), zap.String("operation", "substituteParamValues"), zap.String("level", "verbose"), zap.Int("redaction_index", i+1))
 			}
 
 			if params.ResponseRedactions[i].JSONPath != "" {
-				jsonPathParams := extractAndReplaceTemplateValues(params.ResponseRedactions[i].JSONPath, &params, secret, ignoreMissing)
+				jsonPathParams, err := extractAndReplaceTemplateValues(params.ResponseRedactions[i].JSONPath, &params, secret, ignoreMissing)
+				if err != nil {
+					return substituteResult{}, fmt.Errorf("responseRedactions[%d].jsonPath: %w", i, err)
+				}
 				params.ResponseRedactions[i].JSONPath = jsonPathParams.NewParam
 				logger.Debug("Redaction JSONPath substituted", zap.String("component", "Utils"), zap.String("operation", "substituteParamValues"), zap.String("level", "verbose"), zap.Int("redaction_index", i+1))
 			}
@@ -136,7 +163,10 @@ func substituteParamValues(current *HTTPProviderParams, secret *HTTPProviderSecr
 	if params.ResponseMatches != nil {
 		for i := range params.ResponseMatches {
 			if params.ResponseMatches[i].Value != "" {
-				matchParams := extractAndReplaceTemplateValues(params.ResponseMatches[i].Value, &params, secret, ignoreMissing)
+				matchParams, err := extractAndReplaceTemplateValues(params.ResponseMatches[i].Value, &params, secret, ignoreMissing)
+				if err != nil {
+					return substituteResult{}, fmt.Errorf("responseMatches[%d].value: %w", i, err)
+				}
 				params.ResponseMatches[i].Value = matchParams.NewParam
 				maps.Copy(extracted, matchParams.ExtractedValues)
 				logger.Debug("Match value substituted", zap.String("component", "Utils"), zap.String("operation", "substituteParamValues"), zap.String("level", "verbose"), zap.Int("match_index", i+1), zap.Int("extracted_values", len(matchParams.ExtractedValues)))
@@ -146,7 +176,7 @@ func substituteParamValues(current *HTTPProviderParams, secret *HTTPProviderSecr
 
 	result := substituteResult{NewParams: params, ExtractedValues: extracted, HiddenBodyParts: hiddenBody, HiddenURLParts: hiddenURL}
 	logger.Info("Parameter substitution complete", zap.String("component", "Utils"), zap.String("operation", "substituteParamValues"), zap.Int("total_extracted_values", len(extracted)), zap.Int("hidden_body_parts", len(hiddenBody)), zap.Int("hidden_url_parts", len(hiddenURL)))
-	return result
+	return result, nil
 }
 
 func strToUint8Array(body any) []byte {
@@ -184,15 +214,15 @@ type replacedParams struct {
 	HiddenParts     []hiddenPart
 }
 
-func extractAndReplaceTemplateValues(param string, params *HTTPProviderParams, secret *HTTPProviderSecretParams, ignoreMissing bool) replacedParams {
+func extractAndReplaceTemplateValues(param string, params *HTTPProviderParams, secret *HTTPProviderSecretParams, ignoreMissing bool) (replacedParams, error) {
 	if param == "" {
 		logger.Debug("Empty parameter, returning as-is", zap.String("component", "Utils"), zap.String("operation", "extractAndReplaceTemplateValues"), zap.String("level", "verbose"))
-		return replacedParams{NewParam: "", ExtractedValues: map[string]string{}, HiddenParts: nil}
+		return replacedParams{NewParam: "", ExtractedValues: map[string]string{}, HiddenParts: nil}, nil
 	}
 	matches := paramsRegex.FindAllStringSubmatchIndex(param, -1)
 	if len(matches) == 0 {
 		logger.Debug("No template patterns found", zap.String("component", "Utils"), zap.String("operation", "extractAndReplaceTemplateValues"), zap.String("level", "verbose"))
-		return replacedParams{NewParam: param, ExtractedValues: map[string]string{}, HiddenParts: nil}
+		return replacedParams{NewParam: param, ExtractedValues: map[string]string{}, HiddenParts: nil}, nil
 	}
 	logger.Debug("Found template patterns", zap.String("component", "Utils"), zap.String("operation", "extractAndReplaceTemplateValues"), zap.Int("pattern_count", len(matches)))
 
@@ -229,27 +259,24 @@ func extractAndReplaceTemplateValues(param string, params *HTTPProviderParams, s
 					continue
 				}
 			}
-			// secret present but not found
-			logger.Error("Parameter not found in public or secret values", zap.String("component", "Utils"), zap.String("operation", "extractAndReplaceTemplateValues"), zap.String("param_name", pn))
-			panic(fmt.Errorf("parameter's \"%s\" value not found in paramValues and secret parameter's paramValues", pn))
 		}
 
-		// no secret provided
-		if !ignoreMissing {
-			logger.Error("Parameter not found and ignoreMissing=false", zap.String("component", "Utils"), zap.String("operation", "extractAndReplaceTemplateValues"), zap.String("param_name", pn))
-			panic(fmt.Errorf("parameter's \"%s\" value not found in paramValues", pn))
+		if ignoreMissing {
+			logger.Warn("Parameter not found, keeping template as-is", zap.String("component", "Utils"), zap.String("operation", "extractAndReplaceTemplateValues"), zap.String("param_name", pn))
+			b.WriteString(param[start:end])
+			last = end
+			continue
 		}
-		// keep as-is
-		logger.Warn("Parameter not found, keeping template as-is", zap.String("component", "Utils"), zap.String("operation", "extractAndReplaceTemplateValues"), zap.String("param_name", pn))
-		b.WriteString(param[start:end])
-		last = end
+
+		logger.Error("Parameter not found in public or secret values", zap.String("component", "Utils"), zap.String("operation", "extractAndReplaceTemplateValues"), zap.String("param_name", pn))
+		return replacedParams{}, fmt.Errorf("parameter %q not found in paramValues or secretParams.paramValues", pn)
 	}
 	// tail
 	b.WriteString(param[last:])
 
 	result := replacedParams{NewParam: b.String(), ExtractedValues: extracted, HiddenParts: hidden}
 	logger.Debug("Template processing complete", zap.String("component", "Utils"), zap.String("operation", "extractAndReplaceTemplateValues"), zap.Int("extracted_values", len(extracted)), zap.Int("hidden_parts", len(hidden)))
-	return result
+	return result, nil
 }
 
 func mustParseURL(s string) *url.URL { u, _ := url.Parse(s); return u }

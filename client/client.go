@@ -636,6 +636,10 @@ func (c *Client) SubmitToAttestorCore(params ClaimTeeBundleParams) (*ClaimWithSi
 func (c *Client) ExecuteCompleteProtocol(
 	providerData *ProviderRequestData,
 ) (*ClaimWithSignatures, error) {
+	if providerData == nil {
+		return nil, fmt.Errorf("provider data is required")
+	}
+
 	c.logger.Info("Starting complete protocol execution")
 
 	// Helper function to report progress

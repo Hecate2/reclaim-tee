@@ -313,7 +313,7 @@ func (r *ReclaimClient) ExecuteCompleteProtocol(
 
 // detectMode automatically detects the client mode based on URLs
 func detectMode(teekURL, teetURL string) ClientMode {
-	if (teekURL != "" && teekURL[:4] == "wss:") || (teetURL != "" && teetURL[:4] == "wss:") {
+	if strings.HasPrefix(teekURL, "wss:") || strings.HasPrefix(teetURL, "wss:") {
 		return ModeEnclave
 	}
 	return ModeStandalone

@@ -2,11 +2,12 @@ package client
 
 import (
 	"fmt"
+	"slices"
+	"time"
+
 	"github.com/reclaimprotocol/reclaim-tee/minitls"
 	teeproto "github.com/reclaimprotocol/reclaim-tee/proto"
 	"github.com/reclaimprotocol/reclaim-tee/shared"
-	"slices"
-	"time"
 
 	"go.uber.org/zap"
 )
@@ -14,7 +15,10 @@ import (
 // analyzeResponseRedaction is the main entry point for response redaction analysis
 func (c *Client) analyzeResponseRedaction() (shared.ResponseRedactionSpec, error) {
 	// Step 1: Analyze TLS records and build mappings
-	tlsAnalysis := c.analyzeTLSRecords(c.getSortedSequenceNumbers())
+	tlsAnalysis, err := c.analyzeTLSRecords(c.getSortedSequenceNumbers())
+	if err != nil {
+		return shared.ResponseRedactionSpec{}, fmt.Errorf("failed to analyze TLS records: %w", err)
+	}
 
 	// Step 2: Process HTTP content redactions if present
 	httpRedactions, err := c.analyzeHTTPContent(tlsAnalysis.HTTPMappings, tlsAnalysis.AllHTTPContent)
@@ -74,7 +78,7 @@ func (c *Client) getSortedSequenceNumbers() []uint64 {
 }
 
 // analyzeTLSRecords processes all TLS records and categorizes them
-func (c *Client) analyzeTLSRecords(seqNums []uint64) *TLSAnalysisResult {
+func (c *Client) analyzeTLSRecords(seqNums []uint64) (*TLSAnalysisResult, error) {
 	result := &TLSAnalysisResult{
 		ProtocolRedactions: make([]shared.ResponseRedactionRange, 0),
 		HTTPMappings:       make([]TLSToHTTPMapping, 0),
@@ -87,7 +91,9 @@ func (c *Client) analyzeTLSRecords(seqNums []uint64) *TLSAnalysisResult {
 	// 	zap.Uint64s("sequence_numbers", seqNums))
 
 	for _, seqNum := range seqNums {
-		c.processSingleTLSRecord(seqNum, result)
+		if err := c.processSingleTLSRecord(seqNum, result); err != nil {
+			return nil, err
+		}
 	}
 
 	// Debug logging (commented out for production)
@@ -119,22 +125,20 @@ func (c *Client) analyzeTLSRecords(seqNums []uint64) *TLSAnalysisResult {
 	// Store mappings for OPRF use
 	c.httpToTlsMapping = result.HTTPMappings
 
-	return result
+	return result, nil
 }
 
 // processSingleTLSRecord processes one TLS record based on its content type
-func (c *Client) processSingleTLSRecord(seqNum uint64, result *TLSAnalysisResult) {
+func (c *Client) processSingleTLSRecord(seqNum uint64, result *TLSAnalysisResult) error {
 	parsed := c.parsedResponseBySeq[seqNum]
 	if parsed == nil {
-		c.terminateConnectionWithError("No parsed data found for sequence", fmt.Errorf("invalid sequence number %d", seqNum))
-		return
+		return fmt.Errorf("no parsed data found for sequence %d", seqNum)
 	}
 
 	// Verify ciphertext exists
 	ciphertext, exists := c.ciphertextBySeq[seqNum]
 	if !exists {
-		c.terminateConnectionWithError("No ciphertext found for sequence", fmt.Errorf("invalid sequence number %d", seqNum))
-		return
+		return fmt.Errorf("no ciphertext found for sequence %d", seqNum)
 	}
 
 	// TEE_T's consolidated stream format depends on TLS version:
@@ -149,8 +153,8 @@ func (c *Client) processSingleTLSRecord(seqNum uint64, result *TLSAnalysisResult
 	}
 
 	if len(ciphertext) != tlsStreamLength {
-		panic(fmt.Sprintf("ciphertext length (%d) does not match TEE_T stream length (%d) for cipher %x",
-			len(ciphertext), tlsStreamLength, c.cipherSuite))
+		return fmt.Errorf("ciphertext length (%d) does not match TEE_T stream length (%d) for cipher %x",
+			len(ciphertext), tlsStreamLength, c.cipherSuite)
 	}
 
 	actualLength := len(parsed.ActualContent)
@@ -197,6 +201,7 @@ func (c *Client) processSingleTLSRecord(seqNum uint64, result *TLSAnalysisResult
 	// 	zap.Int("old_offset", oldOffset),
 	// 	zap.Int("increment_by", tlsStreamLength),
 	// 	zap.Int("new_offset", result.TotalTLSOffset))
+	return nil
 }
 
 // analyzeHTTPContent analyzes HTTP content and returns redaction ranges
@@ -307,68 +312,6 @@ func (c *Client) logRedactionRanges(context string, ranges []shared.ResponseReda
 	}
 }
 
-// logRedactedResponseWithAsterisks reconstructs the full response and logs it with redacted parts as asterisks
-func (c *Client) logRedactedResponseWithAsterisks(ranges []shared.ResponseRedactionRange) {
-	// Debug logging disabled for production - uncomment if needed for debugging
-	// Get sorted sequence numbers
-	// seqNums := c.getSortedSequenceNumbers()
-
-	// Reconstruct full TLS stream
-	// var fullTLSStream []byte
-	// totalOffset := 0
-
-	// c.logger.Info("=== RECONSTRUCTING FULL TLS STREAM ===")
-
-	// for _, seqNum := range seqNums {
-	// 	parsed := c.parsedResponseBySeq[seqNum]
-	// 	if parsed == nil {
-	// 		continue
-	// 	}
-
-	// 	c.logger.Info("TLS Record",
-	// 		zap.Uint64("seq_num", seqNum),
-	// 		zap.Int("offset", totalOffset),
-	// 		zap.Int("length", len(parsed.ActualContent)),
-	// 		zap.Uint8("content_type", parsed.ContentType))
-
-	// 	fullTLSStream = append(fullTLSStream, parsed.ActualContent...)
-	// 	totalOffset += len(parsed.ActualContent)
-	// }
-
-	// c.logger.Info("Full TLS stream reconstructed",
-	// 	zap.Int("total_bytes", len(fullTLSStream)))
-
-	// Apply redactions (replace with asterisks)
-	// redactedStream := c.applyRedactionRangesToContent(fullTLSStream, 0, ranges)
-
-	// Log statistics
-	// totalRedacted := 0
-	// for _, r := range ranges {
-	// 	totalRedacted += r.Length
-	// }
-	// totalRevealed := len(fullTLSStream) - totalRedacted
-
-	// c.logger.Info("=== REDACTION STATISTICS ===",
-	// 	zap.Int("total_bytes", len(fullTLSStream)),
-	// 	zap.Int("redacted_bytes", totalRedacted),
-	// 	zap.Int("revealed_bytes", totalRevealed),
-	// 	zap.Int("num_ranges", len(ranges)))
-
-	// Log each range
-	// for i, r := range ranges {
-	// 	c.logger.Info("Redaction Range",
-	// 		zap.Int("index", i),
-	// 		zap.Int("start", r.Start),
-	// 		zap.Int("length", r.Length),
-	// 		zap.Int("end", r.Start+r.Length))
-	// }
-
-	// Log the full redacted response (convert to string for readability)
-	// c.logger.Info("=== FULL REDACTED RESPONSE (asterisks show redacted parts) ===")
-	// c.logger.Info(string(redactedStream))
-	// c.logger.Info("=== END REDACTED RESPONSE ===")
-}
-
 // sendRedactionSpec sends redaction specification to TEE_K
 func (c *Client) sendRedactionSpec() error {
 	c.logger.Info("🚀 [REDACTION] Generating and sending redaction specification to TEE_K")
@@ -379,9 +322,6 @@ func (c *Client) sendRedactionSpec() error {
 		c.terminateConnectionWithError("Failed to analyze response redaction", err)
 		return fmt.Errorf("failed to analyze response redaction: %w", err)
 	}
-
-	// Log the full redacted response for debugging
-	c.logRedactedResponseWithAsterisks(redactionSpec.Ranges)
 
 	// Send redaction spec to TEE_K using protobuf envelope
 	if c.wsConn == nil {

@@ -27,6 +27,13 @@ var clientReservedHeaders = map[string]struct{}{
 
 // CreateRequest builds the HTTP/1.1 request bytes and redaction ranges
 func CreateRequest(secret *HTTPProviderSecretParams, params *HTTPProviderParams) (CreateRequestResult, error) {
+	if params == nil {
+		return CreateRequestResult{}, fmt.Errorf("provider params are required")
+	}
+	if secret == nil {
+		return CreateRequestResult{}, fmt.Errorf("secret params are required")
+	}
+
 	// Add special TEE log for provider operations
 	logger.Info("🔐 TEE: Creating HTTP request for provider",
 		zap.String("url", params.URL),
@@ -92,7 +99,10 @@ func CreateRequest(secret *HTTPProviderSecretParams, params *HTTPProviderParams)
 	}
 
 	logger.Info("Step 1/5: Substituting template parameters", zap.String("component", "HTTP"), zap.String("operation", "CreateRequest"), zap.Int("step", 1), zap.Int("total", 5))
-	sp := substituteParamValues(params, secret, false)
+	sp, err := substituteParamValues(params, secret, false)
+	if err != nil {
+		return CreateRequestResult{}, fmt.Errorf("failed to substitute provider parameters: %w", err)
+	}
 	p := sp.NewParams
 	logger.Debug("Parameter substitution complete", zap.String("component", "HTTP"), zap.String("operation", "CreateRequest"), zap.Int("extracted_values", len(sp.ExtractedValues)))
 
@@ -177,6 +187,13 @@ func CreateRequest(secret *HTTPProviderSecretParams, params *HTTPProviderParams)
 
 // GetResponseRedactions computes redaction ranges for an HTTP response based on responseRedactions in params
 func GetResponseRedactions(response []byte, rawParams *HTTPProviderParams, ctx *ProviderCtx, requestId string) ([]shared.ResponseRedactionRange, error) {
+	if rawParams == nil {
+		return nil, fmt.Errorf("provider params are required")
+	}
+	if ctx == nil {
+		return nil, fmt.Errorf("provider context is required")
+	}
+
 	// Create a local logger with requestId if provided
 	logger.Info("Starting GetResponseRedactions",
 		zap.String("component", "HTTP"),
@@ -204,7 +221,10 @@ func GetResponseRedactions(response []byte, rawParams *HTTPProviderParams, ctx *
 
 	logger.Info("Step 2/4: Substituting parameters in redaction rules", zap.String("component", "HTTP"), zap.String("operation", "GetResponseRedactions"), zap.Int("step", 2), zap.Int("total", 4))
 	// substitute placeholders in params (ignoreMissing = true)
-	sp := substituteParamValues(rawParams, nil, true)
+	sp, err := substituteParamValues(rawParams, nil, true)
+	if err != nil {
+		return nil, fmt.Errorf("failed to substitute provider parameters: %w", err)
+	}
 	params := sp.NewParams
 	logger.Debug("Parameter substitution complete for redaction rules", zap.String("component", "HTTP"), zap.String("operation", "GetResponseRedactions"))
 
@@ -346,6 +366,10 @@ func GetResponseRedactions(response []byte, rawParams *HTTPProviderParams, ctx *
 }
 
 func GetHostPort(params *HTTPProviderParams, secretParams *HTTPProviderSecretParams) (string, int, error) {
+	if params == nil {
+		return "", -1, fmt.Errorf("provider params are required")
+	}
+
 	logger.Info("Starting GetHostPort", zap.String("component", "HTTP"), zap.String("operation", "GetHostPort"), zap.String("url", params.URL))
 
 	urlStr, err := getURL(params, secretParams)

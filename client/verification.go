@@ -69,6 +69,13 @@ func (c *Client) handleBatchedDecryptionStreams(msg *shared.Message) {
 			} else {
 				teetStreamLen = originalLen
 			}
+			if teetStreamLen < 0 || teetStreamLen > len(ciphertext) {
+				c.responseContentMutex.Unlock()
+				err := fmt.Errorf("invalid TEE_T stream length %d for ciphertext length %d and cipher %x",
+					teetStreamLen, len(ciphertext), c.cipherSuite)
+				c.terminateConnectionWithError("Invalid decryption stream data", err)
+				return
+			}
 
 			// Debug logging (commented out for production)
 			// c.logger.Info("📏 Ciphertext Trimming Decision",

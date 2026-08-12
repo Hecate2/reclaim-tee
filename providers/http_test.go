@@ -786,13 +786,7 @@ func TestCreateRequest_ReplacesSecretParamsInURL(t *testing.T) {
 	expectRedaction(2, "Authorization: abc")
 }
 
-func TestCreateRequest_ShouldPanicOnNonPresentSecretParam(t *testing.T) {
-	defer func() {
-		if r := recover(); r == nil {
-			t.Errorf("expected panic for missing secret param")
-		}
-	}()
-
+func TestCreateRequest_ReturnsErrorOnNonPresentSecretParam(t *testing.T) {
 	params := HTTPProviderParams{
 		URL:    "https://example.com/{{missing_param}}",
 		Method: "GET",
@@ -800,7 +794,100 @@ func TestCreateRequest_ShouldPanicOnNonPresentSecretParam(t *testing.T) {
 	secret := HTTPProviderSecretParams{
 		AuthorisationHeader: "test",
 	}
-	CreateRequest(&secret, &params)
+	_, err := CreateRequest(&secret, &params)
+	if err == nil {
+		t.Fatal("expected an error for a missing secret param")
+	}
+	if !strings.Contains(err.Error(), `parameter "missing_param" not found`) {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestCreateRequest_ReturnsErrorOnMissingResponseMatchParam(t *testing.T) {
+	params := HTTPProviderParams{
+		URL:    "https://example.com/",
+		Method: "GET",
+		ResponseMatches: []ResponseMatch{
+			{Type: "contains", Value: `"first_name":"{{firstname}}"`},
+		},
+	}
+	secret := HTTPProviderSecretParams{
+		AuthorisationHeader: "test",
+	}
+
+	_, err := CreateRequest(&secret, &params)
+	if err == nil {
+		t.Fatal("expected an error for a missing response-match param")
+	}
+	if !strings.Contains(err.Error(), "responseMatches[0].value") ||
+		!strings.Contains(err.Error(), `parameter "firstname" not found`) {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestProviderEntryPointsRejectNilInputs(t *testing.T) {
+	params := HTTPProviderParams{URL: "https://example.com/", Method: "GET"}
+	secret := HTTPProviderSecretParams{AuthorisationHeader: "test"}
+	ctx := ProviderCtx{Version: ATTESTOR_VERSION_2_0_1}
+
+	tests := []struct {
+		name string
+		call func() error
+		want string
+	}{
+		{
+			name: "CreateRequest params",
+			call: func() error {
+				_, err := CreateRequest(&secret, nil)
+				return err
+			},
+			want: "provider params are required",
+		},
+		{
+			name: "CreateRequest secret",
+			call: func() error {
+				_, err := CreateRequest(nil, &params)
+				return err
+			},
+			want: "secret params are required",
+		},
+		{
+			name: "GetResponseRedactions params",
+			call: func() error {
+				_, err := GetResponseRedactions(nil, nil, &ctx, "")
+				return err
+			},
+			want: "provider params are required",
+		},
+		{
+			name: "GetResponseRedactions context",
+			call: func() error {
+				_, err := GetResponseRedactions(nil, &params, nil, "")
+				return err
+			},
+			want: "provider context is required",
+		},
+		{
+			name: "GetHostPort params",
+			call: func() error {
+				_, _, err := GetHostPort(nil, nil)
+				return err
+			},
+			want: "provider params are required",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.call()
+			if err == nil {
+				t.Fatalf("expected error containing %q", tt.want)
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("expected error containing %q, got %v", tt.want, err)
+			}
+		})
+	}
 }
 
 // TestCreateRequest_HostAndConnectionAreFirstTwoHeaders pins the
