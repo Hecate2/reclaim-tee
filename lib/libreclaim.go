@@ -102,18 +102,39 @@ type ClaimData struct {
 
 //export reclaim_execute_protocol
 func reclaim_execute_protocol(request_json *C.char, config_json *C.char, claim_json **C.char, claim_length *C.int) (retErr C.reclaim_error_t) {
+	retErr = C.RECLAIM_ERROR_PROTOCOL_FAILED
+	var allocatedClaim *C.char
+
 	// Panic recovery
 	defer func() {
 		if r := recover(); r != nil {
+			retErr = C.RECLAIM_ERROR_PROTOCOL_FAILED
+			if allocatedClaim != nil {
+				C.free(unsafe.Pointer(allocatedClaim))
+			}
+			if claim_json != nil {
+				*claim_json = nil
+			}
+			if claim_length != nil {
+				*claim_length = 0
+			}
+
 			if logger != nil {
 				logger.Error("Panic recovered in reclaim_execute_protocol",
 					zap.Any("panic", r),
 					zap.Stack("stack"))
 			}
 			setLastError(fmt.Sprintf("panic: %v", r))
-			retErr = C.RECLAIM_ERROR_PROTOCOL_FAILED
 		}
 	}()
+
+	// Keep outputs in a consistent state on every failure path.
+	if claim_json != nil {
+		*claim_json = nil
+	}
+	if claim_length != nil {
+		*claim_length = 0
+	}
 
 	// Initialize logger if not already initialized
 	if logger == nil {
@@ -159,12 +180,6 @@ func reclaim_execute_protocol(request_json *C.char, config_json *C.char, claim_j
 		return C.RECLAIM_ERROR_INVALID_ARGS
 	}
 	defer reclaimClient.Close()
-	defer func() {
-		if r := recover(); r != nil {
-			// Log panic but don't propagate - we're already cleaning up
-			fmt.Printf("PANIC %+v", r)
-		}
-	}()
 
 	// Parse provider data to get provider name for logging
 	var providerData client.ProviderRequestData
@@ -254,8 +269,8 @@ func reclaim_execute_protocol(request_json *C.char, config_json *C.char, claim_j
 		return C.RECLAIM_ERROR_MEMORY
 	}
 
-	cString := C.CString(string(jsonData))
-	*claim_json = cString
+	allocatedClaim = C.CString(string(jsonData))
+	*claim_json = allocatedClaim
 	*claim_length = C.int(len(jsonData))
 
 	return C.RECLAIM_SUCCESS
