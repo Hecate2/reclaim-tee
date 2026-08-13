@@ -24,7 +24,7 @@ func ExtractHTMLElementsIndexes(html string, xpathExpression string, contentsOnl
 	})
 	if err != nil {
 		logger.Error("XPath query failed", zap.String("component", "XPath"), zap.String("operation", "extractHTMLElementsIndexes"), zap.Error(err))
-		return nil, fmt.Errorf("failed to find XPath: %q: %w", xpathExpression, err)
+		return nil, fmt.Errorf("Failed to find XPath: \"%s\"", xpathExpression)
 	}
 	if len(matches) == 0 {
 		logger.Warn("XPath returned no matches", zap.String("component", "XPath"), zap.String("operation", "extractHTMLElementsIndexes"))
