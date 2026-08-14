@@ -73,10 +73,7 @@ func (g *GoogleAttestor) Validate(raw []byte, logger *Logger) error {
 	}
 
 	tokenStr := strings.TrimSpace(string(raw))
-	parser := jwt.NewParser(
-		jwt.WithExpirationRequired(),
-		jwt.WithValidMethods([]string{"RS256"}),
-	)
+	parser := newGoogleJWTParser(0)
 
 	// Custom keyfunc that extracts the leaf certificate from x5c header and verifies chain
 	keyfunc := func(t *jwt.Token) (any, error) {
@@ -159,7 +156,7 @@ func (g *GoogleAttestor) Validate(raw []byte, logger *Logger) error {
 						zap.String("timing_info", timingInfo))
 
 					// Retry with 1-minute leeway to handle clock skew
-					parserWithLeeway := jwt.NewParser(jwt.WithLeeway(1 * time.Minute))
+					parserWithLeeway := newGoogleJWTParser(1 * time.Minute)
 					token, retryErr := parserWithLeeway.Parse(tokenStr, keyfunc)
 					if retryErr != nil {
 						return fmt.Errorf("failed to parse/verify GCP attestation JWT even with 1-minute leeway: %v | %s", retryErr, timingInfo)
@@ -182,6 +179,20 @@ func (g *GoogleAttestor) Validate(raw []byte, logger *Logger) error {
 
 	// Basic claim presence checks could be added here based on your policy
 	return nil
+}
+
+// newGoogleJWTParser keeps the attestation token policy identical for the
+// initial parse and the clock-skew retry. Leeway relaxes only time checks; it
+// must never relax the required expiration or accepted signature algorithm.
+func newGoogleJWTParser(leeway time.Duration) *jwt.Parser {
+	options := []jwt.ParserOption{
+		jwt.WithExpirationRequired(),
+		jwt.WithValidMethods([]string{"RS256"}),
+	}
+	if leeway > 0 {
+		options = append(options, jwt.WithLeeway(leeway))
+	}
+	return jwt.NewParser(options...)
 }
 
 // decodeBase64URL decodes a base64 or base64url-encoded string

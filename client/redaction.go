@@ -211,7 +211,9 @@ func (c *Client) analyzeHTTPContent(mappings []TLSToHTTPMapping, httpContent []b
 	}
 	// Parse HTTP response
 	httpResponse := c.parseHTTPResponse(httpContent)
+	c.responseContentMutex.Lock()
 	c.lastResponseData = httpResponse
+	c.responseContentMutex.Unlock()
 
 	// Get automatic redactions from provider if configured
 	httpRedactions, err := c.getAutomaticHTTPRedactions(httpResponse)
@@ -225,7 +227,10 @@ func (c *Client) analyzeHTTPContent(mappings []TLSToHTTPMapping, httpContent []b
 
 // getAutomaticHTTPRedactions gets provider-specific redactions
 func (c *Client) getAutomaticHTTPRedactions(httpResponse *HTTPResponse) ([]shared.ResponseRedactionRange, error) {
-	if len(c.lastRedactionRanges) == 0 {
+	c.responseContentMutex.Lock()
+	cachedRanges := append([]shared.ResponseRedactionRange(nil), c.lastRedactionRanges...)
+	c.responseContentMutex.Unlock()
+	if len(cachedRanges) == 0 {
 		c.logger.Info("Getting automatic response redactions", zap.Int("response_bytes", len(httpResponse.FullResponse)))
 
 		ranges, err := c.getResponseRedactions(httpResponse)
@@ -235,13 +240,18 @@ func (c *Client) getAutomaticHTTPRedactions(httpResponse *HTTPResponse) ([]share
 
 		c.logger.Info("Automatic response redactions generated",
 			zap.Int("redaction_ranges", len(ranges)))
-		c.lastRedactionRanges = ranges
+		c.responseContentMutex.Lock()
+		if len(c.lastRedactionRanges) == 0 {
+			c.lastRedactionRanges = append([]shared.ResponseRedactionRange(nil), ranges...)
+		}
+		cachedRanges = append([]shared.ResponseRedactionRange(nil), c.lastRedactionRanges...)
+		c.responseContentMutex.Unlock()
 	} else {
 		c.logger.Info("Response redactions already generated",
-			zap.Int("cached_ranges", len(c.lastRedactionRanges)))
+			zap.Int("cached_ranges", len(cachedRanges)))
 	}
 
-	return c.lastRedactionRanges, nil
+	return cachedRanges, nil
 }
 
 // mapHTTPToTLSRedactions converts HTTP position ranges to TLS stream positions
@@ -324,7 +334,7 @@ func (c *Client) sendRedactionSpec() error {
 	}
 
 	// Send redaction spec to TEE_K using protobuf envelope
-	if c.wsConn == nil {
+	if !c.hasTEEConnection("TEE_K") {
 		return fmt.Errorf("no websocket connection to TEE_K")
 	}
 

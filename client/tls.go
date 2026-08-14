@@ -233,7 +233,7 @@ func (c *Client) processTLSRecord(record []byte) {
 		return
 	}
 
-	teetConnState := c.teetConn != nil
+	teetConnState := c.hasTEEConnection("TEE_T")
 	if !teetConnState {
 		c.logger.Warn("Dropping response record: TEE_T connection nil",
 			zap.Uint64("seq_num", c.responseSeqNum), zap.Int("len", len(encryptedData)))

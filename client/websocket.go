@@ -16,6 +16,25 @@ import (
 
 // ConnectToTEEK establishes WebSocket connection to TEE_K
 func (c *Client) ConnectToTEEK() error {
+	c.teekConnectMutex.Lock()
+	defer c.teekConnectMutex.Unlock()
+
+	c.connectionMutex.Lock()
+	if c.isClosing.Load() {
+		c.connectionMutex.Unlock()
+		return fmt.Errorf("client is closed")
+	}
+	if c.connectionsClosing {
+		c.connectionMutex.Unlock()
+		return fmt.Errorf("client connection cleanup is in progress")
+	}
+	if c.wsConn != nil {
+		c.connectionMutex.Unlock()
+		return nil
+	}
+	connectionEpoch := c.connectionEpoch
+	c.connectionMutex.Unlock()
+
 	u, err := url.Parse(c.teekURL)
 	if err != nil {
 		return fmt.Errorf("failed to parse TEE_K URL: %v", err)
@@ -25,37 +44,39 @@ func (c *Client) ConnectToTEEK() error {
 		zap.String("url", c.teekURL))
 
 	var conn *websocket.Conn
-
-	// Check if native networking is enabled (for iOS VPN compatibility)
-	if IsNativeNetworkingEnabled() {
-		c.logger.Info("Using native networking for VPN compatibility (TEE_K)")
-		dialer := createNativeNetworkDialer(c.teekURL, int(DefaultWSHandshakeTimeout.Milliseconds()))
-		conn, _, err = dialer.Dial(u.String(), nil)
-		if err != nil {
-			c.logger.Error("Native WebSocket dial failed for TEE_K", zap.String("url", c.teekURL), zap.Error(err))
-			return fmt.Errorf("native WebSocket connect failed: %w", err)
-		}
-	} else if strings.HasPrefix(c.teekURL, "wss://") {
-		// Router-allocated wss:// — TEE serves an RA-TLS cert; the dialer
-		// verifies the embedded attestation but doesn't inspect what's
-		// inside it (the TEE's signed bundles carry the full attestation
-		// downstream).
-		c.logger.Info("Using RA-TLS dialer for TEE_K")
-		dialer := newRATLSWebSocketDialer("tee_k", c.logger)
-		conn, _, err = dialer.Dial(u.String(), nil)
+	if c.teeDial != nil {
+		conn, err = c.teeDial("tee_k", u.String())
 	} else {
-		// Local-dev router-standalone over plain ws://.
-		c.logger.Info("Using default dialer for TEE_K (local dev)")
-		conn, _, err = websocket.DefaultDialer.Dial(u.String(), nil)
+
+		// Check if native networking is enabled (for iOS VPN compatibility)
+		if IsNativeNetworkingEnabled() {
+			c.logger.Info("Using native networking for VPN compatibility (TEE_K)")
+			dialer := createNativeNetworkDialer(c.teekURL, int(DefaultWSHandshakeTimeout.Milliseconds()))
+			conn, _, err = dialer.Dial(u.String(), nil)
+			if err != nil {
+				c.logger.Error("Native WebSocket dial failed for TEE_K", zap.String("url", c.teekURL), zap.Error(err))
+				return fmt.Errorf("native WebSocket connect failed: %w", err)
+			}
+		} else if strings.HasPrefix(c.teekURL, "wss://") {
+			// Router-allocated wss:// — TEE serves an RA-TLS cert; the dialer
+			// verifies the embedded attestation but doesn't inspect what's
+			// inside it (the TEE's signed bundles carry the full attestation
+			// downstream).
+			c.logger.Info("Using RA-TLS dialer for TEE_K")
+			dialer := newRATLSWebSocketDialer("tee_k", c.logger)
+			conn, _, err = dialer.Dial(u.String(), nil)
+		} else {
+			// Local-dev router-standalone over plain ws://.
+			c.logger.Info("Using default dialer for TEE_K (local dev)")
+			conn, _, err = websocket.DefaultDialer.Dial(u.String(), nil)
+		}
 	}
 
 	if err != nil {
 		c.logger.Error("WebSocket dial failed for TEE_K", zap.String("url", c.teekURL), zap.Error(err))
 		return fmt.Errorf("failed to connect to TEE_K: %v", err)
 	}
-
-	c.wsConn = conn
-	c.logger.Info("WebSocket connection to TEE_K established successfully")
+	installWebSocketReadLimit(conn)
 
 	// Router mode: TEE_K's handleWebSocket requires ClientAuth as the very
 	// first envelope. Send it now, before the message-handling goroutine
@@ -65,13 +86,36 @@ func (c *Client) ConnectToTEEK() error {
 		if err := sendClientAuth(conn, c.routerJWT); err != nil {
 			c.logger.Error("Failed to send ClientAuth to TEE_K", zap.Error(err))
 			conn.Close()
-			c.wsConn = nil
 			return fmt.Errorf("send ClientAuth to TEE_K: %w", err)
 		}
 	}
 
+	c.connectionMutex.Lock()
+	if c.connectionEpoch != connectionEpoch {
+		c.connectionMutex.Unlock()
+		_ = conn.Close()
+		return fmt.Errorf("TEE_K connection attempt was superseded by cleanup")
+	}
+	if c.isClosing.Load() || c.connectionsClosing {
+		c.connectionMutex.Unlock()
+		_ = conn.Close()
+		return fmt.Errorf("client closed while connecting to TEE_K")
+	}
+	if c.wsConn != nil {
+		c.connectionMutex.Unlock()
+		_ = conn.Close()
+		return nil
+	}
+	c.teekGeneration++
+	generation := c.teekGeneration
+	readerDone := make(chan struct{})
+	c.wsConn = conn
+	c.teekReaderDone = readerDone
+	c.connectionMutex.Unlock()
+	c.logger.Info("WebSocket connection to TEE_K established successfully")
+
 	// Start message handling goroutine
-	go c.handleMessages()
+	go c.handleMessages(conn, generation, readerDone)
 
 	return nil
 }
@@ -101,6 +145,25 @@ func sendClientAuth(conn *websocket.Conn, jwt string) error {
 
 // ConnectToTEET establishes WebSocket connection to TEE_T
 func (c *Client) ConnectToTEET() error {
+	c.teetConnectMutex.Lock()
+	defer c.teetConnectMutex.Unlock()
+
+	c.connectionMutex.Lock()
+	if c.isClosing.Load() {
+		c.connectionMutex.Unlock()
+		return fmt.Errorf("client is closed")
+	}
+	if c.connectionsClosing {
+		c.connectionMutex.Unlock()
+		return fmt.Errorf("client connection cleanup is in progress")
+	}
+	if c.teetConn != nil {
+		c.connectionMutex.Unlock()
+		return nil
+	}
+	connectionEpoch := c.connectionEpoch
+	c.connectionMutex.Unlock()
+
 	u, err := url.Parse(c.teetURL)
 	if err != nil {
 		return fmt.Errorf("failed to parse TEE_T URL: %v", err)
@@ -110,36 +173,38 @@ func (c *Client) ConnectToTEET() error {
 		zap.String("url", c.teetURL))
 
 	var conn *websocket.Conn
-
-	// Check if native networking is enabled (for iOS VPN compatibility)
-	if IsNativeNetworkingEnabled() {
-		c.logger.Info("Using native networking for VPN compatibility (TEE_T)")
-		dialer := createNativeNetworkDialer(c.teetURL, int(DefaultWSHandshakeTimeout.Milliseconds()))
-		conn, _, err = dialer.Dial(u.String(), nil)
-		if err != nil {
-			c.logger.Error("Native WebSocket dial failed for TEE_T", zap.String("url", c.teetURL), zap.Error(err))
-			return fmt.Errorf("native WebSocket connect failed: %w", err)
-		}
-	} else if strings.HasPrefix(c.teetURL, "wss://") {
-		// Router-allocated wss:// — RA-TLS verification only; the TEE's
-		// signed bundles carry the attestation contents for downstream
-		// verification.
-		c.logger.Info("Using RA-TLS dialer for TEE_T")
-		dialer := newRATLSWebSocketDialer("tee_t", c.logger)
-		conn, _, err = dialer.Dial(u.String(), nil)
+	if c.teeDial != nil {
+		conn, err = c.teeDial("tee_t", u.String())
 	} else {
-		// Local-dev router-standalone over plain ws://.
-		c.logger.Info("Using default dialer for TEE_T (local dev)")
-		conn, _, err = websocket.DefaultDialer.Dial(u.String(), nil)
+
+		// Check if native networking is enabled (for iOS VPN compatibility)
+		if IsNativeNetworkingEnabled() {
+			c.logger.Info("Using native networking for VPN compatibility (TEE_T)")
+			dialer := createNativeNetworkDialer(c.teetURL, int(DefaultWSHandshakeTimeout.Milliseconds()))
+			conn, _, err = dialer.Dial(u.String(), nil)
+			if err != nil {
+				c.logger.Error("Native WebSocket dial failed for TEE_T", zap.String("url", c.teetURL), zap.Error(err))
+				return fmt.Errorf("native WebSocket connect failed: %w", err)
+			}
+		} else if strings.HasPrefix(c.teetURL, "wss://") {
+			// Router-allocated wss:// — RA-TLS verification only; the TEE's
+			// signed bundles carry the attestation contents for downstream
+			// verification.
+			c.logger.Info("Using RA-TLS dialer for TEE_T")
+			dialer := newRATLSWebSocketDialer("tee_t", c.logger)
+			conn, _, err = dialer.Dial(u.String(), nil)
+		} else {
+			// Local-dev router-standalone over plain ws://.
+			c.logger.Info("Using default dialer for TEE_T (local dev)")
+			conn, _, err = websocket.DefaultDialer.Dial(u.String(), nil)
+		}
 	}
 
 	if err != nil {
 		c.logger.Error("WebSocket dial failed for TEE_T", zap.String("url", c.teetURL), zap.Error(err))
 		return fmt.Errorf("failed to connect to TEE_T: %v", err)
 	}
-
-	c.teetConn = conn
-	c.logger.Info("WebSocket connection to TEE_T established successfully")
+	installWebSocketReadLimit(conn)
 
 	// Router mode: TEE_T's client handler requires ClientAuth as the first
 	// envelope, same as TEE_K. Send it before starting the read loop.
@@ -147,43 +212,77 @@ func (c *Client) ConnectToTEET() error {
 		if err := sendClientAuth(conn, c.routerJWT); err != nil {
 			c.logger.Error("Failed to send ClientAuth to TEE_T", zap.Error(err))
 			conn.Close()
-			c.teetConn = nil
 			return fmt.Errorf("send ClientAuth to TEE_T: %w", err)
 		}
 	}
 
+	c.connectionMutex.Lock()
+	if c.connectionEpoch != connectionEpoch {
+		c.connectionMutex.Unlock()
+		_ = conn.Close()
+		return fmt.Errorf("TEE_T connection attempt was superseded by cleanup")
+	}
+	if c.isClosing.Load() || c.connectionsClosing {
+		c.connectionMutex.Unlock()
+		_ = conn.Close()
+		return fmt.Errorf("client closed while connecting to TEE_T")
+	}
+	if c.teetConn != nil {
+		c.connectionMutex.Unlock()
+		_ = conn.Close()
+		return nil
+	}
+	c.teetGeneration++
+	generation := c.teetGeneration
+	readerDone := make(chan struct{})
+	c.teetConn = conn
+	c.teetReaderDone = readerDone
+	c.connectionMutex.Unlock()
+	c.logger.Info("WebSocket connection to TEE_T established successfully")
+
 	// Start message handling goroutine for TEE_T
-	go c.handleTEETMessages()
+	go c.handleTEETMessages(conn, generation, readerDone)
 
 	return nil
 }
 
+func (c *Client) connectTEEPair() (string, error) {
+	c.pairConnectMutex.Lock()
+	defer c.pairConnectMutex.Unlock()
+	c.resolveClientMode()
+
+	if err := c.ConnectToTEEK(); err != nil {
+		c.resetTEEConnectionsForRetry()
+		return "TEE_K", err
+	}
+	if err := c.ConnectToTEET(); err != nil {
+		c.resetTEEConnectionsForRetry()
+		return "TEE_T", err
+	}
+	return "", nil
+}
+
+func (c *Client) connectToTEEs() error {
+	role, err := c.connectTEEPair()
+	if err != nil {
+		return fmt.Errorf("%s: %w", role, err)
+	}
+	return nil
+}
+
 // handleMessages handles incoming messages from TEE_K
-func (c *Client) handleMessages() {
+func (c *Client) handleMessages(conn *websocket.Conn, generation uint64, done chan struct{}) {
+	defer close(done)
 	for {
-		conn := c.wsConn
-		closing := c.isClosing.Load()
-
-		if conn == nil {
-			break
-		}
-
 		_, msgBytes, err := conn.ReadMessage()
 		if err != nil {
-			// Only log errors if we're not intentionally closing and it's not a normal shutdown condition
-			if !closing {
-				// Check for normal close conditions or network errors during shutdown
-				if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				} else if !isClientNetworkShutdownError(err) {
-					c.logger.Error("Failed to read websocket message", zap.Error(err))
-				}
-			}
-			break
+			c.handleTEEReadFailure("TEE_K", conn, generation, err)
+			return
 		}
 
 		var env teeproto.Envelope
 		if err := proto.Unmarshal(msgBytes, &env); err != nil {
-			if !closing {
+			if !c.isClosing.Load() {
 				c.terminateConnectionWithError("Failed to parse message from TEE_K", err)
 				return
 			}
@@ -207,26 +306,13 @@ func (c *Client) handleMessages() {
 			msg := &shared.Message{Type: shared.MsgError, SessionID: env.GetSessionId(), Data: shared.ErrorData{Message: p.Error.GetMessage()}, Timestamp: time.UnixMilli(env.GetTimestampMs())}
 			c.handleError(msg)
 		case *teeproto.Envelope_SignedMessage:
-			// Handle SignedMessage from TEE_K (K_OUTPUT)
 			sm := p.SignedMessage
-			if sm == nil {
-				break
+			if err := c.acceptTEEKSignedMessage(env.GetSessionId(), sm); err != nil {
+				c.terminateConnectionWithError("Invalid TEE_K signed message", err)
+				return
 			}
-			if sm.GetBodyType() == teeproto.BodyType_BODY_TYPE_K_OUTPUT {
-				// Store the original SignedMessage for verification bundle
-				// Attestor handles all cryptographic verification server-side
-				c.teekSignedMessage = sm
-				c.logger.Info("TEE_K SignedMessage received")
-
-				var body teeproto.KOutputPayload
-				if err := proto.Unmarshal(sm.GetBody(), &body); err != nil {
-					c.logger.Error("Failed to unmarshal KOutputPayload", zap.Error(err))
-					break
-				}
-				// Use consolidated keystream from SignedMessage for final verification
-				c.responseKeystream = body.GetConsolidatedResponseKeystream()
-				c.markTEEKTranscriptReceived()
-			}
+			c.logger.Info("TEE_K SignedMessage verified")
+			c.checkForProtocolCompletion()
 
 		case *teeproto.Envelope_BatchedDecryptionStreams:
 			var ds []shared.ResponseDecryptionStreamData
@@ -236,7 +322,7 @@ func (c *Client) handleMessages() {
 			msg := &shared.Message{Type: shared.MsgBatchedDecryptionStreams, SessionID: env.GetSessionId(), Data: shared.BatchedDecryptionStreamData{DecryptionStreams: ds, SessionID: p.BatchedDecryptionStreams.GetSessionId(), TotalCount: int(p.BatchedDecryptionStreams.GetTotalCount())}, Timestamp: time.UnixMilli(env.GetTimestampMs())}
 			c.handleBatchedDecryptionStreams(msg)
 		default:
-			if !closing {
+			if !c.isClosing.Load() {
 				c.logger.Error("Unknown message payload from TEE_K")
 			}
 		}
@@ -244,29 +330,18 @@ func (c *Client) handleMessages() {
 }
 
 // handleTEETMessages handles incoming messages from TEE_T
-func (c *Client) handleTEETMessages() {
+func (c *Client) handleTEETMessages(conn *websocket.Conn, generation uint64, done chan struct{}) {
+	defer close(done)
 	for {
-		conn := c.teetConn
-		closing := c.isClosing.Load()
-
-		if conn == nil {
-			break
-		}
-
 		_, msgBytes, err := conn.ReadMessage()
 		if err != nil {
-			if !closing {
-				if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				} else if !isClientNetworkShutdownError(err) {
-					c.logger.Error("Failed to read TEE_T websocket message", zap.Error(err))
-				}
-			}
-			break
+			c.handleTEEReadFailure("TEE_T", conn, generation, err)
+			return
 		}
 
 		var env teeproto.Envelope
 		if err := proto.Unmarshal(msgBytes, &env); err != nil {
-			if !closing {
+			if !c.isClosing.Load() {
 				c.terminateConnectionWithError("Failed to parse message from TEE_T", err)
 				return
 			}
@@ -277,32 +352,18 @@ func (c *Client) handleTEETMessages() {
 		case *teeproto.Envelope_BatchedEncryptedData:
 			c.handleBatchedEncryptedRequest(env.GetSessionId(), p.BatchedEncryptedData)
 		case *teeproto.Envelope_SignedMessage:
-			// Handle SignedMessage from TEE_T (T_OUTPUT)
 			sm := p.SignedMessage
-			if sm == nil {
-				break
+			if err := c.acceptTEETSignedMessage(env.GetSessionId(), sm); err != nil {
+				c.terminateConnectionWithError("Invalid TEE_T signed message", err)
+				return
 			}
-			if sm.GetBodyType() == teeproto.BodyType_BODY_TYPE_T_OUTPUT {
-				// Store the original SignedMessage for verification bundle
-				// Attestor handles all cryptographic verification server-side
-				c.teetSignedMessage = sm
-				c.logger.Info("TEE_T SignedMessage received")
-
-				var body teeproto.TOutputPayload
-				if err := proto.Unmarshal(sm.GetBody(), &body); err != nil {
-					c.logger.Error("Failed to unmarshal TOutputPayload", zap.Error(err))
-					break
-				}
-
-				c.consolidatedResponseCiphertext = body.GetConsolidatedResponseCiphertext()
-
-				c.markTEETTranscriptReceived()
-			}
+			c.logger.Info("TEE_T SignedMessage verified")
+			c.checkForProtocolCompletion()
 		case *teeproto.Envelope_Error:
 			msg := &shared.Message{Type: shared.MsgError, SessionID: env.GetSessionId(), Data: shared.ErrorData{Message: p.Error.GetMessage()}, Timestamp: time.UnixMilli(env.GetTimestampMs())}
 			c.handleTEETError(msg)
 		default:
-			if !closing {
+			if !c.isClosing.Load() {
 				c.logger.Error("Unknown TEE_T message payload")
 			}
 		}
@@ -314,7 +375,9 @@ func (c *Client) sendEnvelope(env *teeproto.Envelope) error {
 	c.wsWriteMutex.Lock()
 	defer c.wsWriteMutex.Unlock()
 
+	c.connectionMutex.Lock()
 	conn := c.wsConn
+	c.connectionMutex.Unlock()
 	if conn == nil {
 		return fmt.Errorf("no websocket connection")
 	}
@@ -340,7 +403,9 @@ func (c *Client) sendEnvelopeToTEET(env *teeproto.Envelope) error {
 	c.teetWriteMutex.Lock()
 	defer c.teetWriteMutex.Unlock()
 
+	c.connectionMutex.Lock()
 	conn := c.teetConn
+	c.connectionMutex.Unlock()
 	if conn == nil {
 		return fmt.Errorf("no TEE_T websocket connection")
 	}
@@ -464,6 +529,8 @@ func (c *Client) handleBatchedEncryptedRequest(sessionID string, batchData *teep
 // Close closes all WebSocket connections
 func (c *Client) Close() {
 	c.isClosing.Store(true)
+	claimed := c.claimProtocolCompletionWithState()
+	c.stopCoreProtocolWatchdog()
 
 	// Close the underlying TCP conn; let the closed-conn error propagate
 	// to the TCP-reader. Don't nil the pointer — readers may be mid-deref.
@@ -471,45 +538,176 @@ func (c *Client) Close() {
 		c.tcpConn.Close()
 	}
 
-	// Close TEE_K connection (with mutex protection)
-	c.wsWriteMutex.Lock()
-	if c.wsConn != nil {
-		c.wsConn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
-		c.wsConn.Close()
-		c.wsConn = nil
+	c.closeTEEConnectionsInternal(true)
+	c.closeAttestorClient()
+	if claimed {
+		if c.closeBeforePublishHook != nil {
+			c.closeBeforePublishHook()
+		}
+		c.publishProtocolCompletion(fmt.Errorf("client closed"))
 	}
-	c.wsWriteMutex.Unlock()
+}
 
-	// Close TEE_T connection (with mutex protection)
-	c.teetWriteMutex.Lock()
-	if c.teetConn != nil {
-		c.teetConn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
-		c.teetConn.Close()
-		c.teetConn = nil
+// closeTEEConnections detaches the published pair before closing either
+// socket. Reader failures caused by this cleanup are therefore stale and
+// cannot terminate a later connection generation.
+func (c *Client) closeTEEConnections() {
+	c.closeTEEConnectionsInternal(false)
+}
+
+func (c *Client) resetTEEConnectionsForRetry() {
+	c.closeTEEConnectionsInternal(true)
+	c.closeAttestorClient()
+	c.sessionMutex.Lock()
+	c.sessionID = ""
+	c.pendingConnectionRequest = nil
+	c.connectionRequestPending = false
+	c.sessionMutex.Unlock()
+}
+
+func (c *Client) closeTEEConnectionsInternal(waitForReaders bool) {
+	c.connectionCleanupMutex.Lock()
+	c.connectionMutex.Lock()
+	if c.connectionsClosing {
+		cleanupDone := c.connectionCleanupDone
+		c.connectionMutex.Unlock()
+		c.connectionCleanupMutex.Unlock()
+		if waitForReaders && cleanupDone != nil {
+			<-cleanupDone
+		}
+		return
 	}
-	c.teetWriteMutex.Unlock()
+	c.connectionsClosing = true
+	cleanupDone := make(chan struct{})
+	c.connectionCleanupDone = cleanupDone
+	teekConn := c.wsConn
+	teetConn := c.teetConn
+	teekReaderDone := c.teekReaderDone
+	teetReaderDone := c.teetReaderDone
+	c.connectionEpoch++
+	c.wsConn = nil
+	c.teetConn = nil
+	c.teekReaderDone = nil
+	c.teetReaderDone = nil
+	c.connectionMutex.Unlock()
+	c.connectionCleanupMutex.Unlock()
+
+	c.closeTEEKConnection(teekConn)
+	c.closeTEETConnection(teetConn)
+	if waitForReaders {
+		if teekReaderDone != nil {
+			<-teekReaderDone
+		}
+		if teetReaderDone != nil {
+			<-teetReaderDone
+		}
+	}
+
+	c.connectionMutex.Lock()
+	c.connectionsClosing = false
+	c.connectionCleanupDone = nil
+	close(cleanupDone)
+	c.connectionMutex.Unlock()
+}
+
+func (c *Client) closeTEEKConnection(conn *websocket.Conn) {
+	if conn == nil {
+		return
+	}
+	c.closeWebSocketConnection(conn)
+}
+
+func (c *Client) closeTEETConnection(conn *websocket.Conn) {
+	if conn == nil {
+		return
+	}
+	c.closeWebSocketConnection(conn)
+}
+
+const webSocketCloseControlTimeout = 25 * time.Millisecond
+
+func (c *Client) closeWebSocketConnection(conn *websocket.Conn) {
+	deadline := time.Now().Add(webSocketCloseControlTimeout)
+	_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""), deadline)
+	_ = conn.Close()
+}
+
+func (c *Client) handleTEEReadFailure(role string, conn *websocket.Conn, generation uint64, err error) {
+	c.connectionMutex.Lock()
+	if c.isClosing.Load() {
+		c.connectionMutex.Unlock()
+		return
+	}
+	current := (role == "TEE_K" && c.wsConn == conn && c.teekGeneration == generation) ||
+		(role == "TEE_T" && c.teetConn == conn && c.teetGeneration == generation)
+	if !current {
+		c.connectionMutex.Unlock()
+		return
+	}
+	// Prevent publication of a replacement between the exact-generation check
+	// and pair cleanup.
+	c.isClosing.Store(true)
+	c.connectionMutex.Unlock()
+
+	if !websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) && !isClientNetworkShutdownError(err) {
+		c.logger.Error("Unexpected TEE websocket read failure", zap.String("tee", role), zap.Error(err))
+	}
+	c.terminateConnectionWithError(role+" connection closed unexpectedly", err)
+}
+
+func (c *Client) hasTEEConnection(role string) bool {
+	c.connectionMutex.Lock()
+	defer c.connectionMutex.Unlock()
+	if role == "TEE_K" {
+		return c.wsConn != nil
+	}
+	return c.teetConn != nil
 }
 
 // terminateConnectionWithError performs immediate connection termination due to critical error
 // This implements strict fail-fast behavior - no error continuation is allowed
 func (c *Client) terminateConnectionWithError(reason string, err error) {
+	c.terminateConnection(reason, err, false)
+}
+
+func (c *Client) terminateConnectionWithErrorAndWait(reason string, err error) {
+	c.terminateConnection(reason, err, true)
+}
+
+func (c *Client) terminateConnection(reason string, err error, waitForReaders bool) {
+	claimed := c.claimProtocolCompletionWithState()
+	c.terminateConnectionCleanup(reason, err, waitForReaders)
+	if claimed {
+		c.publishProtocolCompletion(fmt.Errorf("%s: %v", reason, err))
+	}
+}
+
+func (c *Client) terminateConnectionCleanup(reason string, err error, waitForReaders bool) {
 	// Log the critical error
 	c.logger.Error("CRITICAL ERROR - terminating connection", zap.String("reason", reason), zap.Error(err))
 
 	c.logBatchDiagnostics(reason)
 
-	// Perform immediate cleanup and termination
-	c.Close()
+	// Perform immediate cleanup and termination. Reader-originated failures do
+	// not wait on their own goroutine; caller-originated start/timeout failures
+	// wait until both exact reader generations have exited.
+	c.isClosing.Store(true)
+	if c.tcpConn != nil {
+		_ = c.tcpConn.Close()
+	}
+	c.closeTEEConnectionsInternal(waitForReaders)
+	c.closeAttestorClient()
 
-	// Signal completion with error to prevent hanging
-	c.completionOnce.Do(func() {
-		protocolErr := fmt.Errorf("%s: %v", reason, err)
-		select {
-		case c.completionChan <- protocolErr:
-		default:
-			// Channel might be full, but that's ok
-		}
-	})
+}
+
+func (c *Client) closeAttestorClient() {
+	c.attestorMutex.Lock()
+	attestorClient := c.attestorClient
+	c.attestorClient = nil
+	c.attestorMutex.Unlock()
+	if attestorClient != nil {
+		_ = attestorClient.Close()
+	}
 }
 
 // logBatchDiagnostics dumps the fingerprints of the last batch sent to TEE_T
@@ -542,10 +740,6 @@ func (c *Client) logBatchDiagnostics(reason string) {
 // so TEE_T learns ranges from a single ordered source rather than racing a
 // separate client message.
 func (c *Client) sendOPRFRangesToTEEK(ranges []*teeproto.OPRFRangeSpec) error {
-	if c.wsConn == nil {
-		return fmt.Errorf("TEE_K connection not available")
-	}
-
 	env := &teeproto.Envelope{
 		SessionId:   c.sessionID,
 		TimestampMs: time.Now().UnixMilli(),
@@ -557,15 +751,7 @@ func (c *Client) sendOPRFRangesToTEEK(ranges []*teeproto.OPRFRangeSpec) error {
 		},
 	}
 
-	data, err := proto.Marshal(env)
-	if err != nil {
-		return fmt.Errorf("failed to marshal OPRF ranges envelope: %w", err)
-	}
-
-	c.wsWriteMutex.Lock()
-	err = shared.WriteWSBinary(c.wsConn, data)
-	c.wsWriteMutex.Unlock()
-	if err != nil {
+	if err := c.sendEnvelope(env); err != nil {
 		return fmt.Errorf("send to TEE_K: %w", err)
 	}
 

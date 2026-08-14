@@ -24,12 +24,18 @@ import (
 
 // AttestorClient handles communication with attestor-core for TEE bundle submission
 type AttestorClient struct {
-	url        string
-	conn       *websocket.Conn
-	privateKey *ecdsa.PrivateKey
-	address    shared.Address
-	logger     *shared.Logger
-	connOnce   sync.Once // Ensure connection happens only once
+	url            string
+	conn           *websocket.Conn
+	privateKey     *ecdsa.PrivateKey
+	address        shared.Address
+	logger         *shared.Logger
+	connMutex      sync.Mutex                            // Owns connection publication and reconnect state
+	rpcMutex       sync.Mutex                            // Attestor RPC is strict write/read request-response
+	dial           func(string) (*websocket.Conn, error) // test hook
+	closed         bool
+	connecting     bool
+	connectingConn *websocket.Conn
+	connectDone    chan struct{}
 	// authRequest is forwarded to the attestor in the InitRequest when non-nil.
 	authRequest *teeproto.AuthenticationRequest
 }
@@ -54,25 +60,45 @@ func (ac *AttestorClient) GetPrivateKey() *ecdsa.PrivateKey {
 
 // ensureConnected establishes connection lazily when needed
 func (ac *AttestorClient) ensureConnected() error {
-	var connErr error
-	ac.connOnce.Do(func() {
-		connErr = ac.connect()
-	})
-	return connErr
+	for {
+		ac.connMutex.Lock()
+		if ac.closed {
+			ac.connMutex.Unlock()
+			return fmt.Errorf("attestor client is closed")
+		}
+		if ac.conn != nil {
+			ac.connMutex.Unlock()
+			return nil
+		}
+		if ac.connecting {
+			done := ac.connectDone
+			ac.connMutex.Unlock()
+			<-done
+			continue
+		}
+		ac.connecting = true
+		ac.connectDone = make(chan struct{})
+		ac.connMutex.Unlock()
+		return ac.connect()
+	}
 }
 
-// connect is the internal implementation that actually establishes the connection
+// connect establishes and initializes one candidate. The candidate is exposed
+// only to Close, which can detach and close it to interrupt initialization;
+// RPC callers cannot observe it until initialization succeeds.
 func (ac *AttestorClient) connect() error {
 	u, err := url.Parse(ac.url)
 	if err != nil {
-		return fmt.Errorf("failed to parse attestor URL: %v", err)
+		return ac.finishConnect(nil, fmt.Errorf("failed to parse attestor URL: %v", err))
 	}
 
 	ac.logger.Info("Connecting to attestor-core WebSocket", zap.String("url", ac.url))
 
 	// Connect to attestor-core
 	var conn *websocket.Conn
-	if strings.HasPrefix(ac.url, "wss://") {
+	if ac.dial != nil {
+		conn, err = ac.dial(u.String())
+	} else if strings.HasPrefix(ac.url, "wss://") {
 		// Production environment
 		ac.logger.Info("Using WSS connection")
 		conn, _, err = websocket.DefaultDialer.Dial(u.String(), nil)
@@ -83,24 +109,64 @@ func (ac *AttestorClient) connect() error {
 	}
 
 	if err != nil {
-		return fmt.Errorf("failed to connect to attestor-core: %v", err)
+		return ac.finishConnect(nil, fmt.Errorf("failed to connect to attestor-core: %v", err))
 	}
+	installWebSocketReadLimit(conn)
 
-	ac.conn = conn
+	ac.connMutex.Lock()
+	if ac.closed {
+		ac.connMutex.Unlock()
+		_ = conn.Close()
+		return ac.finishConnect(nil, fmt.Errorf("attestor client is closed"))
+	}
+	ac.connectingConn = conn
+	ac.connMutex.Unlock()
+
 	ac.logger.Info("WebSocket connection established, starting initialization")
 
 	// Initialize the connection with an InitRequest
-	if err := ac.initializeConnection(); err != nil {
-		ac.conn.Close()
-		return fmt.Errorf("failed to initialize connection: %v", err)
+	if err := ac.initializeConnection(conn); err != nil {
+		return ac.finishConnect(conn, fmt.Errorf("failed to initialize connection: %v", err))
 	}
 
+	if err := ac.finishConnect(conn, nil); err != nil {
+		return err
+	}
 	ac.logger.Info("AttestorClient connection and initialization complete")
 	return nil
 }
 
+func (ac *AttestorClient) finishConnect(candidate *websocket.Conn, connectErr error) error {
+	ac.connMutex.Lock()
+	closed := ac.closed
+	if ac.connectingConn == candidate {
+		ac.connectingConn = nil
+	}
+	if connectErr == nil && !closed {
+		ac.conn = candidate
+	}
+	done := ac.connectDone
+	ac.connectDone = nil
+	ac.connecting = false
+	if done != nil {
+		close(done)
+	}
+	ac.connMutex.Unlock()
+
+	if connectErr != nil || closed {
+		if candidate != nil {
+			_ = candidate.Close()
+		}
+		if closed {
+			return fmt.Errorf("attestor client is closed")
+		}
+		return connectErr
+	}
+	return nil
+}
+
 // initializeConnection sends the required InitRequest to attestor-core
-func (ac *AttestorClient) initializeConnection() error {
+func (ac *AttestorClient) initializeConnection(conn *websocket.Conn) error {
 	ac.logger.Info("Creating InitRequest")
 
 	// Create InitRequest
@@ -115,7 +181,7 @@ func (ac *AttestorClient) initializeConnection() error {
 	ac.logger.Info("Sending InitRequest")
 
 	// Send using centralized RPC message handler
-	responseMessages, err := ac.sendRPCMessage(initRequest)
+	responseMessages, err := ac.sendRPCMessageOnConn(conn, initRequest)
 	if err != nil {
 		return fmt.Errorf("failed to send init request: %v", err)
 	}
@@ -153,8 +219,18 @@ func (ac *AttestorClient) initializeConnection() error {
 
 // Close closes the WebSocket connection
 func (ac *AttestorClient) Close() error {
-	if ac.conn != nil {
-		return ac.conn.Close()
+	ac.connMutex.Lock()
+	conn := ac.conn
+	candidate := ac.connectingConn
+	ac.conn = nil
+	ac.connectingConn = nil
+	ac.closed = true
+	ac.connMutex.Unlock()
+	if candidate != nil && candidate != conn {
+		_ = candidate.Close()
+	}
+	if conn != nil {
+		return conn.Close()
 	}
 	return nil
 }
@@ -385,6 +461,40 @@ func (ac *AttestorClient) SendOPRFRequest(data []byte, domainSeparator []byte, z
 
 // sendRPCMessage sends a generic RPC message and waits for response
 func (ac *AttestorClient) sendRPCMessage(message teeproto.IsRPCMessage) (*teeproto.RPCMessages, error) {
+	ac.rpcMutex.Lock()
+	defer ac.rpcMutex.Unlock()
+	// Connection admission belongs inside the same serialization boundary as
+	// the write/read exchange. If the preceding RPC detached an ambiguous
+	// stream, this distinct call establishes a fresh initialized connection;
+	// the failed request itself is never retried.
+	if err := ac.ensureConnected(); err != nil {
+		return nil, fmt.Errorf("failed to connect to attestor: %v", err)
+	}
+
+	ac.connMutex.Lock()
+	conn := ac.conn
+	ac.connMutex.Unlock()
+	if conn == nil {
+		return nil, fmt.Errorf("attestor connection is not initialized")
+	}
+
+	response, err := ac.sendRPCMessageOnConn(conn, message)
+	if err != nil {
+		// An RPC failure may have occurred after a write. Never retry that request
+		// implicitly; detach this exact stream so a later, distinct call can make
+		// a fresh initialized connection.
+		ac.connMutex.Lock()
+		if ac.conn == conn {
+			ac.conn = nil
+		}
+		ac.connMutex.Unlock()
+		_ = conn.Close()
+		return nil, err
+	}
+	return response, nil
+}
+
+func (ac *AttestorClient) sendRPCMessageOnConn(conn *websocket.Conn, message teeproto.IsRPCMessage) (*teeproto.RPCMessages, error) {
 	// Generate unique RPC ID
 	rpcID := rand.Uint32()
 
@@ -409,15 +519,15 @@ func (ac *AttestorClient) sendRPCMessage(message teeproto.IsRPCMessage) (*teepro
 		zap.Int("message_size", len(messageBytes)),
 		zap.Uint64("rpc_id", rpcMessage.Id))
 
-	ac.conn.SetReadDeadline(time.Now().Add(60 * time.Second))
-	ac.conn.SetWriteDeadline(time.Now().Add(60 * time.Second))
+	conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+	conn.SetWriteDeadline(time.Now().Add(60 * time.Second))
 
-	if err := ac.conn.WriteMessage(websocket.BinaryMessage, messageBytes); err != nil {
+	if err := conn.WriteMessage(websocket.BinaryMessage, messageBytes); err != nil {
 		return nil, fmt.Errorf("failed to send RPC message: %v", err)
 	}
 
 	// Read response
-	_, responseBytes, err := ac.conn.ReadMessage()
+	_, responseBytes, err := conn.ReadMessage()
 	if err != nil {
 		return nil, fmt.Errorf("failed to read RPC response: %v", err)
 	}

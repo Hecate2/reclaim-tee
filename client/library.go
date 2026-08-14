@@ -48,7 +48,7 @@ func NewReclaimClient(config ClientConfig) (*ReclaimClient, error) {
 
 	// Apply defaults if not specified
 	if config.Timeout == 0 {
-		config.Timeout = 30 * time.Second
+		config.Timeout = time.Minute
 	}
 
 	// Hit /allocate to learn this session's pair addresses + JWT.
@@ -74,6 +74,7 @@ func NewReclaimClient(config ClientConfig) (*ReclaimClient, error) {
 	client := NewClient(teekURL)
 	client.SetTEETURL(teetURL)
 	client.SetRouterJWT(alloc.JWT)
+	client.coreProtocolTimeout = config.Timeout
 
 	if config.Logger != nil {
 		client.logger = config.Logger
@@ -195,7 +196,6 @@ func NewReclaimClientFromJSON(providerParamsJSON string, configJSON string) (*Re
 	config := ClientConfig{
 		RouterURL:            routerURL,
 		AttestorURL:          attestorURL,
-		Timeout:              30 * time.Second,
 		Mode:                 ModeAuto,
 		ProviderParams:       &params,
 		ProviderSecretParams: secretParams,
@@ -209,14 +209,8 @@ func NewReclaimClientFromJSON(providerParamsJSON string, configJSON string) (*Re
 
 // Connect establishes connections to both TEE_K and TEE_T
 func (r *ReclaimClient) Connect() error {
-	// Connect to TEE_K
-	if err := r.Client.ConnectToTEEK(); err != nil {
-		return NewConnectionError("TEE_K", err)
-	}
-
-	// Connect to TEE_T
-	if err := r.Client.ConnectToTEET(); err != nil {
-		return NewConnectionError("TEE_T", err)
+	if role, err := r.Client.connectTEEPair(); err != nil {
+		return NewConnectionError(role, err)
 	}
 
 	// Session coordination happens automatically in background via WebSocket messages
@@ -247,6 +241,9 @@ func (r *ReclaimClient) StartProtocol(providerParamsJSON string) error {
 			return fmt.Errorf("invalid provider secret params: %v", err)
 		}
 	}
+	if err := r.Client.beginProtocol(); err != nil {
+		return err
+	}
 
 	// Update client with validated provider params
 	r.Client.providerParams = providerData.Params
@@ -254,6 +251,7 @@ func (r *ReclaimClient) StartProtocol(providerParamsJSON string) error {
 
 	// Execute the complete protocol: Connect -> RequestHTTP
 	if err := r.Connect(); err != nil {
+		r.Client.resetProtocolStart()
 		return fmt.Errorf("failed to connect: %v", err)
 	}
 

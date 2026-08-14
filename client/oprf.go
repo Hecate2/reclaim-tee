@@ -3,6 +3,9 @@ package client
 import (
 	"encoding/json"
 	"fmt"
+	"math/big"
+	"sort"
+
 	"github.com/reclaimprotocol/reclaim-tee/minitls"
 	teeproto "github.com/reclaimprotocol/reclaim-tee/proto"
 
@@ -46,6 +49,9 @@ type OPRFRangeData struct {
 // ProcessOPRFForHashedRanges processes OPRF for all hashed ranges
 // This should be called right before building the verification bundle
 func (c *Client) ProcessOPRFForHashedRanges(attestorClient *AttestorClient) error {
+	c.oprfMutex.Lock()
+	defer c.oprfMutex.Unlock()
+
 	c.logger.Info("Starting OPRF processing for redaction ranges",
 		zap.Int("num_ranges", len(c.oprfRedactionRanges)))
 
@@ -55,9 +61,36 @@ func (c *Client) ProcessOPRFForHashedRanges(attestorClient *AttestorClient) erro
 	}
 
 	// Check if OPRF processing was already done
-	if len(c.oprfRanges) > 0 {
+	if c.oprfLegacyComplete {
 		c.logger.Info("OPRF processing already completed, skipping",
 			zap.Int("existing_ranges", len(c.oprfRanges)))
+		return nil
+	}
+
+	workingRanges := cloneOPRFRanges(c.oprfRanges)
+	if workingRanges == nil {
+		workingRanges = make(map[int]*OPRFRangeData)
+	}
+	sortedStarts := make([]int, 0, len(c.oprfRedactionRanges))
+	for start := range c.oprfRedactionRanges {
+		sortedStarts = append(sortedStarts, start)
+	}
+	sort.Ints(sortedStarts)
+
+	if c.processOPRFRange != nil {
+		for _, rangeStart := range sortedStarts {
+			rangeLength := c.oprfRedactionRanges[rangeStart]
+			oprfData, err := c.processOPRFRange(rangeStart, rangeLength)
+			if err != nil {
+				return fmt.Errorf("OPRF processing failed for range [%d:%d]: %w", rangeStart, rangeStart+rangeLength, err)
+			}
+			if oprfData == nil {
+				return fmt.Errorf("OPRF processing returned nil data for range [%d:%d]", rangeStart, rangeStart+rangeLength)
+			}
+			workingRanges[rangeStart] = oprfData
+		}
+		c.oprfRanges = workingRanges
+		c.oprfLegacyComplete = true
 		return nil
 	}
 
@@ -83,8 +116,6 @@ func (c *Client) ProcessOPRFForHashedRanges(attestorClient *AttestorClient) erro
 	}
 	c.logger.Info("ZK circuit loaded, proceeding with OPRF processing")
 
-	// Convert oprfRedactionRanges to OPRFRangeData
-	c.oprfRanges = make(map[int]*OPRFRangeData)
 	domainSeparator := []byte("reclaim")
 
 	// Calculate progress increments
@@ -96,7 +127,8 @@ func (c *Client) ProcessOPRFForHashedRanges(attestorClient *AttestorClient) erro
 
 	// Process each redaction range
 	rangeIndex := 0
-	for rangeStart, rangeLength := range c.oprfRedactionRanges {
+	for _, rangeStart := range sortedStarts {
+		rangeLength := c.oprfRedactionRanges[rangeStart]
 		// Calculate progress percentage for OPRF processing (65% - 75%)
 		// Progress from start to end of this specific operation
 		oprfProgress := oprfPhaseStart + ((rangeIndex+1)*(oprfPhaseEnd-oprfPhaseStart))/totalRanges
@@ -122,7 +154,7 @@ func (c *Client) ProcessOPRFForHashedRanges(attestorClient *AttestorClient) erro
 				rangeStart, rangeStart+rangeLength, len(responseResults.HTTPResponse.FullResponse))
 		}
 
-		rangeData := responseResults.HTTPResponse.FullResponse[rangeStart : rangeStart+rangeLength]
+		rangeData := append([]byte(nil), responseResults.HTTPResponse.FullResponse[rangeStart:rangeStart+rangeLength]...)
 
 		// Create OPRFRangeData structure
 		oprfData := &OPRFRangeData{
@@ -202,12 +234,14 @@ func (c *Client) ProcessOPRFForHashedRanges(attestorClient *AttestorClient) erro
 		oprfData.ZKProof = zkProof
 
 		// Store the complete OPRF data
-		c.oprfRanges[rangeStart] = oprfData
+		workingRanges[rangeStart] = oprfData
 
 		// Increment range index for next iteration
 		rangeIndex++
 	}
 
+	c.oprfRanges = workingRanges
+	c.oprfLegacyComplete = true
 	c.logger.Info("OPRF processing completed successfully",
 		zap.Int("num_ranges_processed", len(c.oprfRanges)))
 
@@ -360,7 +394,95 @@ func (c *Client) generateZKProof(inputParams *prover.InputParams) ([]byte, error
 
 // GetOPRFRanges returns the OPRF range data for external access
 func (c *Client) GetOPRFRanges() map[int]*OPRFRangeData {
-	return c.oprfRanges
+	c.oprfMutex.RLock()
+	defer c.oprfMutex.RUnlock()
+	return cloneOPRFRanges(c.oprfRanges)
+}
+
+func cloneOPRFRanges(source map[int]*OPRFRangeData) map[int]*OPRFRangeData {
+	if source == nil {
+		return nil
+	}
+	clone := make(map[int]*OPRFRangeData, len(source))
+	for start, data := range source {
+		clone[start] = cloneOPRFRangeData(data)
+	}
+	return clone
+}
+
+func cloneOPRFRangeData(source *OPRFRangeData) *OPRFRangeData {
+	if source == nil {
+		return nil
+	}
+	clone := *source
+	clone.Data = append([]byte(nil), source.Data...)
+	clone.Mask = append([]byte(nil), source.Mask...)
+	clone.FinalOutput = append([]byte(nil), source.FinalOutput...)
+	clone.ZKProof = append([]byte(nil), source.ZKProof...)
+	clone.Request = cloneOPRFRequest(source.Request)
+	if source.Response != nil {
+		clone.Response = proto.Clone(source.Response).(*teeproto.TOPRFResponse)
+	}
+	clone.ZKProofParams = cloneZKProofParams(source.ZKProofParams)
+	return &clone
+}
+
+func cloneOPRFRequest(source *utils.OPRFRequest) *utils.OPRFRequest {
+	if source == nil {
+		return nil
+	}
+	clone := &utils.OPRFRequest{}
+	if source.Mask != nil {
+		clone.Mask = new(big.Int).Set(source.Mask)
+	}
+	if source.MaskedData != nil {
+		point := *source.MaskedData
+		clone.MaskedData = &point
+	}
+	for i, element := range source.SecretElements {
+		if element != nil {
+			clone.SecretElements[i] = new(big.Int).Set(element)
+		}
+	}
+	return clone
+}
+
+func cloneZKProofParams(source *prover.InputParams) *prover.InputParams {
+	if source == nil {
+		return nil
+	}
+	clone := *source
+	clone.Key = append([]byte(nil), source.Key...)
+	clone.Input = append([]byte(nil), source.Input...)
+	clone.Blocks = append([]prover.Block(nil), source.Blocks...)
+	for i := range clone.Blocks {
+		clone.Blocks[i].Nonce = append([]byte(nil), source.Blocks[i].Nonce...)
+		if source.Blocks[i].Boundary != nil {
+			boundary := *source.Blocks[i].Boundary
+			clone.Blocks[i].Boundary = &boundary
+		}
+	}
+	if source.TOPRF != nil {
+		toprfClone := *source.TOPRF
+		toprfClone.Locations = append([]prover.Location(nil), source.TOPRF.Locations...)
+		toprfClone.Mask = append([]byte(nil), source.TOPRF.Mask...)
+		toprfClone.DomainSeparator = append([]byte(nil), source.TOPRF.DomainSeparator...)
+		toprfClone.Output = append([]byte(nil), source.TOPRF.Output...)
+		toprfClone.Responses = make([]*prover.TOPRFResponse, len(source.TOPRF.Responses))
+		for i, response := range source.TOPRF.Responses {
+			if response == nil {
+				continue
+			}
+			responseClone := *response
+			responseClone.PublicKeyShare = append([]byte(nil), response.PublicKeyShare...)
+			responseClone.Evaluated = append([]byte(nil), response.Evaluated...)
+			responseClone.C = append([]byte(nil), response.C...)
+			responseClone.R = append([]byte(nil), response.R...)
+			toprfClone.Responses[i] = &responseClone
+		}
+		clone.TOPRF = &toprfClone
+	}
+	return &clone
 }
 
 // GetTOPRFCipherInfo returns the TOPRF cipher name and required blocks for a cipher suite

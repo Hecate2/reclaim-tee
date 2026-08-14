@@ -28,14 +28,10 @@ func (c *Client) handleBatchedDecryptionStreams(msg *shared.Message) {
 
 	// Process each decryption stream
 	for _, streamData := range batchedStreams.DecryptionStreams {
-
-		// Store decryption stream by sequence number
-		c.responseContentMutex.Lock()
-		c.decryptionStreamBySeq[streamData.SeqNum] = streamData.DecryptionStream
-		c.responseContentMutex.Unlock()
+		ciphertext, exists := c.storeDecryptionStreamAndSnapshotCiphertext(streamData.SeqNum, streamData.DecryptionStream)
 
 		// Decrypt and parse plaintext
-		if ciphertext, exists := c.ciphertextBySeq[streamData.SeqNum]; exists {
+		if exists {
 			// A buggy/compromised TEE_K could send a short stream; without
 			// the length check this panics (OOB) and the Go runtime tears
 			// down the whole client process (no recover() in /client).
@@ -111,7 +107,7 @@ func (c *Client) handleBatchedDecryptionStreams(msg *shared.Message) {
 		}
 
 		// Check if connection was terminated during reconstruction (e.g., non-2XX response)
-		if c.wsConn == nil {
+		if !c.hasTEEConnection("TEE_K") {
 			c.logger.Info("Connection terminated during response reconstruction - stopping processing")
 			return
 		}
@@ -128,6 +124,17 @@ func (c *Client) handleBatchedDecryptionStreams(msg *shared.Message) {
 		c.terminateConnectionWithError("Failed to send redaction spec", err)
 		return
 	}
+}
+
+// storeDecryptionStreamAndSnapshotCiphertext keeps the TLS writer's map
+// publication and the decryption reader's lookup in one ownership domain. The
+// ciphertext copy is stable after unlock while later records are captured.
+func (c *Client) storeDecryptionStreamAndSnapshotCiphertext(seqNum uint64, decryptionStream []byte) ([]byte, bool) {
+	c.responseContentMutex.Lock()
+	defer c.responseContentMutex.Unlock()
+	c.decryptionStreamBySeq[seqNum] = append([]byte(nil), decryptionStream...)
+	ciphertext, exists := c.ciphertextBySeq[seqNum]
+	return append([]byte(nil), ciphertext...), exists
 }
 
 // getContentTypeName returns a human-readable name for TLS content type

@@ -237,10 +237,7 @@ func (c *Client) populateOPRFMPCRanges(oprfOutputs []*teeproto.OPRFOutput) error
 			len(c.oprfMpcRangeMappings), len(oprfOutputs))
 	}
 
-	// Initialize oprfRanges if needed
-	if c.oprfRanges == nil {
-		c.oprfRanges = make(map[int]*OPRFRangeData)
-	}
+	additions := make(map[int]*OPRFRangeData, len(oprfOutputs))
 
 	// Match OPRF outputs to HTTP positions using stored mappings
 	// Both are ordered by TLS position (sorted in buildMPCOPRFRanges)
@@ -260,11 +257,11 @@ func (c *Client) populateOPRFMPCRanges(oprfOutputs []*teeproto.OPRFOutput) error
 			return fmt.Errorf("MPC OPRF HTTP range exceeds response data: start=%d length=%d response_len=%d",
 				mapping.HTTPStart, mapping.HTTPLength, len(c.lastResponseData.FullResponse))
 		}
-		originalData := c.lastResponseData.FullResponse[mapping.HTTPStart:httpEnd]
+		originalData := append([]byte(nil), c.lastResponseData.FullResponse[mapping.HTTPStart:httpEnd]...)
 
 		// Create OPRFRangeData with MPC OPRF output
 		// Note: Only Data and FinalOutput are used by replaceParamValuesWithOPRF
-		c.oprfRanges[mapping.HTTPStart] = &OPRFRangeData{
+		additions[mapping.HTTPStart] = &OPRFRangeData{
 			Start:       mapping.HTTPStart,
 			Length:      mapping.HTTPLength,
 			Data:        originalData,
@@ -278,6 +275,19 @@ func (c *Client) populateOPRFMPCRanges(oprfOutputs []*teeproto.OPRFOutput) error
 			zap.String("data", string(originalData)),
 			zap.Int("hash_len", len(output.HashOutput)))
 	}
+
+	// Publish only after every output and mapping has validated. A failure at
+	// range N must not leave ranges 0..N-1 observable or poison a retry.
+	c.oprfMutex.Lock()
+	workingRanges := cloneOPRFRanges(c.oprfRanges)
+	if workingRanges == nil {
+		workingRanges = make(map[int]*OPRFRangeData)
+	}
+	for start, data := range additions {
+		workingRanges[start] = data
+	}
+	c.oprfRanges = workingRanges
+	c.oprfMutex.Unlock()
 
 	c.logger.Info("Populated oprfRanges from MPC OPRF outputs",
 		zap.Int("count", len(oprfOutputs)))
@@ -295,12 +305,19 @@ func stripUnsignedFields(msg *teeproto.SignedMessage) *teeproto.SignedMessage {
 	}
 	return &teeproto.SignedMessage{
 		BodyType:          msg.BodyType,
-		Body:              msg.Body,
-		EthAddress:        msg.EthAddress,
-		Signature:         msg.Signature,
-		AttestationReport: msg.AttestationReport,
+		Body:              append([]byte(nil), msg.Body...),
+		EthAddress:        append([]byte(nil), msg.EthAddress...),
+		Signature:         append([]byte(nil), msg.Signature...),
+		AttestationReport: cloneAttestationReport(msg.AttestationReport),
 		// ResponsePackets, ServerAppKey, CipherSuite intentionally omitted
 	}
+}
+
+func cloneAttestationReport(report *teeproto.AttestationReport) *teeproto.AttestationReport {
+	if report == nil {
+		return nil
+	}
+	return proto.Clone(report).(*teeproto.AttestationReport)
 }
 
 // extractCertHashFromAttestation extracts a cert hash nonce from a GCP attestation JWT.
@@ -310,13 +327,27 @@ func stripUnsignedFields(msg *teeproto.SignedMessage) *teeproto.SignedMessage {
 // SECURITY: This function validates that required data is present before creating bundle
 func (c *Client) buildVerificationBundle() ([]byte, error) {
 	bundle := &teeproto.VerificationBundle{}
+	c.protocolStateMutex.RLock()
+	var teekSignedMessage, teetSignedMessage *teeproto.SignedMessage
+	if c.teekSignedMessage != nil {
+		teekSignedMessage = proto.Clone(c.teekSignedMessage).(*teeproto.SignedMessage)
+	}
+	if c.teetSignedMessage != nil {
+		teetSignedMessage = proto.Clone(c.teetSignedMessage).(*teeproto.SignedMessage)
+	}
+	teekValid := c.teeKSignatureValid
+	teetValid := c.teeTSignatureValid
+	c.protocolStateMutex.RUnlock()
 
 	// SECURITY: Validate that we have the required signed messages
-	if c.teekSignedMessage == nil {
+	if teekSignedMessage == nil {
 		return nil, fmt.Errorf("SECURITY ERROR: missing TEE_K signed message - protocol incomplete")
 	}
-	if c.teetSignedMessage == nil {
+	if teetSignedMessage == nil {
 		return nil, fmt.Errorf("SECURITY ERROR: missing TEE_T signed message - protocol incomplete")
+	}
+	if !teekValid || !teetValid {
+		return nil, fmt.Errorf("SECURITY ERROR: TEE signed message validation was not completed")
 	}
 
 	// Channel<->attestation SPKI binding intentionally NOT checked here: TEE keys
@@ -326,10 +357,10 @@ func (c *Client) buildVerificationBundle() ([]byte, error) {
 
 	// TEE_K signed message (K_OUTPUT) - strip unsigned metadata fields before sending to attestor
 	// The unsigned fields (ResponsePackets, ServerAppKey, CipherSuite) are only used client-side
-	bundle.TeekSigned = stripUnsignedFields(c.teekSignedMessage)
+	bundle.TeekSigned = stripUnsignedFields(teekSignedMessage)
 
 	// TEE_T signed message (T_OUTPUT) - strip unsigned metadata fields before sending to attestor
-	bundle.TeetSigned = stripUnsignedFields(c.teetSignedMessage)
+	bundle.TeetSigned = stripUnsignedFields(teetSignedMessage)
 
 	// OPRF verification data handles two types:
 	// 1. Legacy TOPRF (oprfRedactionRanges) - uses ZK proofs, requires ZKProofParams
@@ -337,21 +368,24 @@ func (c *Client) buildVerificationBundle() ([]byte, error) {
 	// Both populate oprfRanges for ParamValue replacement, but only legacy TOPRF goes in bundle.OprfVerifications
 	expectedOprfCount := len(c.oprfRedactionRanges) + len(c.oprfMpcRedactionRanges)
 	if expectedOprfCount > 0 {
-		if len(c.oprfRanges) == 0 {
+		c.oprfMutex.RLock()
+		oprfRanges := cloneOPRFRanges(c.oprfRanges)
+		c.oprfMutex.RUnlock()
+		if len(oprfRanges) == 0 {
 			return nil, fmt.Errorf("SECURITY ERROR: OPRF redaction ranges present but OPRF processing was not completed")
 		}
-		if len(c.oprfRanges) != expectedOprfCount {
+		if len(oprfRanges) != expectedOprfCount {
 			return nil, fmt.Errorf("SECURITY ERROR: OPRF range count mismatch - expected %d (legacy=%d + mpc=%d), got %d",
-				expectedOprfCount, len(c.oprfRedactionRanges), len(c.oprfMpcRedactionRanges), len(c.oprfRanges))
+				expectedOprfCount, len(c.oprfRedactionRanges), len(c.oprfMpcRedactionRanges), len(oprfRanges))
 		}
 		c.logger.Info("OPRF ranges ready for bundle",
-			zap.Int("total_oprf_ranges", len(c.oprfRanges)),
+			zap.Int("total_oprf_ranges", len(oprfRanges)),
 			zap.Int("legacy_toprf", len(c.oprfRedactionRanges)),
 			zap.Int("mpc_oprf", len(c.oprfMpcRedactionRanges)))
 
 		// Sort by range start for consistent ordering
 		var sortedStarts []int
-		for start := range c.oprfRanges {
+		for start := range oprfRanges {
 			sortedStarts = append(sortedStarts, start)
 		}
 		sort.Ints(sortedStarts)
@@ -360,7 +394,7 @@ func (c *Client) buildVerificationBundle() ([]byte, error) {
 		// MPC OPRF ranges don't have ZKProofParams - they're verified via TEE signatures
 		legacyToprfCount := 0
 		for _, start := range sortedStarts {
-			oprfData := c.oprfRanges[start]
+			oprfData := oprfRanges[start]
 
 			// Skip MPC OPRF ranges (no ZK proofs - verified via TEE signatures)
 			if oprfData.ZKProofParams == nil || len(oprfData.ZKProofParams.Input) == 0 {
@@ -384,9 +418,9 @@ func (c *Client) buildVerificationBundle() ([]byte, error) {
 			streamLength := streamInputLength
 
 			// Verification: Check if Input now matches extracted stream data
-			if c.teetSignedMessage != nil {
+			if teetSignedMessage != nil {
 				var tPayload teeproto.TOutputPayload
-				if err := proto.Unmarshal(c.teetSignedMessage.GetBody(), &tPayload); err == nil {
+				if err := proto.Unmarshal(teetSignedMessage.GetBody(), &tPayload); err == nil {
 					consolidatedCiphertext := tPayload.GetConsolidatedResponseCiphertext()
 
 					if int(streamPos+streamLength) <= len(consolidatedCiphertext) {
@@ -830,20 +864,36 @@ func (c *Client) calculateBlockAlignedStreamPosition(zkParams *prover.InputParam
 // replaceParamValuesWithOPRF replaces ParamValues that match hashed range data with OPRF outputs
 // This ensures the attestor receives the correct values for validation
 func (c *Client) replaceParamValuesWithOPRF(providerParams *providers.HTTPProviderParams) {
-	if len(c.oprfRanges) == 0 || providerParams == nil || providerParams.ParamValues == nil {
+	if providerParams == nil || providerParams.ParamValues == nil {
 		return
+	}
+	c.oprfMutex.RLock()
+	oprfRanges := cloneOPRFRanges(c.oprfRanges)
+	c.oprfMutex.RUnlock()
+	if len(oprfRanges) == 0 {
+		return
+	}
+	updatedValues := make(map[string]string, len(providerParams.ParamValues))
+	for key, value := range providerParams.ParamValues {
+		updatedValues[key] = value
 	}
 
 	c.logger.Info("Replacing ParamValues with OPRF outputs",
-		zap.Int("num_oprf_ranges", len(c.oprfRanges)),
+		zap.Int("num_oprf_ranges", len(oprfRanges)),
 		zap.Int("num_param_values", len(providerParams.ParamValues)))
 
-	// For each OPRF range, check if its data matches any ParamValue
-	for _, oprfData := range c.oprfRanges {
+	// For each OPRF range, check if its data matches any ParamValue.
+	sortedStarts := make([]int, 0, len(oprfRanges))
+	for start := range oprfRanges {
+		sortedStarts = append(sortedStarts, start)
+	}
+	sort.Ints(sortedStarts)
+	for _, start := range sortedStarts {
+		oprfData := oprfRanges[start]
 		originalData := string(oprfData.Data)
 
 		// Look for matching ParamValue
-		for key, value := range providerParams.ParamValues {
+		for key, value := range updatedValues {
 			if value == originalData {
 				var finalOPRF string
 				if oprfData.IsMPC {
@@ -856,7 +906,7 @@ func (c *Client) replaceParamValuesWithOPRF(providerParams *providers.HTTPProvid
 				}
 
 				// Replace in-place
-				providerParams.ParamValues[key] = finalOPRF
+				updatedValues[key] = finalOPRF
 
 				c.logger.Info("Replaced ParamValue with OPRF output",
 					zap.String("key", key),
@@ -868,6 +918,7 @@ func (c *Client) replaceParamValuesWithOPRF(providerParams *providers.HTTPProvid
 			}
 		}
 	}
+	providerParams.ParamValues = updatedValues
 }
 
 // adjustBase64Length adjusts base64 string to match target length

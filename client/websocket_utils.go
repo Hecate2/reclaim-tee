@@ -5,7 +5,12 @@ import (
 	"net"
 
 	"github.com/gorilla/websocket"
+	"github.com/reclaimprotocol/reclaim-tee/shared"
 )
+
+func installWebSocketReadLimit(conn *websocket.Conn) {
+	conn.SetReadLimit(shared.MaxWebSocketMessageSize)
+}
 
 // createNativeNetworkDialer creates a WebSocket dialer that uses native networking
 // for iOS VPN compatibility. The dialer uses a custom NetDialTLSContext that

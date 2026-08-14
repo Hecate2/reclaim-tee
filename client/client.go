@@ -112,9 +112,26 @@ func (p ProtocolPhase) GetPhasePercentage() int {
 
 type Client struct {
 	// WebSocket connections
-	wsConn   *websocket.Conn // Protected by wsWriteMutex
-	teetConn *websocket.Conn // Protected by teetWriteMutex
+	wsConn   *websocket.Conn // Protected by connectionMutex
+	teetConn *websocket.Conn // Protected by connectionMutex
 	tcpConn  net.Conn
+
+	// connectionMutex owns publication of both TEE connections and their
+	// generations. Readers receive the exact connection and generation they
+	// belong to and never reload these mutable fields.
+	connectionMutex        sync.Mutex
+	connectionCleanupMutex sync.Mutex
+	pairConnectMutex       sync.Mutex
+	teekConnectMutex       sync.Mutex
+	teetConnectMutex       sync.Mutex
+	connectionEpoch        uint64
+	connectionsClosing     bool
+	connectionCleanupDone  chan struct{}
+	teekGeneration         uint64
+	teetGeneration         uint64
+	teekReaderDone         chan struct{}
+	teetReaderDone         chan struct{}
+	teeDial                func(role, rawURL string) (*websocket.Conn, error) // test hook
 
 	// WebSocket write synchronization (gorilla/websocket requires serialized writes)
 	wsWriteMutex   sync.Mutex // Protects all writes to wsConn
@@ -146,7 +163,7 @@ type Client struct {
 
 	// Attestor client (created lazily when needed)
 	attestorClient      *AttestorClient
-	attestorOnce        sync.Once                       // Ensure attestor client is created only once
+	attestorMutex       sync.Mutex
 	attestorAuthRequest *teeproto.AuthenticationRequest // Optional auth request forwarded to the attestor
 
 	// Phase 4: Response handling
@@ -154,14 +171,27 @@ type Client struct {
 	requestSeqNum  uint64 // TLS sequence number for request AEAD (starts at 1 after handshake)
 
 	// Protocol completion signaling
-	completionChan chan error // Signals when protocol is complete (nil = success, non-nil = error)
+	completionChan      chan error // Signals when protocol is complete (nil = success, non-nil = error)
+	coreProtocolTimeout time.Duration
+	coreProtocolDone    chan struct{}
 
-	completionOnce sync.Once // Ensures completion channel is only closed once
+	completionOnce    sync.Once // Ensures completion channel is only closed once
+	completionClaimed atomic.Bool
+	watchdogOnce      sync.Once
+	watchdogStop      chan struct{}
+	watchdogStopOnce  sync.Once
 
 	protocolPhase          ProtocolPhase // Current protocol phase
 	teeKTranscriptReceived bool          // TEE_K transcript received
 	teeTTranscriptReceived bool          // TEE_T transcript received
+	teeKSignatureValid     bool          // TEE_K body, identity, and signature validated
+	teeTSignatureValid     bool          // TEE_T body, identity, and signature validated
 	protocolStateMutex     sync.RWMutex  // Protect simple state
+	phaseCompletionHook    func()        // test hook after success claim while state remains locked
+	closeBeforePublishHook func()        // test hook after cleanup and before Close completion publication
+	protocolRunMutex       sync.Mutex
+	protocolStarted        bool
+	httpRequestStarted     bool
 
 	// Track HTTP request/response lifecycle
 	httpRequestSent       atomic.Bool                 // Set after final fragment written to TCP; read by TCP reader goroutine.
@@ -192,7 +222,11 @@ type Client struct {
 	requestRedactionRanges []shared.RequestRedactionRange
 
 	// Library interface fields
-	clientMode ClientMode // Client operational mode (enclave vs standalone)
+	modeMutex            sync.Mutex
+	clientMode           ClientMode // Client operational mode (enclave vs standalone)
+	verifyGCPAttestation func([]byte) error
+	findGCPNonce         func([]byte, string) (string, error)
+	verifySEVAttestation func([]byte) ([]string, error)
 
 	// Provider parameters for automatic response redactions
 	providerParams       *providers.HTTPProviderParams
@@ -232,6 +266,11 @@ type Client struct {
 
 	// OPRF processed data for each hashed range
 	oprfRanges map[int]*OPRFRangeData
+	oprfMutex  sync.RWMutex
+	// Legacy completion cannot be inferred from len(oprfRanges): MPC ranges may
+	// already be present, and a failed legacy attempt must remain retryable.
+	oprfLegacyComplete bool
+	processOPRFRange   func(start, length int) (*OPRFRangeData, error) // test hook
 
 	// MPC OPRF state
 	oprfMpcRangesSent    bool                      // Track if ranges were sent
@@ -244,10 +283,13 @@ func NewClient(teekURL string) *Client {
 	logger := GetLogger("client", false)
 
 	return &Client{
-		logger:         logger,
-		teekURL:        teekURL,
-		teetURL:        "wss://tee-t-gcp.reclaimprotocol.org/ws", // Default TEE_T URL (enclave mode)
-		completionChan: make(chan error, 1),                      // buffered to avoid blocking
+		logger:              logger,
+		teekURL:             teekURL,
+		teetURL:             "wss://tee-t-gcp.reclaimprotocol.org/ws", // Default TEE_T URL (enclave mode)
+		completionChan:      make(chan error, 1),                      // buffered to avoid blocking
+		coreProtocolTimeout: time.Minute,
+		coreProtocolDone:    make(chan struct{}),
+		watchdogStop:        make(chan struct{}),
 
 		protocolPhase:          PhaseHandshaking,
 		teeKTranscriptReceived: false,
@@ -280,6 +322,8 @@ func NewClient(teekURL string) *Client {
 
 // SetTEETURL sets the TEE_T connection URL
 func (c *Client) SetTEETURL(url string) {
+	c.modeMutex.Lock()
+	defer c.modeMutex.Unlock()
 	c.teetURL = url
 }
 
@@ -287,12 +331,32 @@ func (c *Client) SetTEETURL(url string) {
 // router. When set, ConnectToTEEK / ConnectToTEET send a ClientAuth
 // envelope as the first message before any other protocol traffic.
 func (c *Client) SetRouterJWT(jwt string) {
+	c.modeMutex.Lock()
+	defer c.modeMutex.Unlock()
 	c.routerJWT = jwt
 }
 
 // SetMode sets the client operational mode
 func (c *Client) SetMode(mode ClientMode) {
+	c.modeMutex.Lock()
+	defer c.modeMutex.Unlock()
 	c.clientMode = mode
+}
+
+// resolveClientMode preserves the direct NewClient compatibility path while
+// keeping unresolved router clients fail-closed. NewReclaimClient resolves
+// ModeAuto explicitly; a router JWT on a still-Auto direct client is therefore
+// production evidence, not standalone evidence.
+func (c *Client) resolveClientMode() ClientMode {
+	c.modeMutex.Lock()
+	defer c.modeMutex.Unlock()
+	if c.clientMode != ModeAuto {
+		return c.clientMode
+	}
+	if c.routerJWT != "" {
+		return ModeEnclave
+	}
+	return detectMode(c.teekURL, c.teetURL)
 }
 
 // setAttestorAuthRequest decodes a base64 protobuf AuthenticationRequest and
@@ -322,34 +386,43 @@ func (c *Client) setAttestorAuthRequest(authRequestB64 string) error {
 
 // getAttestorClient returns the attestor client, creating it lazily if needed
 func (c *Client) getAttestorClient() (*AttestorClient, error) {
-	var clientErr error
-	c.attestorOnce.Do(func() {
-		if c.attestorURL == "" {
-			clientErr = fmt.Errorf("attestor URL not configured")
-			return
-		}
-
-		// Generate private key for attestor communication
-		privateKey, err := shared.GenerateKey()
-		if err != nil {
-			clientErr = fmt.Errorf("failed to generate private key: %v", err)
-			return
-		}
-
-		c.attestorClient = NewAttestorClient(c.attestorURL, privateKey, c.attestorAuthRequest, c.logger)
-	})
-
-	if clientErr != nil {
-		return nil, clientErr
+	c.attestorMutex.Lock()
+	defer c.attestorMutex.Unlock()
+	if c.isClosing.Load() {
+		return nil, fmt.Errorf("client is closed")
 	}
+
+	if c.attestorClient != nil {
+		return c.attestorClient, nil
+	}
+	if c.attestorURL == "" {
+		return nil, fmt.Errorf("attestor URL not configured")
+	}
+
+	// Do not publish partial state. A generation failure leaves the next call
+	// free to retry, while a successful client is reused exactly.
+	privateKey, err := shared.GenerateKey()
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate private key: %v", err)
+	}
+	c.attestorClient = NewAttestorClient(c.attestorURL, privateKey, c.attestorAuthRequest, c.logger)
 	return c.attestorClient, nil
 }
 
 func (c *Client) RequestHTTP() error {
+	if err := c.beginHTTPRequest(); err != nil {
+		return err
+	}
+	abortBeforePublication := func(err error) error {
+		c.resetTEEConnectionsForRetry()
+		c.resetProtocolStart()
+		return err
+	}
+
 	// Extract hostname and port from provider params
 	hostname, port, err := c.getHostPortFromProviderParams()
 	if err != nil {
-		return fmt.Errorf("failed to extract host and port from provider params: %v", err)
+		return abortBeforePublication(fmt.Errorf("failed to extract host and port from provider params: %v", err))
 	}
 
 	c.targetHost = hostname
@@ -361,7 +434,7 @@ func (c *Client) RequestHTTP() error {
 
 	// Generate request data and redaction ranges automatically from provider params
 	if err := c.generateAutomaticRequestData(); err != nil {
-		return fmt.Errorf("failed to generate automatic request data: %v", err)
+		return abortBeforePublication(fmt.Errorf("failed to generate automatic request data: %v", err))
 	}
 
 	// Store connection request data to be sent once session ID is received
@@ -380,18 +453,72 @@ func (c *Client) RequestHTTP() error {
 
 	// Check if we already have a session ID and send immediately
 	if sessionID != "" {
-		return c.sendPendingConnectionRequest()
+		if err := c.sendPendingConnectionRequest(); err != nil {
+			c.terminateConnectionWithErrorAndWait("Failed to send connection request", err)
+			return err
+		}
 	}
+	c.startCoreProtocolWatchdog()
 
 	// Otherwise, request will be sent when session ID is received in handleSessionReady
 	return nil
+}
+
+func (c *Client) beginHTTPRequest() error {
+	c.protocolRunMutex.Lock()
+	defer c.protocolRunMutex.Unlock()
+	if c.isClosing.Load() {
+		return fmt.Errorf("client is closed")
+	}
+	if c.httpRequestStarted {
+		return fmt.Errorf("protocol request already started")
+	}
+	if !c.protocolStarted {
+		c.protocolStarted = true
+	}
+	c.httpRequestStarted = true
+	return nil
+}
+
+func (c *Client) beginProtocol() error {
+	c.protocolRunMutex.Lock()
+	defer c.protocolRunMutex.Unlock()
+	if c.protocolStarted {
+		return fmt.Errorf("protocol already started")
+	}
+	if c.isClosing.Load() {
+		return fmt.Errorf("client is closed")
+	}
+	c.protocolStarted = true
+	return nil
+}
+
+// resetProtocolStart is only used after all acquired TEE sockets have been
+// detached and closed, before any protocol request was published.
+func (c *Client) resetProtocolStart() {
+	c.protocolRunMutex.Lock()
+	c.protocolStarted = false
+	c.httpRequestStarted = false
+	c.protocolRunMutex.Unlock()
 }
 
 // advanceToPhase transitions to a new protocol phase (thread-safe)
 func (c *Client) advanceToPhase(newPhase ProtocolPhase) {
 	c.protocolStateMutex.Lock()
 	oldPhase := c.protocolPhase
+	if newPhase <= oldPhase {
+		c.protocolStateMutex.Unlock()
+		return
+	}
 	c.protocolPhase = newPhase
+	reachedCoreCompletion := oldPhase < PhaseValidating && newPhase >= PhaseValidating
+	claimedCompletion := false
+	if reachedCoreCompletion {
+		claimedCompletion = c.claimProtocolCompletion()
+		if c.phaseCompletionHook != nil {
+			c.phaseCompletionHook()
+		}
+	}
 	c.protocolStateMutex.Unlock()
 
 	// Get phase description for progress reporting
@@ -409,44 +536,79 @@ func (c *Client) advanceToPhase(newPhase ProtocolPhase) {
 	c.logger.Info("Protocol progress", logFields...)
 
 	// Signal completion when core protocol validation is complete (ready for post-protocol work)
-	if newPhase == PhaseValidating {
-		c.completionOnce.Do(func() {
-			c.logger.Info("Core protocol validation complete - signaling success")
-			select {
-			case c.completionChan <- nil: // nil = success
-			default:
-				// Channel might be full, but that's ok
-			}
-		})
+	if reachedCoreCompletion {
+		c.logger.Info("Core protocol validation complete - signaling success")
+		if claimedCompletion {
+			c.publishProtocolCompletion(nil)
+		}
 	}
-}
-
-// markTEEKTranscriptReceived marks TEE_K transcript as received and checks for completion
-func (c *Client) markTEEKTranscriptReceived() {
-	c.protocolStateMutex.Lock()
-	c.teeKTranscriptReceived = true
-	c.protocolStateMutex.Unlock()
-	c.logger.Info("TEE_K transcript received", zap.Bool("tee_k", true), zap.Bool("tee_t", c.teeTTranscriptReceived))
-	c.checkForProtocolCompletion()
-}
-
-// markTEETTranscriptReceived marks TEE_T transcript as received and checks for completion
-func (c *Client) markTEETTranscriptReceived() {
-	c.protocolStateMutex.Lock()
-	c.teeTTranscriptReceived = true
-	c.protocolStateMutex.Unlock()
-	c.logger.Info("TEE_T transcript received", zap.Bool("tee_k", c.teeKTranscriptReceived), zap.Bool("tee_t", true))
-	c.checkForProtocolCompletion()
 }
 
 // checkForProtocolCompletion checks if protocol can be completed
 func (c *Client) checkForProtocolCompletion() {
-	if c.teeKTranscriptReceived && c.teeTTranscriptReceived {
+	c.protocolStateMutex.RLock()
+	complete := c.teeKTranscriptReceived && c.teeTTranscriptReceived && c.teeKSignatureValid && c.teeTSignatureValid
+	c.protocolStateMutex.RUnlock()
+	if complete {
 		c.logger.Info("Both transcripts received AND redacted streams processed - core protocol validation complete")
 		c.advanceToPhase(PhaseValidating)
 	} else {
 		c.logger.Info("Waiting for both transcripts...")
 	}
+}
+
+func (c *Client) claimProtocolCompletion() bool {
+	return c.completionClaimed.CompareAndSwap(false, true)
+}
+
+func (c *Client) claimProtocolCompletionWithState() bool {
+	c.protocolStateMutex.Lock()
+	claimed := c.claimProtocolCompletion()
+	c.protocolStateMutex.Unlock()
+	return claimed
+}
+
+func (c *Client) publishProtocolCompletion(err error) {
+	c.completionOnce.Do(func() {
+		select {
+		case c.completionChan <- err:
+		default:
+		}
+		close(c.coreProtocolDone)
+	})
+}
+
+func (c *Client) startCoreProtocolWatchdog() {
+	c.watchdogOnce.Do(func() {
+		timeout := c.coreProtocolTimeout
+		if timeout <= 0 {
+			timeout = time.Minute
+		}
+		go func() {
+			timer := time.NewTimer(timeout)
+			defer timer.Stop()
+			select {
+			case <-c.coreProtocolDone:
+				return
+			case <-c.watchdogStop:
+				return
+			case <-timer.C:
+			}
+
+			err := fmt.Errorf("core TEE protocol timed out after %s", timeout)
+			// Claim completion before cleanup so a success racing the timer cannot
+			// be followed by timeout-driven teardown.
+			if !c.claimProtocolCompletionWithState() {
+				return
+			}
+			c.terminateConnectionCleanup("Core TEE protocol timeout", err, true)
+			c.publishProtocolCompletion(err)
+		}()
+	})
+}
+
+func (c *Client) stopCoreProtocolWatchdog() {
+	c.watchdogStopOnce.Do(func() { close(c.watchdogStop) })
 }
 
 // getResponseRedactions generates automatic response redactions using provider params
@@ -560,7 +722,7 @@ func extractEthAddressFromSignedMessage(signedMsg *teeproto.SignedMessage) []byt
 		return nil
 	}
 	// In standalone mode, return the direct ETH address
-	return signedMsg.GetEthAddress()
+	return append([]byte(nil), signedMsg.GetEthAddress()...)
 }
 
 // SubmitToAttestorCore submits the completed verification bundle to attestor-core for claim validation
@@ -578,7 +740,6 @@ func (c *Client) SubmitToAttestorCore(params ClaimTeeBundleParams) (*ClaimWithSi
 	if err != nil {
 		return nil, fmt.Errorf("failed to get attestor client: %v", err)
 	}
-	defer attestorClient.Close()
 
 	// Process OPRF for all hashed ranges before building bundle
 	if len(c.oprfRedactionRanges) > 0 {
@@ -635,9 +796,12 @@ func (c *Client) SubmitToAttestorCore(params ClaimTeeBundleParams) (*ClaimWithSi
 // This method replaces the split model where external code handled OPRF processing and attestor submission
 func (c *Client) ExecuteCompleteProtocol(
 	providerData *ProviderRequestData,
-) (*ClaimWithSignatures, error) {
+) (result *ClaimWithSignatures, retErr error) {
 	if providerData == nil {
 		return nil, fmt.Errorf("provider data is required")
+	}
+	if err := c.beginProtocol(); err != nil {
+		return nil, err
 	}
 
 	c.logger.Info("Starting complete protocol execution")
@@ -657,32 +821,31 @@ func (c *Client) ExecuteCompleteProtocol(
 
 	// Decode the optional attestor auth request before the attestor client is created.
 	if err := c.setAttestorAuthRequest(providerData.AuthRequest); err != nil {
+		c.resetProtocolStart()
 		return nil, err
 	}
 
 	// Connect to TEEs (equivalent to Connect())
-	if err := c.ConnectToTEEK(); err != nil {
-		return nil, fmt.Errorf("failed to connect to TEE_K: %v", err)
-	}
-	if err := c.ConnectToTEET(); err != nil {
-		return nil, fmt.Errorf("failed to connect to TEE_T: %v", err)
+	if err := c.connectToTEEs(); err != nil {
+		c.resetProtocolStart()
+		return nil, fmt.Errorf("failed to connect to TEEs: %v", err)
 	}
 
 	// Start the protocol (equivalent to RequestHTTP)
 	if err := c.RequestHTTP(); err != nil {
 		return nil, fmt.Errorf("failed to start HTTP request: %v", err)
 	}
+	defer func() {
+		if retErr != nil {
+			c.Close()
+		}
+	}()
 
 	// Wait for the core protocol to complete
-	select {
-	case err := <-c.WaitForCompletion():
-		if err != nil {
-			return nil, fmt.Errorf("protocol terminated with error: %v", err)
-		}
-		c.logger.Info("Core TEE protocol completed successfully")
-	case <-time.After(1 * time.Minute):
-		return nil, fmt.Errorf("core TEE protocol timed out")
+	if err := c.waitForCoreProtocol(); err != nil {
+		return nil, err
 	}
+	c.logger.Info("Core TEE protocol completed successfully")
 
 	// The core protocol is now complete (at PhaseComplete), continue with post-protocol work
 	// Note: No phase transitions here since the protocol naturally completed
@@ -741,7 +904,7 @@ func (c *Client) ExecuteCompleteProtocol(
 		Context:    providerData.Context,
 	}
 
-	result, err := c.SubmitToAttestorCore(claimParams)
+	result, err = c.SubmitToAttestorCore(claimParams)
 	if err != nil {
 		return nil, fmt.Errorf("attestor submission failed: %v", err)
 	}
@@ -758,6 +921,14 @@ func (c *Client) ExecuteCompleteProtocol(
 	reportProgress(PhaseComplete, "Protocol execution completed successfully")
 
 	return result, nil
+}
+
+func (c *Client) waitForCoreProtocol() error {
+	err := <-c.WaitForCompletion()
+	if err != nil {
+		return fmt.Errorf("protocol terminated with error: %v", err)
+	}
+	return nil
 }
 
 // getPhaseDescription returns a human-readable description for each phase

@@ -13,7 +13,7 @@ import (
 type ClientConfig struct {
 	RouterURL            string                              // Router base URL; defaults to DefaultRouterURL (https://tee.reclaimprotocol.org) when empty
 	AttestorURL          string                              // Attestor WebSocket URL
-	Timeout              time.Duration                       // Connection timeout
+	Timeout              time.Duration                       // Core protocol timeout
 	Mode                 ClientMode                          // Client operational mode
 	ProviderParams       *providers.HTTPProviderParams       // Provider params for automatic response redactions
 	ProviderSecretParams *providers.HTTPProviderSecretParams // Provider secret params for automatic response redactions
