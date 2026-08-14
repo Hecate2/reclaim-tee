@@ -63,7 +63,7 @@ func TestSessionCreatedAckWaiterCleanedOnSendFailure(t *testing.T) {
 	cm := NewTEETConnectionManager(nil, "ws://example.invalid", shared.NewNopLogger())
 	const sessionID = "session-send-failure"
 	wantErr := errors.New("write failed")
-	installAckTestControl(cm, shared.NewWSConnection(nil))
+	installAckTestControl(cm, newAckTestWebSocket(t))
 
 	err := cm.sendSessionCreatedAndWaitTimeout(sessionID, time.Second, func(*shared.WSConnection, uint64) error {
 		return wantErr
@@ -72,6 +72,49 @@ func TestSessionCreatedAckWaiterCleanedOnSendFailure(t *testing.T) {
 		t.Fatalf("error = %v, want %v", err, wantErr)
 	}
 	assertNoPendingSessionAck(t, cm, sessionID)
+}
+
+func TestSessionCreatedAmbiguousSendFailureClosesOnlyOrigin(t *testing.T) {
+	cm := NewTEETConnectionManager(nil, "ws://example.invalid", shared.NewNopLogger())
+	const sessionID = "session-partial-write-failure"
+	origin, _ := installAckTestControl(cm, newAckTestWebSocket(t))
+	replacement := newAckTestWebSocket(t)
+	wantErr := errors.New("partial control write")
+
+	err := cm.sendSessionCreatedAndWaitTimeout(sessionID, time.Second, func(*shared.WSConnection, uint64) error {
+		installAckTestControl(cm, replacement)
+		return wantErr
+	})
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("send error = %v, want %v", err, wantErr)
+	}
+	if errors.Is(err, errSessionCreatedControlUnavailable) {
+		t.Fatalf("ambiguous send error was marked retryable: %v", err)
+	}
+	if err := origin.WriteMessage(websocket.BinaryMessage, []byte("closed-origin")); err == nil {
+		t.Fatal("ambiguous send failure left origin control open")
+	}
+	if err := replacement.WriteMessage(websocket.BinaryMessage, []byte("usable-replacement")); err != nil {
+		t.Fatalf("ambiguous origin failure closed replacement control: %v", err)
+	}
+}
+
+func TestGenericControlSendDoesNotExposeSessionCreatedRetrySentinel(t *testing.T) {
+	cm := NewTEETConnectionManager(nil, "ws://example.invalid", shared.NewNopLogger())
+	origin, generation := installAckTestControl(cm, newAckTestWebSocket(t))
+	installAckTestControl(cm, newAckTestWebSocket(t))
+	err := cm.sendOnControlConnection(origin, generation, &teeproto.Envelope{
+		SessionId: "unrelated-control-message",
+		Payload: &teeproto.Envelope_SessionClosed{
+			SessionClosed: &teeproto.SessionClosed{SessionId: "unrelated-control-message"},
+		},
+	})
+	if !errors.Is(err, errControlUnavailableBeforeWrite) {
+		t.Fatalf("generic control error = %v, want pre-write unavailable", err)
+	}
+	if errors.Is(err, errSessionCreatedControlUnavailable) {
+		t.Fatalf("generic control error inherited SessionCreated retry classification: %v", err)
+	}
 }
 
 func TestSessionCreatedAckWaiterCleanedOnTimeout(t *testing.T) {
@@ -85,6 +128,193 @@ func TestSessionCreatedAckWaiterCleanedOnTimeout(t *testing.T) {
 		t.Fatalf("error = %v, want SessionCreatedAck timeout", err)
 	}
 	assertNoPendingSessionAck(t, cm, sessionID)
+}
+
+func TestSessionCreatedRetryClassification(t *testing.T) {
+	cm := NewTEETConnectionManager(nil, "ws://example.invalid", shared.NewNopLogger())
+	const sessionID = "session-created-retry-classification"
+
+	_, err := cm.sendSessionCreatedAndWaitToken(sessionID, time.Second, func(*shared.WSConnection, uint64) error {
+		t.Fatal("send called without a control connection")
+		return nil
+	})
+	if !errors.Is(err, errSessionCreatedControlUnavailable) {
+		t.Fatalf("pre-send error = %v, want errSessionCreatedControlUnavailable", err)
+	}
+
+	installAckTestControl(cm, newAckTestWebSocket(t))
+	wantSendErr := errors.New("injected control write failure")
+	_, err = cm.sendSessionCreatedAndWaitToken(sessionID, time.Second, func(*shared.WSConnection, uint64) error {
+		return wantSendErr
+	})
+	if !errors.Is(err, wantSendErr) {
+		t.Fatalf("send error = %v, want %v", err, wantSendErr)
+	}
+	if errors.Is(err, errSessionCreatedControlUnavailable) {
+		t.Fatalf("post-send error was classified as definitely pre-send: %v", err)
+	}
+
+	_, err = cm.sendSessionCreatedAndWaitToken(sessionID, time.Millisecond, func(*shared.WSConnection, uint64) error {
+		return nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "timeout waiting for SessionCreatedAck") {
+		t.Fatalf("ACK error = %v, want timeout", err)
+	}
+	if errors.Is(err, errSessionCreatedControlUnavailable) {
+		t.Fatalf("ACK timeout was classified as definitely pre-send: %v", err)
+	}
+}
+
+func TestSessionCreatedRetryWaitsForReplacementBeforeResend(t *testing.T) {
+	logger := shared.NewNopLogger()
+	cm := NewTEETConnectionManager(nil, "ws://example.invalid", logger)
+	teek := &TEEK{connManager: cm, logger: logger}
+	const sessionID = "session-created-control-replacement"
+	var attempts int
+	var waits []time.Duration
+
+	notify := func(string) error {
+		attempts++
+		return cm.sendSessionCreatedAndWaitTimeout(sessionID, time.Second, func(conn *shared.WSConnection, generation uint64) error {
+			ack, err := proto.Marshal(&teeproto.Envelope{
+				SessionId: sessionID,
+				Payload: &teeproto.Envelope_SessionCreatedAck{
+					SessionCreatedAck: &teeproto.SessionCreatedAck{SessionId: sessionID},
+				},
+			})
+			if err != nil {
+				return err
+			}
+			cm.handleControlMessage(conn, generation, ack)
+			return nil
+		})
+	}
+	wait := func(delay time.Duration) {
+		waits = append(waits, delay)
+		installAckTestControl(cm, newAckTestWebSocket(t))
+	}
+
+	if err := teek.notifyTEETNewSessionWithRetryPolicy(sessionID, 3, 10*time.Millisecond, notify, wait); err != nil {
+		t.Fatalf("retry after control replacement: %v", err)
+	}
+	if attempts != 2 {
+		t.Fatalf("notify attempts = %d, want 2", attempts)
+	}
+	if len(waits) != 1 || waits[0] != 10*time.Millisecond {
+		t.Fatalf("retry waits = %v, want [10ms]", waits)
+	}
+}
+
+func TestSessionCreatedRetryBindsResendToReplacementControl(t *testing.T) {
+	logger := shared.NewNopLogger()
+	cm := NewTEETConnectionManager(nil, "ws://example.invalid", logger)
+	teek := &TEEK{connManager: cm, logger: logger}
+	const sessionID = "session-created-replaced-before-send"
+	origin, originGeneration := installAckTestControl(cm, newAckTestWebSocket(t))
+	cm.attestationMutex.Lock()
+	cm.attestationVerified = true
+	cm.attestationMutex.Unlock()
+	var replacement *shared.WSConnection
+	var replacementGeneration uint64
+	attempts := 0
+
+	notify := func(string) error {
+		attempts++
+		return cm.sendSessionCreatedAndWaitTimeout(sessionID, time.Second, func(conn *shared.WSConnection, generation uint64) error {
+			if attempts == 1 {
+				if conn != origin || generation != originGeneration {
+					t.Fatal("first attempt was not bound to origin control")
+				}
+				replacement = newAckTestWebSocket(t)
+				_, replacementGeneration = installAckTestControl(cm, replacement)
+				cm.attestationMutex.Lock()
+				cm.attestationVerified = true
+				cm.attestationMutex.Unlock()
+			}
+			env := &teeproto.Envelope{
+				SessionId: sessionID,
+				Payload: &teeproto.Envelope_SessionCreated{
+					SessionCreated: &teeproto.SessionCreated{},
+				},
+			}
+			if err := cm.sendOnControlConnection(conn, generation, env); err != nil {
+				return err
+			}
+			if conn != replacement || generation != replacementGeneration {
+				t.Fatal("retry was not bound to replacement control")
+			}
+			ack, err := proto.Marshal(&teeproto.Envelope{
+				SessionId: sessionID,
+				Payload: &teeproto.Envelope_SessionCreatedAck{
+					SessionCreatedAck: &teeproto.SessionCreatedAck{SessionId: sessionID},
+				},
+			})
+			if err != nil {
+				return err
+			}
+			cm.handleControlMessage(conn, generation, ack)
+			return nil
+		})
+	}
+
+	if err := teek.notifyTEETNewSessionWithRetryPolicy(sessionID, 3, time.Millisecond, notify, func(time.Duration) {}); err != nil {
+		t.Fatalf("replacement retry: %v", err)
+	}
+	if attempts != 2 {
+		t.Fatalf("notify attempts = %d, want 2", attempts)
+	}
+}
+
+func TestSessionCreatedRetryDoesNotRepeatAmbiguousFailure(t *testing.T) {
+	logger := shared.NewNopLogger()
+	teek := &TEEK{logger: logger}
+	wantErr := errors.New("SessionCreated may have been written")
+	attempts := 0
+	waits := 0
+	err := teek.notifyTEETNewSessionWithRetryPolicy("ambiguous-session", 5, time.Millisecond, func(string) error {
+		attempts++
+		return wantErr
+	}, func(time.Duration) {
+		waits++
+	})
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("retry error = %v, want %v", err, wantErr)
+	}
+	if attempts != 1 || waits != 0 {
+		t.Fatalf("ambiguous failure attempts=%d waits=%d, want 1 and 0", attempts, waits)
+	}
+}
+
+func TestSessionCreatedRetryDoesNotRepeatAckTimeout(t *testing.T) {
+	logger := shared.NewNopLogger()
+	cm := NewTEETConnectionManager(nil, "ws://example.invalid", logger)
+	teek := &TEEK{logger: logger}
+	installAckTestControl(cm, newAckTestWebSocket(t))
+	cm.attestationMutex.Lock()
+	cm.attestationVerified = true
+	cm.attestationMutex.Unlock()
+	attempts := 0
+	waits := 0
+
+	err := teek.notifyTEETNewSessionWithRetryPolicy("ack-timeout-not-retried", 5, time.Millisecond, func(sessionID string) error {
+		attempts++
+		return cm.sendSessionCreatedAndWaitTimeout(sessionID, time.Millisecond, func(conn *shared.WSConnection, generation uint64) error {
+			return cm.sendOnControlConnection(conn, generation, &teeproto.Envelope{
+				SessionId: sessionID,
+				Payload: &teeproto.Envelope_SessionCreated{
+					SessionCreated: &teeproto.SessionCreated{},
+				},
+			})
+		})
+	}, func(time.Duration) {
+		waits++
+	})
+	if err == nil || !strings.Contains(err.Error(), "timeout waiting for SessionCreatedAck") {
+		t.Fatalf("retry error = %v, want ACK timeout", err)
+	}
+	if attempts != 1 || waits != 0 {
+		t.Fatalf("ACK timeout attempts=%d waits=%d, want 1 and 0", attempts, waits)
+	}
 }
 
 func TestSessionCreatedAckDisconnectFailsOriginWaiter(t *testing.T) {
@@ -211,6 +441,248 @@ func TestSessionCreatedAckOriginCannotMigrateToReplacementBeforeDial(t *testing.
 	if published {
 		t.Fatal("stale acknowledged control published a session connection")
 	}
+}
+
+func TestControlPeerErrorTerminatesAcknowledgedSessionBeforePublication(t *testing.T) {
+	teek, cm, session, origin, generation, controlMessages := newAcknowledgedSessionGap(t)
+	session.ConnMutex.RLock()
+	client := session.ClientConn.(*shared.WSConnection)
+	session.ConnMutex.RUnlock()
+
+	peerError, err := proto.Marshal(&teeproto.Envelope{
+		SessionId: session.ID,
+		Payload: &teeproto.Envelope_Error{Error: &teeproto.ErrorData{
+			Message: "TEE_T rejected acknowledged session",
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cm.handleControlMessage(origin, generation, peerError)
+
+	if _, err := teek.sessionManager.GetSession(session.ID); err == nil {
+		t.Fatal("control peer error retained acknowledged session")
+	}
+	if !session.CleanedUp.Load() {
+		t.Fatal("control peer error did not clean acknowledged session")
+	}
+	cm.mu.RLock()
+	owner := cm.acknowledgedSessions[session.ID]
+	cm.mu.RUnlock()
+	if owner != nil {
+		t.Fatal("control peer error retained acknowledged owner token")
+	}
+	if err := client.WriteMessage(websocket.BinaryMessage, []byte("after peer error")); err == nil {
+		t.Fatal("control peer error left exact client open")
+	}
+	assertSessionClosedMessage(t, controlMessages, session.ID, "session_cleanup")
+	assertNoControlMessage(t, controlMessages, "post-peer-error origin")
+}
+
+func TestStaleControlPeerErrorInAcknowledgmentGapPreservesReplacement(t *testing.T) {
+	teek, cm, oldSession, origin, generation, originMessages := newAcknowledgedSessionGap(t)
+	teek.cleanupSessionWithSession(oldSession)
+	assertSessionClosedMessage(t, originMessages, oldSession.ID, "session_cleanup")
+
+	if err := teek.sessionManager.RegisterSession(oldSession.ID); err != nil {
+		t.Fatal(err)
+	}
+	replacement, err := teek.sessionManager.GetSession(oldSession.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacementClient := newAckTestWebSocket(t)
+	if err := teek.sessionManager.ActivateSessionIfCurrent(replacement, replacementClient); err != nil {
+		t.Fatal(err)
+	}
+	teek.sessionManager.SetTEEKSessionState(oldSession.ID, &TEEKSessionState{session: replacement})
+	teek.activeSessions.Store(1)
+	replacementControl, replacementMessages := newAckTestWebSocketWithMessages(t)
+	installAckTestControl(cm, replacementControl)
+
+	peerError, err := proto.Marshal(&teeproto.Envelope{
+		SessionId: oldSession.ID,
+		Payload: &teeproto.Envelope_Error{Error: &teeproto.ErrorData{
+			Message: "stale TEE_T error",
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cm.handleControlMessage(origin, generation, peerError)
+
+	current, err := teek.sessionManager.GetSession(oldSession.ID)
+	if err != nil || current != replacement || replacement.CleanedUp.Load() {
+		t.Fatalf("stale control error changed replacement: current=%p err=%v cleaned=%v", current, err, replacement.CleanedUp.Load())
+	}
+	if err := replacementClient.WriteMessage(websocket.BinaryMessage, []byte("replacement alive")); err != nil {
+		t.Fatalf("stale control error closed replacement client: %v", err)
+	}
+	assertNoControlMessage(t, originMessages, "stale origin")
+	assertNoControlMessage(t, replacementMessages, "replacement control")
+}
+
+func TestDelayedSessionDialCannotPublishAfterAcknowledgedOwnerCleanup(t *testing.T) {
+	tests := []struct {
+		name        string
+		replacement bool
+	}{
+		{name: "cleaned session"},
+		{name: "same ID replacement", replacement: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			teek, cm, session, _, _, controlMessages := newAcknowledgedSessionGap(t)
+			cm.mu.RLock()
+			origin := cm.acknowledgedSessions[session.ID]
+			cm.mu.RUnlock()
+			if origin == nil {
+				t.Fatal("missing acknowledged owner before delayed dial")
+			}
+			candidate := newAckTestWebSocket(t)
+			var replacement *shared.Session
+			cm.dialSessionConnectionFn = func(string) (*shared.WSConnection, error) {
+				teek.cleanupSessionWithSession(session)
+				if test.replacement {
+					if err := teek.sessionManager.RegisterSession(session.ID); err != nil {
+						t.Fatal(err)
+					}
+					var err error
+					replacement, err = teek.sessionManager.GetSession(session.ID)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err := teek.sessionManager.ActivateSessionIfCurrent(replacement, newAckTestWebSocket(t)); err != nil {
+						t.Fatal(err)
+					}
+					teek.sessionManager.SetTEEKSessionState(session.ID, &TEEKSessionState{session: replacement})
+					teek.activeSessions.Store(1)
+				}
+				return candidate, nil
+			}
+
+			err := cm.EstablishSessionConnection(session.ID, origin)
+			if err == nil {
+				t.Fatal("delayed dial published after acknowledged owner cleanup")
+			}
+			if err := candidate.WriteMessage(websocket.BinaryMessage, []byte("closed candidate")); err == nil {
+				t.Fatal("rejected delayed-dial candidate was not closed")
+			}
+			cm.mu.RLock()
+			published := cm.sessionConns[session.ID]
+			retainedOwner := cm.acknowledgedSessions[session.ID]
+			cm.mu.RUnlock()
+			if published != nil || retainedOwner != nil {
+				t.Fatalf("cleanup left publication state: connection=%p owner=%p", published, retainedOwner)
+			}
+			assertSessionClosedMessage(t, controlMessages, session.ID, "session_cleanup")
+
+			if test.replacement {
+				current, getErr := teek.sessionManager.GetSession(session.ID)
+				if getErr != nil || current != replacement || replacement.CleanedUp.Load() {
+					t.Fatalf("delayed old dial changed replacement: current=%p err=%v cleaned=%v", current, getErr, replacement.CleanedUp.Load())
+				}
+			} else if _, getErr := teek.sessionManager.GetSession(session.ID); getErr == nil {
+				t.Fatal("cleaned session remained current after delayed dial rejection")
+			}
+		})
+	}
+}
+
+func TestDelayedSessionDialRejectsRemovedOwnerWhileSessionIsStillCurrent(t *testing.T) {
+	teek, cm, session, _, _, controlMessages := newAcknowledgedSessionGap(t)
+	cm.mu.RLock()
+	origin := cm.acknowledgedSessions[session.ID]
+	cm.mu.RUnlock()
+	if origin == nil {
+		t.Fatal("missing acknowledged owner before delayed dial")
+	}
+	candidate := newAckTestWebSocket(t)
+	cm.dialSessionConnectionFn = func(string) (*shared.WSConnection, error) {
+		// Reproduce the cleanup interval after its CAS and exact-owner removal
+		// but before CloseSessionIfCurrent removes the shared session entry.
+		session.CleanedUp.Store(true)
+		if !cm.releaseAcknowledgedSessionOwner(session.ID, origin) {
+			t.Fatal("cleanup interval did not remove exact acknowledged owner")
+		}
+		return candidate, nil
+	}
+
+	err := cm.EstablishSessionConnection(session.ID, origin)
+	if err == nil {
+		t.Fatal("delayed dial published without its acknowledged owner")
+	}
+	current, getErr := teek.sessionManager.GetSession(session.ID)
+	if getErr != nil || current != session {
+		t.Fatalf("test did not retain exact shared session: current=%p err=%v", current, getErr)
+	}
+	if err := candidate.WriteMessage(websocket.BinaryMessage, []byte("closed candidate")); err == nil {
+		t.Fatal("rejected delayed-dial candidate was not closed")
+	}
+	cm.mu.RLock()
+	published := cm.sessionConns[session.ID]
+	retainedOwner := cm.acknowledgedSessions[session.ID]
+	cm.mu.RUnlock()
+	if published != nil || retainedOwner != nil {
+		t.Fatalf("cleanup interval left publication state: connection=%p owner=%p", published, retainedOwner)
+	}
+	assertNoControlMessage(t, controlMessages, "cleanup interval origin")
+}
+
+func newAcknowledgedSessionGap(t *testing.T) (*TEEK, *TEETConnectionManager, *shared.Session, *shared.WSConnection, uint64, <-chan []byte) {
+	t.Helper()
+	logger := shared.NewNopLogger()
+	manager := NewTEEKSessionManager()
+	manager.SetLogger(logger)
+	client := newAckTestWebSocket(t)
+	sessionID, err := manager.CreateSession(client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err := manager.GetSession(sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.SetTEEKSessionState(sessionID, &TEEKSessionState{session: session})
+	teek := &TEEK{
+		sessionManager: manager, logger: logger,
+		sessionTerminator: shared.NewSessionTerminator(logger),
+		otPrecomputeState: NewOTPrecomputeState(),
+	}
+	teek.activeSessions.Store(1)
+	cm := NewTEETConnectionManager(teek, "ws://example.invalid", logger)
+	teek.connManager = cm
+	origin, messages := newAckTestWebSocketWithMessages(t)
+	_, generation := installAckTestControl(cm, origin)
+	cm.attestationMutex.Lock()
+	cm.attestationVerified = true
+	cm.attestationMutex.Unlock()
+	token, err := cm.sendSessionCreatedAndWaitTokenForSession(sessionID, session, time.Second, func(conn *shared.WSConnection, generation uint64) error {
+		ack, marshalErr := proto.Marshal(&teeproto.Envelope{
+			SessionId: sessionID,
+			Payload: &teeproto.Envelope_SessionCreatedAck{
+				SessionCreatedAck: &teeproto.SessionCreatedAck{SessionId: sessionID},
+			},
+		})
+		if marshalErr != nil {
+			return marshalErr
+		}
+		cm.handleControlMessage(conn, generation, ack)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("acknowledge session: %v", err)
+	}
+	if token.session != session || token.conn != origin || token.generation != generation {
+		t.Fatal("acknowledged owner token did not retain exact session/control identity")
+	}
+	cm.mu.RLock()
+	retained := cm.acknowledgedSessions[sessionID]
+	cm.mu.RUnlock()
+	if retained != token {
+		t.Fatal("acknowledged owner token was not retained through publication gap")
+	}
+	return teek, cm, session, origin, generation, messages
 }
 
 func TestSessionSetupFailureReleasesUndialedOwnerOnExactControl(t *testing.T) {

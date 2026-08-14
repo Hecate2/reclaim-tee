@@ -217,18 +217,10 @@ func (t *TEEK) verifyTEETAttestation(msgBytes []byte, tlsCert []byte) error {
 	if err := proto.Unmarshal(msgBytes, &env); err != nil {
 		return fmt.Errorf("failed to parse response: %v", err)
 	}
-
-	// Check for error message
-	if errMsg, ok := env.Payload.(*teeproto.Envelope_Error); ok {
-		return fmt.Errorf("TEE_T rejected attestation: %s", errMsg.Error.Message)
+	attestation, err := teetAttestationReportFromEnvelope(&env)
+	if err != nil {
+		return err
 	}
-
-	resp, ok := env.Payload.(*teeproto.Envelope_TeetAttestation)
-	if !ok {
-		return fmt.Errorf("unexpected message type: %T", env.Payload)
-	}
-
-	attestation := resp.TeetAttestation.AttestationReport
 
 	// Standalone (local-dev) mode
 	if attestation.Type == "standalone" {
@@ -294,4 +286,32 @@ func (t *TEEK) verifyTEETAttestation(msgBytes []byte, tlsCert []byte) error {
 
 	t.logger.Debug("TEE_T SPKI hash verified")
 	return nil
+}
+
+func teetAttestationReportFromEnvelope(env *teeproto.Envelope) (*teeproto.AttestationReport, error) {
+	if env == nil {
+		return nil, fmt.Errorf("malformed TEE_T attestation response: missing envelope")
+	}
+
+	// Check for error message
+	if errMsg, ok := env.Payload.(*teeproto.Envelope_Error); ok {
+		if errMsg == nil || errMsg.Error == nil {
+			return nil, fmt.Errorf("malformed TEE_T attestation error: missing error data")
+		}
+		return nil, fmt.Errorf("TEE_T rejected attestation: %s", errMsg.Error.Message)
+	}
+
+	resp, ok := env.Payload.(*teeproto.Envelope_TeetAttestation)
+	if !ok {
+		return nil, fmt.Errorf("unexpected message type: %T", env.Payload)
+	}
+
+	if resp == nil || resp.TeetAttestation == nil {
+		return nil, fmt.Errorf("malformed TEE_T attestation response: missing response")
+	}
+	attestation := resp.TeetAttestation.AttestationReport
+	if attestation == nil {
+		return nil, fmt.Errorf("malformed TEE_T attestation response: missing report")
+	}
+	return attestation, nil
 }

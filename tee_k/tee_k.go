@@ -102,6 +102,13 @@ type TEEK struct {
 	// while OT state ownership is still held. Production leaves it nil.
 	beforeReserveOTReadyPublish func()
 
+	// Final-signature dependency hooks are nil in production. Tests replace one
+	// operation at a time to prove that sign, marshal, and client-write failures
+	// leave the one-shot state in progress and terminate the exact owner.
+	finalSignatureMarshal func(*teeproto.KOutputPayload) ([]byte, error)
+	finalSignatureSign    func(*shared.SigningKeyPair, []byte) ([]byte, error)
+	finalSignatureWrite   func(*shared.Session, *teeproto.Envelope) error
+
 	// attestHealth gates the pair off the router (via ControlHealthy) and
 	// self-resets when the SEV attestation path wedges. Nil-safe.
 	attestHealth *shared.AttestationHealth
@@ -327,6 +334,31 @@ func (t *TEEK) terminateSessionWithErrorForIdentity(identity *teekSessionIdentit
 	}
 	time.Sleep(50 * time.Millisecond)
 	t.cleanupSessionWithSession(session)
+}
+
+// handlePeerErrorForIdentity forwards an independently generated peer error to
+// the client, then cleans only the exact session that received it. It does not
+// echo the error back to TEE_T.
+func (t *TEEK) handlePeerErrorForIdentity(identity *teekSessionIdentity, peerErr *teeproto.ErrorData) error {
+	if identity == nil || identity.ensureCurrent() != nil {
+		return fmt.Errorf("peer error belongs to a superseded session")
+	}
+	session := identity.session
+	if peerErr == nil {
+		t.logger.WithSession(session.ID).Error("Malformed terminal error from TEE_T: missing error data")
+		peerErr = &teeproto.ErrorData{Message: "Malformed error from TEE_T: missing error data"}
+	} else {
+		t.logger.WithSession(session.ID).Info("TEE_T reported a terminal session error", zap.String("error", peerErr.GetMessage()))
+	}
+	env := &teeproto.Envelope{
+		SessionId: session.ID, TimestampMs: time.Now().UnixMilli(),
+		Payload: &teeproto.Envelope_Error{Error: peerErr},
+	}
+	if routeErr := t.routeToClientForSession(session, env); routeErr != nil {
+		t.logger.WithSession(session.ID).Warn("Failed to forward TEE_T error to client", zap.Error(routeErr))
+	}
+	t.cleanupSessionWithSession(session)
+	return nil
 }
 
 func (t *TEEK) routeToClientForSession(session *shared.Session, env *teeproto.Envelope) error {

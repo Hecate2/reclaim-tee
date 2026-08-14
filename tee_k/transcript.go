@@ -39,18 +39,6 @@ func (t *TEEK) addToTranscript(sessionID string, data []byte, dataType string) e
 	return nil
 }
 
-// generateComprehensiveSignatureAndSendTranscript creates comprehensive signature and sends all verification data to client
-func (t *TEEK) generateComprehensiveSignatureAndSendTranscript(sessionID string) error {
-	session, err := t.sessionManager.GetSession(sessionID)
-	if err != nil {
-		return fmt.Errorf("session %s not found: %v", sessionID, err)
-	}
-	teekState, _ := t.sessionManager.GetTEEKSessionState(sessionID)
-	return t.generateComprehensiveSignatureForSession(session, teekState, func(env *teeproto.Envelope) error {
-		return t.sessionManager.RouteToClient(sessionID, env)
-	})
-}
-
 func (t *TEEK) generateComprehensiveSignatureForIdentity(identity *teekSessionIdentity) error {
 	if err := identity.ensureCurrent(); err != nil {
 		return err
@@ -62,6 +50,9 @@ func (t *TEEK) generateComprehensiveSignatureForIdentity(identity *teekSessionId
 	return t.generateComprehensiveSignatureForSession(identity.session, teekState, func(env *teeproto.Envelope) error {
 		if err := identity.ensureCurrent(); err != nil {
 			return err
+		}
+		if t.finalSignatureWrite != nil {
+			return t.finalSignatureWrite(identity.session, env)
 		}
 		return t.routeToClientForSession(identity.session, env)
 	})
@@ -158,13 +149,25 @@ func (t *TEEK) generateComprehensiveSignatureForSession(session *shared.Session,
 	}
 
 	// Create protobuf body and sign it directly
-	body, err := proto.Marshal(kPayload)
+	marshalOutput := t.finalSignatureMarshal
+	if marshalOutput == nil {
+		marshalOutput = func(payload *teeproto.KOutputPayload) ([]byte, error) {
+			return proto.Marshal(payload)
+		}
+	}
+	body, err := marshalOutput(kPayload)
 	if err != nil {
 		return fmt.Errorf("failed to marshal KOutputPayload: %v", err)
 	}
 
 	// Sign the exact protobuf body bytes
-	comprehensiveSignature, err := keyPair.SignData(body)
+	signOutput := t.finalSignatureSign
+	if signOutput == nil {
+		signOutput = func(pair *shared.SigningKeyPair, data []byte) ([]byte, error) {
+			return pair.SignData(data)
+		}
+	}
+	comprehensiveSignature, err := signOutput(keyPair, body)
 	if err != nil {
 		return fmt.Errorf("failed to generate comprehensive signature: %v", err)
 	}

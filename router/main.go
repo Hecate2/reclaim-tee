@@ -21,6 +21,7 @@ import (
 	"github.com/reclaimprotocol/reclaim-tee/router/handlers"
 	"github.com/reclaimprotocol/reclaim-tee/router/signer"
 	"github.com/reclaimprotocol/reclaim-tee/router/store"
+	"github.com/reclaimprotocol/reclaim-tee/shared"
 
 	"go.uber.org/zap"
 )
@@ -91,23 +92,24 @@ func main() {
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
-	go func() {
-		logger.Info("router listening", zap.String("port", cfg.Port))
-		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			logger.Fatal("server failed", zap.Error(err))
-		}
-	}()
+	logger.Info("router listening", zap.String("port", cfg.Port))
+	runningServer, err := shared.StartHTTPServer(httpSrv, false)
+	if err != nil {
+		logger.Fatal("server bind failed", zap.Error(err))
+	}
 	go srv.RunStaleRowGC(ctx)
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
-	<-stop
+	defer signal.Stop(stop)
+	serveErr, shutdownErr := shared.WaitAndShutdownHTTPServer(runningServer, stop, 10*time.Second)
 
 	logger.Info("shutting down")
-	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancelShutdown()
-	if err := httpSrv.Shutdown(shutdownCtx); err != nil {
-		logger.Error("shutdown failed", zap.Error(err))
+	if shutdownErr != nil {
+		logger.Error("shutdown failed", zap.Error(shutdownErr))
+	}
+	if serveErr != nil {
+		logger.Fatal("server failed", zap.Error(serveErr))
 	}
 }
 

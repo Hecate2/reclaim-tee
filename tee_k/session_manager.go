@@ -82,11 +82,14 @@ type teekSessionIdentity struct {
 }
 
 func (i *teekSessionIdentity) ensureCurrent() error {
-	if i == nil || i.session == nil || i.sessionConn == nil {
+	if i == nil || i.session == nil {
 		return fmt.Errorf("TEE_K session identity is incomplete")
 	}
 	if i.validate != nil {
 		return i.validate()
+	}
+	if i.sessionConn == nil {
+		return fmt.Errorf("TEE_K session connection identity is incomplete")
 	}
 	return nil
 }

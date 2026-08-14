@@ -340,6 +340,30 @@ func (t *TEET) terminateSessionWithErrorForIdentity(identity *teetSessionIdentit
 	t.cleanupSessionWithSession(session)
 }
 
+// handlePeerErrorForIdentity forwards an independently generated TEE_K error
+// to this session's client and cleans the exact owner without echoing it back.
+func (t *TEET) handlePeerErrorForIdentity(identity *teetSessionIdentity, peerErr *teeproto.ErrorData) error {
+	if identity == nil || identity.ensureCurrent() != nil {
+		return fmt.Errorf("peer error belongs to a superseded session")
+	}
+	session := identity.session
+	if peerErr == nil {
+		t.logger.WithSession(session.ID).Error("Malformed terminal error from TEE_K: missing error data")
+		peerErr = &teeproto.ErrorData{Message: "Malformed error from TEE_K: missing error data"}
+	} else {
+		t.logger.WithSession(session.ID).Info("TEE_K reported a terminal session error", zap.String("error", peerErr.GetMessage()))
+	}
+	env := &teeproto.Envelope{
+		SessionId: session.ID, TimestampMs: time.Now().UnixMilli(),
+		Payload: &teeproto.Envelope_Error{Error: peerErr},
+	}
+	if routeErr := t.routeToClientForSession(session, env); routeErr != nil {
+		t.logger.WithSession(session.ID).Warn("Failed to forward TEE_K error to client", zap.Error(routeErr))
+	}
+	t.cleanupSessionWithSession(session)
+	return nil
+}
+
 func (t *TEET) routeToClientForSession(session *shared.Session, env *teeproto.Envelope) error {
 	if session == nil {
 		return fmt.Errorf("session is nil")

@@ -155,9 +155,9 @@ func (cm *TEEKConnectionManager) HandleControlConnection(conn *websocket.Conn) e
 		return fmt.Errorf("failed to parse attestation message: %v", err)
 	}
 
-	req, ok := env.Payload.(*teeproto.Envelope_TeekAttestation)
-	if !ok {
-		return fmt.Errorf("expected attestation as first message, got %T", env.Payload)
+	attestationRequest, err := teekAttestationRequestFromEnvelope(&env)
+	if err != nil {
+		return err
 	}
 
 	// Pull TEE_K's client cert off the underlying TLS connection so the
@@ -172,7 +172,7 @@ func (cm *TEEKConnectionManager) HandleControlConnection(conn *websocket.Conn) e
 	}
 
 	// Verify TEE_K attestation
-	if err := cm.teet.verifyTEEKAttestation(req.TeekAttestation, peerCert); err != nil {
+	if err := cm.teet.verifyTEEKAttestation(attestationRequest, peerCert); err != nil {
 		return fmt.Errorf("attestation verification failed: %v", err)
 	}
 
@@ -239,6 +239,29 @@ func (cm *TEEKConnectionManager) HandleControlConnection(conn *websocket.Conn) e
 	cm.tearDownControlConnection(wsConn, controlGeneration)
 
 	return nil
+}
+
+func teekAttestationRequestFromEnvelope(env *teeproto.Envelope) (*teeproto.TEEKAttestationRequest, error) {
+	if env == nil {
+		return nil, fmt.Errorf("malformed TEE_K attestation request: missing envelope")
+	}
+	req, ok := env.Payload.(*teeproto.Envelope_TeekAttestation)
+	if !ok {
+		if peerErr, isError := env.Payload.(*teeproto.Envelope_Error); isError {
+			if peerErr == nil || peerErr.Error == nil {
+				return nil, fmt.Errorf("malformed TEE_K attestation error: missing error data")
+			}
+			return nil, fmt.Errorf("TEE_K rejected attestation: %s", peerErr.Error.GetMessage())
+		}
+		return nil, fmt.Errorf("expected attestation as first message, got %T", env.Payload)
+	}
+	if req == nil || req.TeekAttestation == nil {
+		return nil, fmt.Errorf("malformed TEE_K attestation request: missing request")
+	}
+	if req.TeekAttestation.AttestationReport == nil {
+		return nil, fmt.Errorf("malformed TEE_K attestation request: missing report")
+	}
+	return req.TeekAttestation, nil
 }
 
 func (cm *TEEKConnectionManager) activateControlConnection(conn *shared.WSConnection) (uint64, *shared.WSConnection, []*SessionTEEKConnection, []*shared.Session) {
@@ -524,11 +547,23 @@ func (cm *TEEKConnectionManager) handleControlMessages(conn *shared.WSConnection
 			}
 
 		case *teeproto.Envelope_Error:
-			// Error from TEE_K - cleanup the affected session
-			cm.logger.WithSession(sessionID).Error("Received error from TEE_K (control)",
-				zap.String("error", p.Error.GetMessage()))
-			if sessionID != "" && sessionID != "control" {
-				cm.closeOwnedSession(conn, generation, sessionID)
+			if sessionID == "" || sessionID == "control" {
+				cm.logger.Error("Malformed session error on TEE_K control connection")
+				return
+			}
+			var peerErr *teeproto.ErrorData
+			if p != nil {
+				peerErr = p.Error
+			}
+			identity, err := cm.controlSessionIdentity(conn, generation, sessionID)
+			if err != nil {
+				cm.logger.WithSession(sessionID).Debug("Ignored stale TEE_K control error", zap.Error(err))
+				continue
+			}
+			if err := cm.teet.handlePeerErrorForIdentity(identity, peerErr); err != nil {
+				cm.logger.WithSession(sessionID).Debug("Ignored stale TEE_K control error", zap.Error(err))
+			} else {
+				cm.logger.WithSession(sessionID).Info("Handled TEE_K control error and terminated session")
 			}
 
 		default:
@@ -598,6 +633,39 @@ func (cm *TEEKConnectionManager) closeOwnedSession(conn *shared.WSConnection, ge
 		sessionConn.mu.Unlock()
 	}
 	cm.teet.cleanupSessionWithSession(ownedSession)
+}
+
+func (cm *TEEKConnectionManager) controlSessionIdentity(conn *shared.WSConnection, generation uint64, sessionID string) (*teetSessionIdentity, error) {
+	cm.controlStateMu.RLock()
+	cm.mu.RLock()
+	owner, exists := cm.sessionOwners[sessionID]
+	controlCurrent := cm.controlConn == conn && cm.controlGeneration == generation
+	cm.mu.RUnlock()
+	cm.controlStateMu.RUnlock()
+	if !controlCurrent || !exists || owner.controlGeneration != generation || owner.session == nil {
+		return nil, fmt.Errorf("session error owner was superseded")
+	}
+	session := owner.session
+	validate := func() error {
+		cm.controlStateMu.RLock()
+		defer cm.controlStateMu.RUnlock()
+		cm.mu.RLock()
+		owner, exists := cm.sessionOwners[sessionID]
+		controlCurrent := cm.controlConn == conn && cm.controlGeneration == generation
+		cm.mu.RUnlock()
+		if !controlCurrent || !exists || owner.controlGeneration != generation || owner.session != session {
+			return fmt.Errorf("session error owner was superseded")
+		}
+		if !cm.teet.sessionManager.isCurrentControlSession(session, generation) {
+			return fmt.Errorf("session error identity was superseded")
+		}
+		return nil
+	}
+	identity := &teetSessionIdentity{session: session, controlGeneration: generation, validate: validate}
+	if err := identity.ensureCurrent(); err != nil {
+		return nil, err
+	}
+	return identity, nil
 }
 
 // HandleSessionConnection handles a new per-session connection from TEE_K
@@ -879,11 +947,11 @@ func (cm *TEEKConnectionManager) handleSessionMessages(sessionID string, session
 			}
 
 		case *teeproto.Envelope_Error:
-			// TEE_K encountered an error - terminate immediately
-			cm.logger.WithSession(sessionID).Error("Received error from TEE_K - terminating session")
-			if identity.ensureCurrent() == nil {
-				cm.teet.cleanupSessionWithSession(identity.session)
+			var peerErr *teeproto.ErrorData
+			if p != nil {
+				peerErr = p.Error
 			}
+			_ = cm.teet.handlePeerErrorForIdentity(identity, peerErr)
 			return
 
 		default:

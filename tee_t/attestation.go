@@ -208,7 +208,13 @@ func (t *TEET) generateAttestationForTEEK() (*teeproto.AttestationReport, error)
 // the TLS connection underlying this control WebSocket). Pass nil in
 // standalone mode; the function will branch into the standalone path.
 func (t *TEET) verifyTEEKAttestation(req *teeproto.TEEKAttestationRequest, peerCert []byte) error {
+	if req == nil {
+		return fmt.Errorf("malformed TEE_K attestation request: missing request")
+	}
 	attestation := req.AttestationReport
+	if attestation == nil {
+		return fmt.Errorf("malformed TEE_K attestation request: missing report")
+	}
 
 	// Standalone (local-dev) mode
 	if attestation.Type == "standalone" {
@@ -217,6 +223,9 @@ func (t *TEET) verifyTEEKAttestation(req *teeproto.TEEKAttestationRequest, peerC
 			return nil
 		}
 		return fmt.Errorf("mode mismatch: received standalone but in router mode")
+	}
+	if attestation.Type != "sev-snp" && attestation.Type != "gcp" {
+		return fmt.Errorf("unsupported attestation type: %s", attestation.Type)
 	}
 
 	// Router mode

@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -28,6 +29,17 @@ const SessionReadTimeout = 50 * time.Second
 // SessionCreatedAckTimeout is how long to wait for SessionCreatedAck from TEE_T
 const SessionCreatedAckTimeout = 5 * time.Second
 
+// errSessionCreatedControlUnavailable is returned only when SessionCreated was
+// definitely not written because there was no current attested control at the
+// pre-write checks. Write failures and ACK timeouts are ambiguous and must
+// never be retried under the same client session.
+var errSessionCreatedControlUnavailable = errors.New("SessionCreated control connection unavailable before send")
+
+// errControlUnavailableBeforeWrite is internal to the generic control-send
+// primitive. SessionCreated translates it to its retry sentinel; unrelated
+// control messages must not inherit SessionCreated retry classification.
+var errControlUnavailableBeforeWrite = errors.New("control connection unavailable before write")
+
 // TEETConnectionManager manages all connections to TEE_T
 // - One persistent control connection for attestation, OT precomputation, and session lifecycle
 // - One per-session connection for each active session's data flow
@@ -48,9 +60,12 @@ type TEETConnectionManager struct {
 	dialSessionConnectionFn func(string) (*shared.WSConnection, error)
 
 	// Pending SessionCreatedAck waiters, bound to the control generation that
-	// carried SessionCreated.
-	pendingAcks   map[string]*sessionCreatedAckWaiter
-	pendingAcksMu sync.Mutex
+	// carried SessionCreated. acknowledgedSessions is protected by cm.mu and
+	// retains the exact session/control owner from ACK until publication or
+	// cleanup, closing the ACK-to-session-socket ownership gap.
+	pendingAcks          map[string]*sessionCreatedAckWaiter
+	pendingAcksMu        sync.Mutex
+	acknowledgedSessions map[string]*controlConnectionToken
 
 	// References
 	teek   *TEEK
@@ -64,6 +79,7 @@ type TEETConnectionManager struct {
 type sessionCreatedAckWaiter struct {
 	controlConn       *shared.WSConnection
 	controlGeneration uint64
+	owner             *controlConnectionToken
 	done              chan struct{}
 	err               error
 }
@@ -71,6 +87,7 @@ type sessionCreatedAckWaiter struct {
 type controlConnectionToken struct {
 	conn       *shared.WSConnection
 	generation uint64
+	session    *shared.Session
 }
 
 // SessionTEETConnection represents a per-session connection to TEE_T
@@ -79,6 +96,7 @@ type SessionTEETConnection struct {
 	session           *shared.Session
 	controlConn       *shared.WSConnection
 	controlGeneration uint64
+	admissionOwner    *controlConnectionToken
 	conn              *shared.WSConnection
 	established       time.Time
 	mu                sync.Mutex // Protects writes to this connection
@@ -101,12 +119,13 @@ func NewTEETConnectionManager(teek *TEEK, baseURL string, logger *shared.Logger)
 	sessionURL := deriveEndpointURL(baseURL, "/ws/session")
 
 	return &TEETConnectionManager{
-		controlURL:   controlURL,
-		sessionURL:   sessionURL,
-		sessionConns: make(map[string]*SessionTEETConnection),
-		pendingAcks:  make(map[string]*sessionCreatedAckWaiter),
-		teek:         teek,
-		logger:       logger,
+		controlURL:           controlURL,
+		sessionURL:           sessionURL,
+		sessionConns:         make(map[string]*SessionTEETConnection),
+		pendingAcks:          make(map[string]*sessionCreatedAckWaiter),
+		acknowledgedSessions: make(map[string]*controlConnectionToken),
+		teek:                 teek,
+		logger:               logger,
 	}
 }
 
@@ -302,6 +321,15 @@ func (cm *TEETConnectionManager) tearDownControl(conn *shared.WSConnection, gene
 		orphans = append(orphans, c)
 		orphanSessions = append(orphanSessions, c.session)
 		delete(cm.sessionConns, sessionID)
+	}
+	for sessionID, owner := range cm.acknowledgedSessions {
+		if owner == nil || owner.conn != conn || owner.generation != generation {
+			continue
+		}
+		if owner.session != nil {
+			orphanSessions = append(orphanSessions, owner.session)
+		}
+		delete(cm.acknowledgedSessions, sessionID)
 	}
 	cm.mu.Unlock()
 
@@ -547,21 +575,32 @@ func (cm *TEETConnectionManager) handleControlMessage(conn *shared.WSConnection,
 	case *teeproto.Envelope_SessionCreatedAck:
 		// TEE_T acknowledges session creation - signal waiting goroutine
 		sessionID := p.SessionCreatedAck.GetSessionId()
+		cm.mu.Lock()
 		cm.pendingAcksMu.Lock()
 		if waiter, ok := cm.pendingAcks[sessionID]; ok && waiter.controlConn == conn && waiter.controlGeneration == generation {
+			cm.acknowledgedSessions[sessionID] = waiter.owner
 			close(waiter.done)
 			delete(cm.pendingAcks, sessionID)
 		}
 		cm.pendingAcksMu.Unlock()
+		cm.mu.Unlock()
 		cm.logger.WithSession(sessionID).Debug("Received SessionCreatedAck")
 
 	case *teeproto.Envelope_Error:
-		// Error from TEE_T - cleanup the affected session
 		sessionID := env.GetSessionId()
-		cm.logger.WithSession(sessionID).Error("Received error from TEE_T (control)",
-			zap.String("error", p.Error.GetMessage()))
-		if sessionID != "" && sessionID != "control" {
-			cm.cleanupSessionOwnedByControl(conn, generation, sessionID)
+		if sessionID == "" || sessionID == "control" {
+			cm.logger.Error("Malformed session error on TEE_T control connection")
+			cm.closeControlAfterProtocolError(conn)
+			return
+		}
+		var peerErr *teeproto.ErrorData
+		if p != nil {
+			peerErr = p.Error
+		}
+		if err := cm.handleControlPeerError(conn, generation, sessionID, peerErr); err != nil {
+			cm.logger.WithSession(sessionID).Debug("Ignored stale or completed TEE_T control error", zap.Error(err))
+		} else {
+			cm.logger.WithSession(sessionID).Info("Handled TEE_T control error and terminated session")
 		}
 
 	default:
@@ -578,6 +617,53 @@ func (cm *TEETConnectionManager) cleanupSessionOwnedByControl(conn *shared.WSCon
 		return
 	}
 	cm.teek.cleanupSessionWithSession(sessionConn.session)
+}
+
+func (cm *TEETConnectionManager) handleControlPeerError(conn *shared.WSConnection, generation uint64, sessionID string, peerErr *teeproto.ErrorData) error {
+	cm.mu.RLock()
+	sessionConn := cm.sessionConns[sessionID]
+	acknowledged := cm.acknowledgedSessions[sessionID]
+	controlCurrent := cm.controlConn == conn && cm.controlGeneration == generation
+	cm.mu.RUnlock()
+	if !controlCurrent {
+		return fmt.Errorf("session error owner was superseded")
+	}
+	if sessionConn != nil && sessionConn.session != nil && sessionConn.controlConn == conn && sessionConn.controlGeneration == generation {
+		identity := &teekSessionIdentity{session: sessionConn.session, sessionConn: sessionConn, validate: func() error {
+			return cm.validateSessionConnection(sessionConn)
+		}}
+		return cm.teek.handlePeerErrorForIdentity(identity, peerErr)
+	}
+	if acknowledged == nil || acknowledged.session == nil || acknowledged.conn != conn || acknowledged.generation != generation {
+		return fmt.Errorf("session error owner was superseded")
+	}
+	identity := &teekSessionIdentity{session: acknowledged.session, validate: func() error {
+		return cm.validateAcknowledgedOrPublishedSession(sessionID, acknowledged)
+	}}
+	return cm.teek.handlePeerErrorForIdentity(identity, peerErr)
+}
+
+func (cm *TEETConnectionManager) validateAcknowledgedOrPublishedSession(sessionID string, owner *controlConnectionToken) error {
+	if owner == nil || owner.session == nil || owner.conn == nil {
+		return fmt.Errorf("acknowledged session identity is incomplete")
+	}
+	cm.mu.RLock()
+	controlCurrent := cm.controlConn == owner.conn && cm.controlGeneration == owner.generation
+	acknowledgedCurrent := cm.acknowledgedSessions[sessionID] == owner
+	published := cm.sessionConns[sessionID]
+	publishedCurrent := published != nil && published.session == owner.session && published.controlConn == owner.conn && published.controlGeneration == owner.generation
+	cm.attestationMutex.RLock()
+	verified := cm.attestationVerified
+	cm.attestationMutex.RUnlock()
+	cm.mu.RUnlock()
+	if !controlCurrent || !verified || (!acknowledgedCurrent && !publishedCurrent) {
+		return fmt.Errorf("acknowledged session owner was superseded")
+	}
+	current, err := cm.teek.sessionManager.GetSession(sessionID)
+	if err != nil || current != owner.session {
+		return fmt.Errorf("acknowledged session identity was superseded")
+	}
+	return nil
 }
 
 func (cm *TEETConnectionManager) closeControlAfterProtocolError(conn *shared.WSConnection) {
@@ -614,22 +700,38 @@ func (cm *TEETConnectionManager) sendSessionCreatedAndWait(sessionID string, sen
 	return cm.sendSessionCreatedAndWaitToken(sessionID, SessionCreatedAckTimeout, send)
 }
 
+func (cm *TEETConnectionManager) sendSessionCreatedAndWaitForSession(session *shared.Session, send func(*shared.WSConnection, uint64) error) (*controlConnectionToken, error) {
+	if session == nil {
+		return nil, fmt.Errorf("failed to send SessionCreated: session is nil")
+	}
+	return cm.sendSessionCreatedAndWaitTokenForSession(session.ID, session, SessionCreatedAckTimeout, send)
+}
+
 func (cm *TEETConnectionManager) sendSessionCreatedAndWaitTimeout(sessionID string, timeout time.Duration, send func(*shared.WSConnection, uint64) error) error {
 	_, err := cm.sendSessionCreatedAndWaitToken(sessionID, timeout, send)
 	return err
 }
 
 func (cm *TEETConnectionManager) sendSessionCreatedAndWaitToken(sessionID string, timeout time.Duration, send func(*shared.WSConnection, uint64) error) (*controlConnectionToken, error) {
+	return cm.sendSessionCreatedAndWaitTokenForSession(sessionID, nil, timeout, send)
+}
+
+func (cm *TEETConnectionManager) sendSessionCreatedAndWaitTokenForSession(sessionID string, session *shared.Session, timeout time.Duration, send func(*shared.WSConnection, uint64) error) (*controlConnectionToken, error) {
+	if session != nil && session.ID != sessionID {
+		return nil, fmt.Errorf("failed to send SessionCreated: session ID mismatch")
+	}
 	cm.mu.Lock()
 	conn := cm.controlConn
 	generation := cm.controlGeneration
 	if conn == nil {
 		cm.mu.Unlock()
-		return nil, fmt.Errorf("failed to send SessionCreated: control connection not available")
+		return nil, fmt.Errorf("%w: failed to send SessionCreated", errSessionCreatedControlUnavailable)
 	}
+	owner := &controlConnectionToken{conn: conn, generation: generation, session: session}
 	waiter := &sessionCreatedAckWaiter{
 		controlConn:       conn,
 		controlGeneration: generation,
+		owner:             owner,
 		done:              make(chan struct{}),
 	}
 	cm.pendingAcksMu.Lock()
@@ -637,6 +739,11 @@ func (cm *TEETConnectionManager) sendSessionCreatedAndWaitToken(sessionID string
 		cm.pendingAcksMu.Unlock()
 		cm.mu.Unlock()
 		return nil, fmt.Errorf("failed to send SessionCreated: SessionCreatedAck waiter already registered")
+	}
+	if _, exists := cm.acknowledgedSessions[sessionID]; exists {
+		cm.pendingAcksMu.Unlock()
+		cm.mu.Unlock()
+		return nil, fmt.Errorf("failed to send SessionCreated: acknowledged session owner already registered")
 	}
 	cm.pendingAcks[sessionID] = waiter
 	cm.pendingAcksMu.Unlock()
@@ -653,6 +760,13 @@ func (cm *TEETConnectionManager) sendSessionCreatedAndWaitToken(sessionID string
 	}()
 
 	if err := send(conn, generation); err != nil {
+		if errors.Is(err, errControlUnavailableBeforeWrite) {
+			return nil, fmt.Errorf("%w: %v", errSessionCreatedControlUnavailable, err)
+		}
+		// A write error may mean that any prefix or the complete envelope was
+		// delivered. Close only the captured origin so its eventual teardown
+		// resolves that ambiguity; never close a concurrently installed control.
+		_ = conn.Close()
 		return nil, fmt.Errorf("failed to send SessionCreated: %w", err)
 	}
 
@@ -661,7 +775,7 @@ func (cm *TEETConnectionManager) sendSessionCreatedAndWaitToken(sessionID string
 		if waiter.err != nil {
 			return nil, waiter.err
 		}
-		return &controlConnectionToken{conn: conn, generation: generation}, nil
+		return owner, nil
 	case <-time.After(timeout):
 		// Treat ack timeout as evidence the control connection is dead from
 		// TEE_T's side (e.g., TEE_T tore it down but our writes still buffer).
@@ -684,6 +798,10 @@ func (cm *TEETConnectionManager) EstablishSessionConnection(sessionID string, or
 		if published || cm.hasSessionConnection(sessionID) {
 			return
 		}
+		claimed := cm.releaseAcknowledgedSessionOwner(sessionID, origin)
+		if origin.session != nil && !claimed {
+			return
+		}
 		// SessionCreated was already acknowledged, so TEE_T owns an undialed
 		// session. Release it on the exact acknowledging control. A replaced or
 		// unusable origin is intentionally ignored; never migrate cleanup.
@@ -692,9 +810,18 @@ func (cm *TEETConnectionManager) EstablishSessionConnection(sessionID string, or
 		}
 	}()
 
-	session, err := cm.teek.sessionManager.GetSession(sessionID)
-	if err != nil {
-		return fmt.Errorf("cannot establish session connection: %w", err)
+	session := origin.session
+	if session == nil {
+		var err error
+		session, err = cm.teek.sessionManager.GetSession(sessionID)
+		if err != nil {
+			return fmt.Errorf("cannot establish session connection: %w", err)
+		}
+	} else {
+		current, err := cm.teek.sessionManager.GetSession(sessionID)
+		if err != nil || current != session {
+			return fmt.Errorf("cannot establish session connection: acknowledged session identity changed")
+		}
 	}
 
 	// Require the exact control generation that acknowledged SessionCreated;
@@ -729,6 +856,7 @@ func (cm *TEETConnectionManager) EstablishSessionConnection(sessionID string, or
 		session:           session,
 		controlConn:       origin.conn,
 		controlGeneration: origin.generation,
+		admissionOwner:    origin,
 		conn:              wsConn,
 		established:       time.Now(),
 	}
@@ -819,6 +947,9 @@ func (cm *TEETConnectionManager) publishSessionConnection(candidate *SessionTEET
 	}
 	cm.mu.Lock()
 	defer cm.mu.Unlock()
+	if candidate.session.CleanedUp.Load() {
+		return fmt.Errorf("session was cleaned up during session dial")
+	}
 	if cm.controlConn != candidate.controlConn || cm.controlGeneration != candidate.controlGeneration {
 		return fmt.Errorf("control connection changed during session dial")
 	}
@@ -838,8 +969,32 @@ func (cm *TEETConnectionManager) publishSessionConnection(candidate *SessionTEET
 	if err != nil || currentSession != candidate.session {
 		return fmt.Errorf("session identity changed during session dial")
 	}
+	acknowledged, acknowledgedExists := cm.acknowledgedSessions[candidate.sessionID]
+	if candidate.admissionOwner != nil {
+		if !acknowledgedExists || acknowledged != candidate.admissionOwner {
+			return fmt.Errorf("acknowledged session owner changed during session dial")
+		}
+	} else if acknowledgedExists {
+		return fmt.Errorf("session connection is missing its acknowledged owner")
+	}
+	if acknowledgedExists {
+		delete(cm.acknowledgedSessions, candidate.sessionID)
+	}
 	cm.sessionConns[candidate.sessionID] = candidate
 	return nil
+}
+
+func (cm *TEETConnectionManager) releaseAcknowledgedSessionOwner(sessionID string, owner *controlConnectionToken) bool {
+	if owner == nil {
+		return false
+	}
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+	if cm.acknowledgedSessions[sessionID] != owner {
+		return false
+	}
+	delete(cm.acknowledgedSessions, sessionID)
+	return true
 }
 
 // handleSessionMessages handles incoming messages on a per-session connection
@@ -972,7 +1127,7 @@ func (cm *TEETConnectionManager) SendOnControl(env *teeproto.Envelope) error {
 // a replacement control connection.
 func (cm *TEETConnectionManager) sendOnControlConnection(conn *shared.WSConnection, generation uint64, env *teeproto.Envelope) error {
 	if !cm.isCurrentControlConnection(conn, generation) {
-		return fmt.Errorf("control connection changed before send")
+		return fmt.Errorf("%w: control connection changed before send", errControlUnavailableBeforeWrite)
 	}
 
 	// Check attestation
@@ -981,7 +1136,7 @@ func (cm *TEETConnectionManager) sendOnControlConnection(conn *shared.WSConnecti
 	cm.attestationMutex.RUnlock()
 
 	if !verified {
-		return fmt.Errorf("cannot send on control: attestation not verified")
+		return fmt.Errorf("%w: control attestation not verified", errControlUnavailableBeforeWrite)
 	}
 
 	data, err := proto.Marshal(env)
@@ -1059,29 +1214,38 @@ func (cm *TEETConnectionManager) CloseSessionConnection(session *shared.Session,
 	} else {
 		sessionConn = nil
 	}
+	acknowledged := cm.acknowledgedSessions[sessionID]
+	if acknowledged != nil && acknowledged.session == session {
+		delete(cm.acknowledgedSessions, sessionID)
+	} else {
+		acknowledged = nil
+	}
 	cm.mu.Unlock()
 
-	if sessionConn == nil {
+	if sessionConn == nil && acknowledged == nil {
 		return
 	}
 
-	cm.logger.WithSession(sessionID).Debug("Closing per-session connection", zap.String("reason", reason))
+	if sessionConn != nil {
+		cm.logger.WithSession(sessionID).Debug("Closing per-session connection", zap.String("reason", reason))
 
-	// Mark as closed and close connection (thread-safe)
-	sessionConn.mu.Lock()
-	alreadyClosed := sessionConn.closed
-	sessionConn.closed = true
-	sessionConn.mu.Unlock()
+		// Mark as closed and close connection (thread-safe)
+		sessionConn.mu.Lock()
+		alreadyClosed := sessionConn.closed
+		sessionConn.closed = true
+		sessionConn.mu.Unlock()
 
-	if !alreadyClosed {
-		// Close the connection first to stop any pending reads
-		sessionConn.conn.Close()
+		if !alreadyClosed {
+			// Close the connection first to stop any pending reads
+			sessionConn.conn.Close()
+		}
+		acknowledged = &controlConnectionToken{
+			conn: sessionConn.controlConn, generation: sessionConn.controlGeneration, session: session,
+		}
 	}
 
 	// Send SessionClosed notification on the owning control (best effort).
-	if err := cm.sendSessionClosedOnControl(sessionID, reason, &controlConnectionToken{
-		conn: sessionConn.controlConn, generation: sessionConn.controlGeneration,
-	}); err != nil {
+	if err := cm.sendSessionClosedOnControl(sessionID, reason, acknowledged); err != nil {
 		cm.logger.WithSession(sessionID).Warn("Failed to send SessionClosed notification", zap.Error(err))
 	}
 }

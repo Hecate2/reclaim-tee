@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -48,10 +47,12 @@ func main() {
 	}
 
 	logger.Info("Starting TEE_T in standalone mode")
-	startStandaloneMode(config, logger, boot)
+	if err := startStandaloneMode(config, logger, boot); err != nil {
+		shared.FatalBootReset(logger, err)
+	}
 }
 
-func startStandaloneMode(config *TEETConfig, logger *shared.Logger, boot *shared.BootGuard) {
+func startStandaloneMode(config *TEETConfig, logger *shared.Logger, boot *shared.BootGuard) error {
 	teet := NewTEETWithLogger(config.Port, logger)
 	teet.sessionManager.StartCleanupRoutine()
 
@@ -73,41 +74,31 @@ func startStandaloneMode(config *TEETConfig, logger *shared.Logger, boot *shared
 		WriteTimeout: 30 * time.Second,
 	}
 
-	// Start server
 	logger.Info("Starting standalone server", zap.Int("port", config.Port))
-	go func() {
-		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			logger.Critical("Server failed", zap.Error(err))
-			// Signal shutdown instead of crashing
-			sigChan := make(chan os.Signal, 1)
-			signal.Notify(sigChan, syscall.SIGTERM)
-			select {
-			case sigChan <- syscall.SIGTERM:
-				// Signal sent
-			default:
-				// Channel full, ignore
-			}
-		}
-	}()
+	runningServer, err := shared.StartHTTPServer(server, false)
+	if err != nil {
+		return err
+	}
 
 	// Wait for interrupt signal
 	boot.MarkReady()
 
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-	<-sigChan
+	defer signal.Stop(sigChan)
+	serveErr, shutdownErr := shared.WaitAndShutdownHTTPServer(runningServer, sigChan, 10*time.Second)
 
 	logger.Info("Shutting down...")
 
-	// Graceful shutdown
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer shutdownCancel()
-
-	if err := server.Shutdown(shutdownCtx); err != nil {
-		logger.Error("Shutdown error", zap.Error(err))
+	if shutdownErr != nil {
+		logger.Error("Shutdown error", zap.Error(shutdownErr))
+	}
+	if serveErr != nil {
+		return fmt.Errorf("HTTP server failed: %w", serveErr)
 	}
 
 	logger.Info("Shutdown complete")
+	return nil
 }
 
 func setupRoutes(teet *TEET) *http.ServeMux {

@@ -199,7 +199,7 @@ func startRouterMode(parent context.Context, config *TEETConfig, logger *shared.
 		ReadTimeout:  30 * time.Second,
 		WriteTimeout: 30 * time.Second,
 	}
-	serveErrCh := make(chan error, 1)
+	serveTLS := false
 	if teet.ratls != nil {
 		// Production: RA-TLS-protected HTTPS, RequestClientCert so peers
 		// can present an attested client cert (gated on the peer routes
@@ -228,29 +228,29 @@ func startRouterMode(parent context.Context, config *TEETConfig, logger *shared.
 		handler = enforcePeerMTLS(mux)
 		server.Handler = handler
 		logger.Info("Starting router-mode HTTPS server", zap.Int("port", config.Port))
-		go func() { serveErrCh <- server.ListenAndServeTLS("", "") }()
+		serveTLS = true
 	} else {
 		server.Handler = handler
 		logger.Info("Starting router-mode HTTP server (local dev, no RA-TLS)", zap.Int("port", config.Port))
-		go func() { serveErrCh <- server.ListenAndServe() }()
 	}
-	go func() {
-		if err := <-serveErrCh; err != nil && !errors.Is(err, http.ErrServerClosed) {
-			logger.Critical("HTTP server failed", zap.Error(err))
-		}
-	}()
+	runningServer, err := shared.StartHTTPServer(server, serveTLS)
+	if err != nil {
+		return err
+	}
 
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(sigChan)
 	logger.Info("TEE_T router-mode bootstrap complete; awaiting peer")
 	boot.MarkReady()
-	<-sigChan
+	serveErr, shutdownErr := shared.WaitAndShutdownHTTPServer(runningServer, sigChan, 10*time.Second)
 	logger.Info("shutting down router-mode TEE_T")
 
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer shutdownCancel()
-	if err := server.Shutdown(shutdownCtx); err != nil {
-		logger.Error("HTTP server shutdown error", zap.Error(err))
+	if shutdownErr != nil {
+		logger.Error("HTTP server shutdown error", zap.Error(shutdownErr))
+	}
+	if serveErr != nil {
+		return fmt.Errorf("HTTP server failed: %w", serveErr)
 	}
 	return nil
 }

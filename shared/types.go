@@ -265,6 +265,17 @@ type OPRFResult struct {
 	HashOutput [32]byte // 32-byte SHA256(CMAC) output
 }
 
+// FinalSignatureState is the one-way lifecycle of the final TEE_K output.
+// A failed in-progress attempt is intentionally not retryable: the owning
+// session must terminate because the client-write outcome can be ambiguous.
+type FinalSignatureState uint32
+
+const (
+	FinalSignaturePending FinalSignatureState = iota
+	FinalSignatureInProgress
+	FinalSignatureSent
+)
+
 // Session represents a complete client session across both TEE_K and TEE_T
 type Session struct {
 	ID           string
@@ -295,7 +306,7 @@ type Session struct {
 	ConsolidatedResponseKeystream []byte                           `json:"-"` // Consolidated response keystream for simplified verification
 	CertificateInfo               *teeproto.CertificateInfo        `json:"-"` // Structured certificate data
 	RedactionProcessingComplete   bool                             `json:"-"` // Flag to track when redaction processing is complete
-	SignatureSent                 bool                             `json:"-"` // Flag to prevent duplicate signature generation
+	finalSignatureState           atomic.Uint32                    // Pending -> InProgress -> Sent; failure terminates the session
 	StreamsMutex                  sync.Mutex                       // Protect streams collection
 
 	// Cache for original decryption streams to avoid regeneration during redaction
@@ -309,6 +320,21 @@ type Session struct {
 	// CAS guard: only the cleanupSession caller that flips this owns the
 	// activeSessions decrement. Lives here, not on per-TEE state structs.
 	CleanedUp atomic.Bool
+}
+
+func (s *Session) TryBeginFinalSignature() bool {
+	return s != nil && s.finalSignatureState.CompareAndSwap(uint32(FinalSignaturePending), uint32(FinalSignatureInProgress))
+}
+
+func (s *Session) MarkFinalSignatureSent() bool {
+	return s != nil && s.finalSignatureState.CompareAndSwap(uint32(FinalSignatureInProgress), uint32(FinalSignatureSent))
+}
+
+func (s *Session) FinalSignatureStatus() FinalSignatureState {
+	if s == nil {
+		return FinalSignaturePending
+	}
+	return FinalSignatureState(s.finalSignatureState.Load())
 }
 
 // RedactionSessionState holds redaction-specific state for each session.

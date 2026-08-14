@@ -88,22 +88,11 @@ func startStandaloneMode(config *TEEKConfig, logger *shared.Logger, boot *shared
 		WriteTimeout: 30 * time.Second,
 	}
 
-	// Start server in goroutine - OT is ready, safe to accept clients
-	go func() {
-		logger.Info("OT precomputation complete, starting HTTP server", zap.Int("port", config.Port))
-		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			logger.Critical("Server failed", zap.Error(err))
-			// Signal shutdown instead of crashing
-			sigChan := make(chan os.Signal, 1)
-			signal.Notify(sigChan, syscall.SIGTERM)
-			select {
-			case sigChan <- syscall.SIGTERM:
-				// Signal sent
-			default:
-				// Channel full, ignore
-			}
-		}
-	}()
+	logger.Info("OT precomputation complete, starting HTTP server", zap.Int("port", config.Port))
+	runningServer, err := shared.StartHTTPServer(server, false)
+	if err != nil {
+		return err
+	}
 
 	// TEE_T URL and TLS configuration already set via NewTEEKWithConfig
 	logger.Info("TEE_K ready to accept clients",
@@ -114,16 +103,16 @@ func startStandaloneMode(config *TEEKConfig, logger *shared.Logger, boot *shared
 	// Wait for interrupt signal
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-	<-sigChan
+	defer signal.Stop(sigChan)
+	serveErr, shutdownErr := shared.WaitAndShutdownHTTPServer(runningServer, sigChan, 10*time.Second)
 
 	logger.Info("Shutting down...")
 
-	// Graceful shutdown
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer shutdownCancel()
-
-	if err := server.Shutdown(shutdownCtx); err != nil {
-		logger.Error("Shutdown error", zap.Error(err))
+	if shutdownErr != nil {
+		logger.Error("Shutdown error", zap.Error(shutdownErr))
+	}
+	if serveErr != nil {
+		return fmt.Errorf("HTTP server failed: %w", serveErr)
 	}
 
 	logger.Info("Shutdown complete")

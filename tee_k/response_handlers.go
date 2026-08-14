@@ -228,21 +228,43 @@ func (t *TEEK) checkAndSendSignatureIfReadyForIdentity(identity *teekSessionIden
 	if err != nil {
 		return fmt.Errorf("TEE_K session state not found: %v", err)
 	}
+	if !finalSignaturePrerequisitesReady(session, teekState) {
+		return nil
+	}
 	session.StreamsMutex.Lock()
-	session.TranscriptMutex.Lock()
-	transcriptReady := len(session.TranscriptData) > 0
-	session.TranscriptMutex.Unlock()
-	allProcessingComplete := transcriptReady && session.RedactionProcessingComplete && len(session.RedactedStreams) > 0 && !session.SignatureSent && isOPRFReady(teekState.OPRFState.Load())
-	if !allProcessingComplete {
+	if !session.TryBeginFinalSignature() {
 		session.StreamsMutex.Unlock()
 		return nil
 	}
-	session.SignatureSent = true
 	session.StreamsMutex.Unlock()
+
+	t.logger.WithSession(session.ID).Debug("All processing complete, generating and sending signature")
 	if err := identity.ensureCurrent(); err != nil {
 		return err
 	}
-	return t.generateComprehensiveSignatureForIdentity(identity)
+	if err := t.generateComprehensiveSignatureForIdentity(identity); err != nil {
+		t.terminateSessionWithErrorForIdentity(identity, shared.ReasonCryptoSigningFailed, err, "Final signature generation or delivery failed")
+		return err
+	}
+	if !session.MarkFinalSignatureSent() {
+		err := fmt.Errorf("final signature state changed after successful client delivery")
+		t.terminateSessionWithErrorForIdentity(identity, shared.ReasonSessionStateCorrupted, err, "Final signature state transition failed")
+		return err
+	}
+	return nil
+}
+
+func finalSignaturePrerequisitesReady(session *shared.Session, teekState *TEEKSessionState) bool {
+	if session == nil || teekState == nil {
+		return false
+	}
+	session.TranscriptMutex.Lock()
+	transcriptReady := len(session.TranscriptData) > 0
+	session.TranscriptMutex.Unlock()
+	session.StreamsMutex.Lock()
+	ready := session.RedactionProcessingComplete && len(session.RedactedStreams) > 0 && isOPRFReady(teekState.OPRFState.Load())
+	session.StreamsMutex.Unlock()
+	return transcriptReady && ready
 }
 
 // checkAndSendSignatureIfReady checks if all processing is complete and sends signature if ready
@@ -251,52 +273,19 @@ func (t *TEEK) checkAndSendSignatureIfReady(sessionID string) error {
 	if err != nil {
 		return fmt.Errorf("session %s not found: %v", sessionID, err)
 	}
-
-	// Get TEE_K state for OPRF check
-	teekState, err := t.sessionManager.GetTEEKSessionState(sessionID)
+	teekState, err := t.sessionManager.stateForSession(session)
 	if err != nil {
 		return fmt.Errorf("TEE_K session state not found: %v", err)
 	}
-
-	// Check if all required processing is complete and atomically set signature flag
-	session.StreamsMutex.Lock()
-
-	session.TranscriptMutex.Lock()
-	transcriptReady := len(session.TranscriptData) > 0
-	session.TranscriptMutex.Unlock()
-
-	redactionComplete := session.RedactionProcessingComplete
-	hasRedactedStreams := len(session.RedactedStreams) > 0
-	signatureAlreadySent := session.SignatureSent
-
-	// Check if OPRF is ready (complete, not needed, or failed)
-	oprfReady := isOPRFReady(teekState.OPRFState.Load())
-
-	// All processing is complete when:
-	// 1. We have transcript data (from finished message)
-	// 2. Redaction processing is complete
-	// 3. We have redacted streams
-	// 4. We haven't already sent a signature
-	// 5. OPRF processing is complete (or not needed)
-	allProcessingComplete := transcriptReady && redactionComplete && hasRedactedStreams && !signatureAlreadySent && oprfReady
-
-	if allProcessingComplete {
-		t.logger.WithSession(sessionID).Debug("All processing complete, generating and sending signature")
-		// Mark signature as sent to prevent duplicates
-		session.SignatureSent = true
-		// Release lock before calling generateComprehensiveSignatureAndSendTranscript
-		session.StreamsMutex.Unlock()
-		return t.generateComprehensiveSignatureAndSendTranscript(sessionID)
-	} else {
-		t.logger.WithSession(sessionID).Debug("Not ready to send signature yet",
-			zap.Bool("transcript_ready", transcriptReady),
-			zap.Bool("redaction_complete", redactionComplete),
-			zap.Bool("has_redacted_streams", hasRedactedStreams),
-			zap.Bool("signature_already_sent", signatureAlreadySent),
-			zap.Bool("oprf_ready", oprfReady))
-		// Don't set SignatureSent = true if we're not actually sending a signature
-		session.StreamsMutex.Unlock()
+	if !finalSignaturePrerequisitesReady(session, teekState) {
+		return nil
 	}
-
-	return nil
+	if t.connManager == nil {
+		return fmt.Errorf("connection manager not initialized")
+	}
+	identity, err := t.connManager.identityForSession(session)
+	if err != nil {
+		return fmt.Errorf("bind final signature to TEE_T session: %w", err)
+	}
+	return t.checkAndSendSignatureIfReadyForIdentity(identity)
 }

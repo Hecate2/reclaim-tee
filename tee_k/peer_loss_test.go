@@ -4,8 +4,72 @@ import (
 	"io"
 	"testing"
 
+	teeproto "github.com/reclaimprotocol/reclaim-tee/proto"
 	"github.com/reclaimprotocol/reclaim-tee/shared"
+
+	"github.com/gorilla/websocket"
 )
+
+func TestTEEKPeerErrorTerminatesOnlyExactSession(t *testing.T) {
+	t.Run("current", func(t *testing.T) {
+		teek, cm, session, sessionConn, _ := newTEEKPeerLossSession(t)
+		identity := &teekSessionIdentity{session: session, sessionConn: sessionConn, validate: func() error {
+			return cm.validateSessionConnection(sessionConn)
+		}}
+		session.ConnMutex.RLock()
+		client := session.ClientConn.(*shared.WSConnection)
+		session.ConnMutex.RUnlock()
+
+		if err := teek.handlePeerErrorForIdentity(identity, &teeproto.ErrorData{Message: "peer rejected proof"}); err != nil {
+			t.Fatalf("handle current peer error: %v", err)
+		}
+		if _, err := teek.sessionManager.GetSession(session.ID); err == nil {
+			t.Fatal("peer error retained current session")
+		}
+		if !session.CleanedUp.Load() || !sessionConn.isClosed() {
+			t.Fatal("peer error did not clean exact session resources")
+		}
+		if err := client.WriteMessage(websocket.BinaryMessage, []byte("after cleanup")); err == nil {
+			t.Fatal("peer error left client connection open")
+		}
+	})
+
+	t.Run("stale same ID", func(t *testing.T) {
+		teek, cm, oldSession, oldConn, _ := newTEEKPeerLossSession(t)
+		identity := &teekSessionIdentity{session: oldSession, sessionConn: oldConn, validate: func() error {
+			return cm.validateSessionConnection(oldConn)
+		}}
+		cm.mu.Lock()
+		delete(cm.sessionConns, oldSession.ID)
+		cm.mu.Unlock()
+		if err := teek.sessionManager.CloseSessionIfCurrent(oldSession); err != nil {
+			t.Fatal(err)
+		}
+		if err := teek.sessionManager.RegisterSession(oldSession.ID); err != nil {
+			t.Fatal(err)
+		}
+		replacement, err := teek.sessionManager.GetSession(oldSession.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		replacementConn := &SessionTEETConnection{
+			sessionID: oldSession.ID, session: replacement,
+			controlConn: oldConn.controlConn, controlGeneration: oldConn.controlGeneration,
+			conn: newAckTestWebSocket(t),
+		}
+		if err := cm.publishSessionConnection(replacementConn); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := teek.handlePeerErrorForIdentity(identity, &teeproto.ErrorData{Message: "stale peer error"}); err == nil {
+			t.Fatal("stale peer error returned nil")
+		}
+		current, err := teek.sessionManager.GetSession(oldSession.ID)
+		if err != nil || current != replacement || replacement.CleanedUp.Load() || replacementConn.isClosed() {
+			t.Fatalf("stale peer error changed replacement: current=%p err=%v cleaned=%v closed=%v", current, err, replacement.CleanedUp.Load(), replacementConn.isClosed())
+		}
+	})
+}
 
 func TestTEEKPeerReadFailureCleansExactSession(t *testing.T) {
 	teek, cm, session, sessionConn, controlMessages := newTEEKPeerLossSession(t)

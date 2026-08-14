@@ -156,10 +156,7 @@ func (t *TEEK) handleSharedTEETMessage(identity *teekSessionIdentity, msgBytes [
 		return handlerErr
 
 	case *teeproto.Envelope_Error:
-		// TEE_T encountered an error (likely a response to our earlier error)
-		// Log it but don't terminate again (session is likely already terminating)
-		t.logger.WithSession(sessionID).Info("Received error from TEE_T", zap.String("error", p.Error.GetMessage()))
-		return nil
+		return t.handlePeerErrorForIdentity(identity, p.Error)
 
 	// OT precomputation messages.
 	case *teeproto.Envelope_OtPrecomputeResponse:
@@ -358,22 +355,28 @@ func (t *TEEK) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 // notifyTEETNewSessionWithRetry retries session notification if shared connection isn't ready
 func (t *TEEK) notifyTEETNewSessionWithRetry(sessionID string) error {
-	maxRetries := 5
-	retryDelay := 100 * time.Millisecond
+	return t.notifyTEETNewSessionWithRetryPolicy(sessionID, 5, 100*time.Millisecond, t.notifyTEETNewSession, time.Sleep)
+}
+
+func (t *TEEK) notifyTEETNewSessionWithRetryPolicy(sessionID string, maxRetries int, retryDelay time.Duration, notify func(string) error, wait func(time.Duration)) error {
+	if maxRetries <= 0 || notify == nil || wait == nil {
+		return fmt.Errorf("invalid SessionCreated retry policy")
+	}
 
 	for attempt := 1; attempt <= maxRetries; attempt++ {
-		err := t.notifyTEETNewSession(sessionID)
+		err := notify(sessionID)
 		if err == nil {
 			return nil
 		}
 
-		// If it's a "connection not available" error and we have retries left, wait and retry
-		if strings.Contains(err.Error(), "shared TEE_T connection not available") && attempt < maxRetries {
+		// Retry only when SessionCreated was definitely not written. A send error
+		// or ACK timeout is ambiguous: TEE_T may already own the session.
+		if errors.Is(err, errSessionCreatedControlUnavailable) && attempt < maxRetries {
 			t.logger.WithSession(sessionID).Warn("Shared TEE_T connection not ready, retrying...",
 				zap.Int("attempt", attempt),
 				zap.Int("max_retries", maxRetries),
 				zap.Duration("retry_delay", retryDelay))
-			time.Sleep(retryDelay)
+			wait(retryDelay)
 			retryDelay *= 2 // Exponential backoff
 			continue
 		}
@@ -390,6 +393,10 @@ func (t *TEEK) notifyTEETNewSession(sessionID string) error {
 	if t.connManager == nil {
 		return fmt.Errorf("connection manager not initialized")
 	}
+	session, err := t.sessionManager.GetSession(sessionID)
+	if err != nil {
+		return fmt.Errorf("bind SessionCreated to client session: %w", err)
+	}
 
 	// Step 1: Send SessionCreated notification on control connection
 	env := &teeproto.Envelope{
@@ -401,7 +408,7 @@ func (t *TEEK) notifyTEETNewSession(sessionID string) error {
 	t.logger.WithSession(sessionID).Info("Sending to TEE_T",
 		zap.String("type", "SessionCreated"))
 
-	origin, err := t.connManager.sendSessionCreatedAndWait(sessionID, func(conn *shared.WSConnection, generation uint64) error {
+	origin, err := t.connManager.sendSessionCreatedAndWaitForSession(session, func(conn *shared.WSConnection, generation uint64) error {
 		return t.connManager.sendOnControlConnection(conn, generation, env)
 	})
 	if err != nil {

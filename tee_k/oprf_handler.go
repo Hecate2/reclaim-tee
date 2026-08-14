@@ -335,7 +335,9 @@ func (t *TEEK) handleOPRFResult(identity *teekSessionIdentity, msg *teeproto.OPR
 		t.logger.WithSession(sessionID).Info("OPRF complete", zap.Int("count", teekState.GetOPRFResultCount()))
 
 		// Check if we can send signature now
-		t.checkAndSendSignatureIfReadyForIdentity(identity)
+		if err := t.checkAndSendSignatureIfReadyForIdentity(identity); err != nil {
+			return fmt.Errorf("final signature after OPRF completion: %w", err)
+		}
 	}
 
 	return nil
