@@ -496,8 +496,8 @@ func TestBufferedTEETFrameCannotTerminateSameIDReplacement(t *testing.T) {
 	}
 
 	cm.tearDownControl(oldControl, oldGeneration)
-	if err := sessionManager.CloseSession(sessionID); err != nil {
-		t.Fatalf("close old session: %v", err)
+	if _, err := sessionManager.GetSession(sessionID); err == nil {
+		t.Fatal("control teardown retained the old shared session")
 	}
 	if err := sessionManager.RegisterSession(sessionID); err != nil {
 		t.Fatalf("register replacement session: %v", err)

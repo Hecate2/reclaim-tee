@@ -42,19 +42,27 @@ type TEEKSessionState struct {
 	responseTagSeqInit sync.Once
 
 	// MPC OPRF state with OT precomputation.
-	ConsolidatedKeystream []byte                      // Keystream for response decryption
-	OPRFKeyShare          []byte                      // 16-byte key share for MPC OPRF
-	GarblerOnlineSessions map[int]*mpc.GarblerSession // Per-range garbler sessions
-	OPRFRanges            []*teeproto.OPRFRangeSpec   // Client-provided OPRF ranges
-	OPRFResults           map[int]*shared.OPRFResult  // Completed OPRF results by range index
-	OPRFState             atomic.Int32                // Current OPRF processing state (shared.OPRFSessionState values)
-	OPRFExpectedCount     int                         // Number of OPRF results expected
-	ClientRangesReceived  atomic.Bool                 // publishes OPRFRanges/OPRFKeyShare/GarblerOnlineSessions/OPRFResults
-	OPRFRangesSubmitted   atomic.Bool                 // one-shot: client submits ranges exactly once per session
+	ConsolidatedKeystream []byte                       // Keystream for response decryption
+	OPRFKeyShare          []byte                       // 16-byte key share for MPC OPRF
+	GarblerOnlineSessions map[int]*mpc.GarblerSession  // Per-range garbler sessions
+	OTReservations        map[int]*senderOTReservation // Receiver-consumption confirmations pending by range
+	OPRFRanges            []*teeproto.OPRFRangeSpec    // Client-provided OPRF ranges
+	OPRFResults           map[int]*shared.OPRFResult   // Completed OPRF results by range index
+	OPRFState             atomic.Int32                 // Current OPRF processing state (shared.OPRFSessionState values)
+	OPRFExpectedCount     int                          // Number of OPRF results expected
+	ClientRangesReceived  atomic.Bool                  // publishes OPRFRanges/OPRFKeyShare/GarblerOnlineSessions/OPRFResults
+	OPRFRangesSubmitted   atomic.Bool                  // one-shot: client submits ranges exactly once per session
+	OPRFInitiationStarted atomic.Bool                  // one-shot: exactly one queued/immediate caller initiates all ranges
 
 	// Per-session mutex for thread-safe access to OPRF state
 	// Must be held when accessing GarblerOnlineSessions, OPRFResults, or OPRFRanges
 	oprfMu sync.Mutex
+}
+
+type senderOTReservation struct {
+	startIndex        uint64
+	controlConn       *shared.WSConnection
+	controlGeneration uint64
 }
 
 type TEEKSessionManager struct {
@@ -165,6 +173,31 @@ func (s *TEEKSessionState) NextResponseTagSeq() uint64 {
 	return s.responseTagSeq.Add(1) - 1
 }
 
+// publishOPRFClientInputs publishes client ranges and decides whether the
+// already-published keystream should start initiation in the same transition.
+func (s *TEEKSessionState) publishOPRFClientInputs(ranges []*teeproto.OPRFRangeSpec, keyShare []byte) bool {
+	s.oprfMu.Lock()
+	defer s.oprfMu.Unlock()
+	s.OPRFRanges = ranges
+	s.OPRFState.Store(int32(shared.OPRFStateInProgress))
+	s.OPRFExpectedCount = len(ranges)
+	s.GarblerOnlineSessions = make(map[int]*mpc.GarblerSession)
+	s.OTReservations = make(map[int]*senderOTReservation)
+	s.OPRFResults = make(map[int]*shared.OPRFResult)
+	s.OPRFKeyShare = keyShare
+	s.ClientRangesReceived.Store(true)
+	return len(s.ConsolidatedKeystream) != 0
+}
+
+// publishOPRFKeystream publishes the keystream and decides whether previously
+// published client ranges should start initiation in the same transition.
+func (s *TEEKSessionState) publishOPRFKeystream(keystream []byte) bool {
+	s.oprfMu.Lock()
+	defer s.oprfMu.Unlock()
+	s.ConsolidatedKeystream = keystream
+	return s.ClientRangesReceived.Load() && len(s.OPRFRanges) != 0
+}
+
 // LockOPRF acquires the per-session OPRF mutex
 func (s *TEEKSessionState) LockOPRF() {
 	s.oprfMu.Lock()
@@ -183,6 +216,54 @@ func (s *TEEKSessionState) SetGarblerOnlineSession(rangeIdx int, session *mpc.Ga
 		s.GarblerOnlineSessions = make(map[int]*mpc.GarblerSession)
 	}
 	s.GarblerOnlineSessions[rangeIdx] = session
+}
+
+func (s *TEEKSessionState) TrackOTReservation(rangeIdx int, reservation *senderOTReservation) error {
+	if reservation == nil {
+		return fmt.Errorf("OT reservation is nil")
+	}
+	s.oprfMu.Lock()
+	defer s.oprfMu.Unlock()
+	if s.OTReservations == nil {
+		s.OTReservations = make(map[int]*senderOTReservation)
+	}
+	if s.OTReservations[rangeIdx] != nil {
+		return fmt.Errorf("OT reservation already exists for range %d", rangeIdx)
+	}
+	s.OTReservations[rangeIdx] = reservation
+	return nil
+}
+
+func (s *TEEKSessionState) ConfirmOTReservation(rangeIdx int, controlConn *shared.WSConnection, controlGeneration uint64) bool {
+	s.oprfMu.Lock()
+	defer s.oprfMu.Unlock()
+	reservation := s.OTReservations[rangeIdx]
+	if reservation == nil || reservation.controlConn != controlConn || reservation.controlGeneration != controlGeneration {
+		return false
+	}
+	delete(s.OTReservations, rangeIdx)
+	return true
+}
+
+func (s *TEEKSessionState) AbandonOTReservation(rangeIdx int, expected *senderOTReservation) *senderOTReservation {
+	s.oprfMu.Lock()
+	defer s.oprfMu.Unlock()
+	if s.OTReservations[rangeIdx] != expected {
+		return nil
+	}
+	delete(s.OTReservations, rangeIdx)
+	return expected
+}
+
+func (s *TEEKSessionState) AbandonAllOTReservations() []*senderOTReservation {
+	s.oprfMu.Lock()
+	defer s.oprfMu.Unlock()
+	reservations := make([]*senderOTReservation, 0, len(s.OTReservations))
+	for rangeIdx, reservation := range s.OTReservations {
+		reservations = append(reservations, reservation)
+		delete(s.OTReservations, rangeIdx)
+	}
+	return reservations
 }
 
 // GetGarblerOnlineSession safely retrieves a garbler session for the given range index

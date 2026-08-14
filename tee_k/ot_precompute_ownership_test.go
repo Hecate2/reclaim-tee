@@ -29,26 +29,25 @@ func TestSupersededCompleteResultCannotAbortReplacementPrecompute(t *testing.T) 
 			if err := state.pool.Add([]mpc.SenderOT{{Index: 0}}); err != nil {
 				t.Fatalf("seed sender pool: %v", err)
 			}
+			oldClaim := state.pool.ClaimExtendIfNeeded()
+			if oldClaim == nil {
+				t.Fatal("claim old extension")
+			}
 			paused := make(chan struct{})
 			resume := make(chan struct{})
 			oldPending := &senderPrecompute{
 				startIndex: 1, done: make(chan error, 1),
 				controlConn: control, controlGeneration: generation,
+				extendClaim: oldClaim,
 				sendComplete: func(uint32) error {
 					close(paused)
 					<-resume
 					return test.sendErr
 				},
 			}
-			replacement := &senderPrecompute{
-				startIndex: 1, done: make(chan error, 1),
-				controlConn: control, controlGeneration: generation,
-				sendComplete: func(uint32) error { return nil },
-			}
 			state.mu.Lock()
 			state.ready = true
 			state.pending = oldPending
-			state.pool.SetExtendPending(true)
 			state.mu.Unlock()
 
 			oldResult := make(chan error, 1)
@@ -61,6 +60,18 @@ func TestSupersededCompleteResultCannotAbortReplacementPrecompute(t *testing.T) 
 				t.Fatal("old Complete path did not reach the deterministic pause")
 			}
 			state.mu.Lock()
+			state.pool.InvalidateExtendClaim()
+			replacementClaim := state.pool.ClaimExtendIfNeeded()
+			if replacementClaim == nil {
+				state.mu.Unlock()
+				t.Fatal("claim replacement extension")
+			}
+			replacement := &senderPrecompute{
+				startIndex: 1, done: make(chan error, 1),
+				controlConn: control, controlGeneration: generation,
+				extendClaim:  replacementClaim,
+				sendComplete: func(uint32) error { return nil },
+			}
 			state.pending = replacement
 			state.mu.Unlock()
 			close(resume)

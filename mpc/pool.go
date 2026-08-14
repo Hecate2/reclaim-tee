@@ -15,12 +15,17 @@ const (
 
 // SenderPool is the garbler's compact, append-only random-OT pool.
 type SenderPool struct {
-	mu            sync.Mutex
-	entries       []SenderOT
-	baseIndex     uint64
-	nextIndex     uint64
-	extendPending bool
+	mu          sync.Mutex
+	entries     []SenderOT
+	baseIndex   uint64
+	nextIndex   uint64
+	extendClaim *SenderExtendClaim
 }
+
+// SenderExtendClaim is an opaque, single-owner lease for one pool extension.
+// A pool clear invalidates the claim; delayed owners cannot release a newer
+// claim because ownership is compared by exact pointer identity.
+type SenderExtendClaim struct{ marker byte }
 
 func NewSenderPool(capacity int) *SenderPool {
 	return &SenderPool{entries: make([]SenderOT, 0, capacity)}
@@ -65,11 +70,28 @@ func (p *SenderPool) Reserve(count int) (uint64, []SenderOT, error) {
 func (p *SenderPool) Clear() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.clearLocked()
+	p.extendClaim = nil
+}
+
+// ClearForExtendFailure clears the pool only while the caller still owns the
+// exact failed extension. The claim remains held until the caller performs its
+// failure recovery, so a replacement refill cannot occupy the gap.
+func (p *SenderPool) ClearForExtendFailure(claim *SenderExtendClaim) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if claim == nil || p.extendClaim != claim {
+		return false
+	}
+	p.clearLocked()
+	return true
+}
+
+func (p *SenderPool) clearLocked() {
 	clear(p.entries)
 	p.entries = p.entries[:0]
 	p.baseIndex = 0
 	p.nextIndex = 0
-	p.extendPending = false
 }
 
 func (p *SenderPool) Available() int {
@@ -93,19 +115,54 @@ func (p *SenderPool) NextIndex() uint64 {
 func (p *SenderPool) NeedsExtend() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return int(p.baseIndex+uint64(len(p.entries))-p.nextIndex) < OTPoolWatermark && !p.extendPending
+	return int(p.baseIndex+uint64(len(p.entries))-p.nextIndex) < OTPoolWatermark && p.extendClaim == nil
+}
+
+// ClaimExtendIfNeeded atomically claims ownership of the next low-watermark
+// extension. Callers must release this exact token if they fail before
+// publishing an in-flight extension request.
+func (p *SenderPool) ClaimExtendIfNeeded() *SenderExtendClaim {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	available := int(p.baseIndex + uint64(len(p.entries)) - p.nextIndex)
+	if available >= OTPoolWatermark || p.extendClaim != nil {
+		return nil
+	}
+	claim := &SenderExtendClaim{}
+	p.extendClaim = claim
+	return claim
 }
 
 func (p *SenderPool) IsExtendPending() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.extendPending
+	return p.extendClaim != nil
 }
 
-func (p *SenderPool) SetExtendPending(pending bool) {
+func (p *SenderPool) OwnsExtendClaim(claim *SenderExtendClaim) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.extendPending = pending
+	return claim != nil && p.extendClaim == claim
+}
+
+// ReleaseExtendClaim releases only the exact claim supplied by its owner.
+func (p *SenderPool) ReleaseExtendClaim(claim *SenderExtendClaim) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if claim == nil || p.extendClaim != claim {
+		return false
+	}
+	p.extendClaim = nil
+	return true
+}
+
+// InvalidateExtendClaim revokes any claimant captured before a pool lifecycle
+// transition. Exact release semantics keep a delayed claimant from affecting a
+// replacement claim.
+func (p *SenderPool) InvalidateExtendClaim() {
+	p.mu.Lock()
+	p.extendClaim = nil
+	p.mu.Unlock()
 }
 
 func (p *SenderPool) compactConsumed() {

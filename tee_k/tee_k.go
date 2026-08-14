@@ -98,6 +98,10 @@ type TEEK struct {
 	otReady        atomic.Bool
 	activeSessions atomic.Int32
 
+	// beforeReserveOTReadyPublish is a deterministic test-only hook invoked
+	// while OT state ownership is still held. Production leaves it nil.
+	beforeReserveOTReadyPublish func()
+
 	// attestHealth gates the pair off the router (via ControlHealthy) and
 	// self-resets when the SEV attestation path wedges. Nil-safe.
 	attestHealth *shared.AttestationHealth
@@ -279,6 +283,11 @@ func (t *TEEK) cleanupSessionWithSession(session *shared.Session) {
 		t.logger.WithSession(session.ID).Debug("Session cleanup already claimed by another caller")
 		return
 	}
+	if teekState, err := t.sessionManager.stateForSession(session); err == nil {
+		for _, reservation := range teekState.AbandonAllOTReservations() {
+			t.reconcileAbandonedOTReservation(reservation)
+		}
+	}
 	// Unblock any TCPData sender that's waiting on a full pendingData
 	// buffer because minitls has stopped draining.
 	if tlsState, err := t.sessionManager.stateForSession(session); err == nil && tlsState.WSConn2TLS != nil {
@@ -289,7 +298,9 @@ func (t *TEEK) cleanupSessionWithSession(session *shared.Session) {
 	}
 	_ = t.sessionManager.CloseSessionIfCurrent(session)
 	t.activeSessions.Add(-1)
-	t.sessionTerminator.CleanupSession(session.ID)
+	if t.sessionTerminator != nil {
+		t.sessionTerminator.CleanupSession(session.ID)
+	}
 	t.logger.WithSession(session.ID).Info("Session terminated and cleaned up")
 }
 

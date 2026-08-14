@@ -256,7 +256,7 @@ func (t *TEET) cleanupSessionWithSession(session *shared.Session) {
 	}
 	_ = t.sessionManager.closeSessionIfCurrent(session)
 	t.activeSessions.Add(-1)
-	if ownsSessionState {
+	if ownsSessionState && t.sessionTerminator != nil {
 		t.sessionTerminator.CleanupSession(session.ID)
 	}
 	t.logger.WithSession(session.ID).Info("Session terminated and cleaned up")

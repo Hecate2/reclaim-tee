@@ -50,18 +50,13 @@ func (t *TEEK) handleOPRFRangesFromClient(sessionID string, msg *teeproto.OPRFRa
 		return fmt.Errorf("OPRF key share length %d, want 16", len(t.oprfKeyShare))
 	}
 
-	// Initialize OPRF state. All non-atomic writes precede the publish.
-	teekState.OPRFRanges = msg.GetRanges()
-	teekState.OPRFState.Store(int32(shared.OPRFStateInProgress))
-	teekState.OPRFExpectedCount = rangeCount
-	teekState.GarblerOnlineSessions = make(map[int]*mpc.GarblerSession)
-	teekState.OPRFResults = make(map[int]*shared.OPRFResult)
-	teekState.OPRFKeyShare = t.oprfKeyShare
-	teekState.ClientRangesReceived.Store(true)
+	// Publish client inputs and decide whether to initiate under the same mutex
+	// used by keystream publication. Whichever side arrives second starts work.
+	hasKeystream := teekState.publishOPRFClientInputs(msg.GetRanges(), t.oprfKeyShare)
 
 	// If keystream not yet available, processing will happen later
 	// when processQueuedOPRFRanges is called after keystream is set
-	if len(teekState.ConsolidatedKeystream) == 0 {
+	if !hasKeystream {
 		t.logger.WithSession(sessionID).Debug("OPRF queued, waiting for keystream")
 		return nil
 	}
@@ -72,35 +67,50 @@ func (t *TEEK) handleOPRFRangesFromClient(sessionID string, msg *teeproto.OPRFRa
 
 // processQueuedOPRFRanges processes OPRF ranges that were waiting for keystream
 func (t *TEEK) processQueuedOPRFRanges(sessionID string, teekState *TEEKSessionState) error {
-	if !teekState.ClientRangesReceived.Load() || len(teekState.OPRFRanges) == 0 {
-		return nil // No ranges to process
+	return t.processQueuedOPRFRangesWithInitiator(sessionID, teekState, t.initiateOPRFForRange)
+}
+
+type oprfRangeInitiator func(string, *TEEKSessionState, int, *teeproto.OPRFRangeSpec, []byte, []byte, int) error
+
+func (t *TEEK) processQueuedOPRFRangesWithInitiator(sessionID string, teekState *TEEKSessionState, initiate oprfRangeInitiator) error {
+	if teekState == nil || !teekState.ClientRangesReceived.Load() {
+		return nil
 	}
 	if shared.OPRFSessionState(teekState.OPRFState.Load()) != shared.OPRFStateInProgress {
-		return nil // Already processed or not needed
+		return nil
 	}
-	if len(teekState.GarblerOnlineSessions) > 0 {
-		return nil // Already initiated
+	if initiate == nil {
+		return fmt.Errorf("OPRF range initiator is nil")
 	}
 
-	// Check if OT pool is ready
-	if !t.isOTPoolReady() {
-		return fmt.Errorf("OT pool not ready - precomputation may have failed")
+	teekState.oprfMu.Lock()
+	if len(teekState.OPRFRanges) == 0 || len(teekState.ConsolidatedKeystream) == 0 {
+		teekState.oprfMu.Unlock()
+		return nil
 	}
+	if !teekState.OPRFInitiationStarted.CompareAndSwap(false, true) {
+		teekState.oprfMu.Unlock()
+		return nil
+	}
+	ranges := append([]*teeproto.OPRFRangeSpec(nil), teekState.OPRFRanges...)
+	keystream := append([]byte(nil), teekState.ConsolidatedKeystream...)
+	keyShare := append([]byte(nil), teekState.OPRFKeyShare...)
+	teekState.oprfMu.Unlock()
 
 	t.logger.WithSession(sessionID).Debug("Processing queued OPRF ranges")
 
 	// Validate ranges and initiate MPC for each
-	for i, r := range teekState.OPRFRanges {
+	for i, r := range ranges {
 		if r.TlsStart < 0 || r.TlsLength <= 0 || r.TlsLength > 64 {
 			return fmt.Errorf("invalid range %d: start=%d length=%d", i, r.TlsStart, r.TlsLength)
 		}
 		rangeEnd := int(r.TlsStart) + int(r.TlsLength)
-		if rangeEnd > len(teekState.ConsolidatedKeystream) {
+		if rangeEnd > len(keystream) {
 			return fmt.Errorf("range %d exceeds keystream (end=%d, keystream_len=%d)",
-				i, rangeEnd, len(teekState.ConsolidatedKeystream))
+				i, rangeEnd, len(keystream))
 		}
 
-		if err := t.initiateOPRFForRange(sessionID, teekState, i, r); err != nil {
+		if err := initiate(sessionID, teekState, i, r, keystream, keyShare, len(ranges)); err != nil {
 			return fmt.Errorf("failed to initiate OPRF for range %d: %w", i, err)
 		}
 	}
@@ -110,16 +120,27 @@ func (t *TEEK) processQueuedOPRFRanges(sessionID string, teekState *TEEKSessionS
 
 // initiateOPRFForRange starts MPC OPRF for a single range using precomputed
 // random OT. The evaluator returns its choice corrections in round 2.
-func (t *TEEK) initiateOPRFForRange(sessionID string, teekState *TEEKSessionState, rangeIndex int, r *teeproto.OPRFRangeSpec) error {
-	// Reserve OT entries from the precomputed pool
-	startIdx, otEntries, err := t.reserveOTEntries(mpc.OTsPerOPRF)
+func (t *TEEK) initiateOPRFForRange(sessionID string, teekState *TEEKSessionState, rangeIndex int, r *teeproto.OPRFRangeSpec, keystreamSnapshot, keyShareSnapshot []byte, totalRanges int) (retErr error) {
+	identity, err := t.connManager.identityForSession(teekState.session)
+	if err != nil {
+		return fmt.Errorf("failed to bind OPRF range to TEE_T connection: %w", err)
+	}
+	// Validate identity, reserve OTs, and track receiver confirmation under one
+	// exact control-generation lease.
+	startIdx, otEntries, reservation, err := t.reserveOTEntriesForSession(identity, teekState, rangeIndex, mpc.OTsPerOPRF)
 	if err != nil {
 		return fmt.Errorf("failed to reserve OT entries: %w", err)
 	}
+	defer func() {
+		if retErr == nil {
+			return
+		}
+		t.abandonOTReservation(teekState, rangeIndex, reservation)
+	}()
 
 	// Extract keystream for range and build garbler input
 	start := int(r.TlsStart)
-	keystream := teekState.ConsolidatedKeystream[start : start+int(r.TlsLength)]
+	keystream := keystreamSnapshot[start : start+int(r.TlsLength)]
 	paddedKeystream, err := mpc.PadZeros64(keystream, int(r.TlsLength))
 	if err != nil {
 		return fmt.Errorf("failed to pad keystream: %w", err)
@@ -127,7 +148,7 @@ func (t *TEEK) initiateOPRFForRange(sessionID string, teekState *TEEKSessionStat
 
 	var garblerInput [80]byte
 	copy(garblerInput[:64], paddedKeystream[:])
-	copy(garblerInput[64:], teekState.OPRFKeyShare)
+	copy(garblerInput[64:], keyShareSnapshot)
 
 	// Generate the online payload from compact precomputed random OTs. The
 	// online path performs no elliptic-curve operations.
@@ -156,17 +177,40 @@ func (t *TEEK) initiateOPRFForRange(sessionID string, teekState *TEEKSessionStat
 		zap.Uint64("ot_start_index", startIdx))
 
 	// Send OPRFOnlineFull to TEE_T
-	return t.sendOPRFOnlineFullToTEET(sessionID, &teeproto.OPRFOnlineFull{
-		SessionId:      sessionID,
-		OprfSessionId:  garblerSession.SessionID,
-		RangeIndex:     int32(rangeIndex),
-		TlsStart:       r.TlsStart,
-		TlsLength:      r.TlsLength,
-		TlsSessionHash: tlsSessionHash,
-		GarbledTables:  serializedPayload, // Contains all circuit data
-		OtStartIndex:   uint32(startIdx),
-		TotalRanges:    int32(len(teekState.OPRFRanges)),
+	return t.sendReservedOPRFOnline(teekState, rangeIndex, reservation, func() error {
+		return t.sendOPRFOnlineFullToExactTEET(identity, &teeproto.OPRFOnlineFull{
+			SessionId:      sessionID,
+			OprfSessionId:  garblerSession.SessionID,
+			RangeIndex:     int32(rangeIndex),
+			TlsStart:       r.TlsStart,
+			TlsLength:      r.TlsLength,
+			TlsSessionHash: tlsSessionHash,
+			GarbledTables:  serializedPayload, // Contains all circuit data
+			OtStartIndex:   uint32(startIdx),
+			TotalRanges:    int32(totalRanges),
+		})
 	})
+}
+
+func (t *TEEK) sendReservedOPRFOnline(state *TEEKSessionState, rangeIndex int, reservation *senderOTReservation, send func() error) error {
+	if send == nil {
+		err := fmt.Errorf("OPRF online send callback is nil")
+		t.abandonOTReservation(state, rangeIndex, reservation)
+		return err
+	}
+	if err := send(); err != nil {
+		t.abandonOTReservation(state, rangeIndex, reservation)
+		return err
+	}
+	return nil
+}
+
+func (t *TEEK) abandonOTReservation(state *TEEKSessionState, rangeIndex int, expected *senderOTReservation) bool {
+	if state == nil {
+		return false
+	}
+	abandoned := state.AbandonOTReservation(rangeIndex, expected)
+	return abandoned != nil && t.reconcileAbandonedOTReservation(abandoned)
 }
 
 // handleOPRFChoiceCorrections applies c=d XOR b to the precomputed random OT
@@ -196,6 +240,9 @@ func (t *TEEK) handleOPRFChoiceCorrections(identity *teekSessionIdentity, msg *t
 	}
 	if msg.GetOprfSessionId() != garblerSession.SessionID {
 		return fmt.Errorf("OPRF round 2 session mismatch for range %d", rangeIndex)
+	}
+	if !teekState.ConfirmOTReservation(rangeIndex, identity.sessionConn.controlConn, identity.sessionConn.controlGeneration) {
+		return fmt.Errorf("OPRF round 2 has no matching OT reservation for range %d", rangeIndex)
 	}
 
 	corrections, err := mpc.UnmarshalChoiceCorrections(msg.GetChoiceCorrections())
@@ -310,25 +357,26 @@ func (t *TEEK) computeTLSSessionHash(sessionID string) ([]byte, error) {
 	return h.Sum(nil), nil
 }
 
-// sendOPRFOnlineFullToTEET sends OPRFOnlineFull message to TEE_T via per-session connection
-func (t *TEEK) sendOPRFOnlineFullToTEET(sessionID string, msg *teeproto.OPRFOnlineFull) error {
+// sendOPRFOnlineFullToExactTEET sends OPRFOnlineFull on the exact session and
+// control generation that owns its sender OT reservation.
+func (t *TEEK) sendOPRFOnlineFullToExactTEET(identity *teekSessionIdentity, msg *teeproto.OPRFOnlineFull) error {
 	if t.connManager == nil {
 		return fmt.Errorf("connection manager not initialized")
 	}
 
 	env := &teeproto.Envelope{
-		SessionId:   sessionID,
+		SessionId:   identity.session.ID,
 		TimestampMs: time.Now().UnixMilli(),
 		Payload: &teeproto.Envelope_OprfOnlineFull{
 			OprfOnlineFull: msg,
 		},
 	}
 
-	t.logger.WithSession(sessionID).Info("Sending to TEE_T",
+	t.logger.WithSession(identity.session.ID).Info("Sending to TEE_T",
 		zap.String("type", "OprfOnlineFull"))
 
 	// Send on per-session connection
-	return t.connManager.SendOnSession(sessionID, env)
+	return t.connManager.SendOnExactSession(identity, env)
 }
 
 // sendOPRFMasksToTEET sends the correction-aware OT masks to TEE_T.

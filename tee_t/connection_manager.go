@@ -758,11 +758,13 @@ func (cm *TEEKConnectionManager) handleSessionMessages(sessionID string, session
 		sessionConn.conn.SetReadDeadline(time.Now().Add(SessionReadTimeout))
 		_, msgBytes, err := sessionConn.conn.ReadMessage()
 		if err != nil {
+			locallyClosed := sessionConn.isClosed()
 			if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
 				cm.logger.WithSession(sessionID).Debug("Session connection closed normally")
-			} else if !sessionConn.isClosed() {
+			} else if !locallyClosed {
 				cm.logger.WithSession(sessionID).Error("Session connection error", zap.Error(err))
 			}
+			cm.handleSessionReadFailure(identity, err, locallyClosed)
 			return
 		}
 		if err := identity.ensureCurrent(); err != nil {
@@ -898,6 +900,13 @@ func (cm *TEEKConnectionManager) handleSessionMessages(sessionID string, session
 			return
 		}
 	}
+}
+
+func (cm *TEEKConnectionManager) handleSessionReadFailure(identity *teetSessionIdentity, err error, locallyClosed bool) {
+	if locallyClosed || identity == nil || identity.ensureCurrent() != nil {
+		return
+	}
+	cm.teet.terminateSessionWithErrorForIdentity(identity, shared.ReasonConnectionLost, err, "TEE_K session connection lost")
 }
 
 // sendSessionConnectionAck sends acknowledgment for session connection
