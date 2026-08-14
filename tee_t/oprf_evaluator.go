@@ -29,6 +29,13 @@ func (t *TEET) handleOPRFOnlineFull(identity *teetSessionIdentity, msg *teeproto
 	if msg.GetSessionId() != sessionID {
 		return fmt.Errorf("OPRF round 1 session ID mismatch")
 	}
+	total := int(msg.GetTotalRanges())
+	if total <= 0 {
+		return fmt.Errorf("OPRFOnlineFull with non-positive total_ranges %d", total)
+	}
+	if total > shared.MaxOPRFRangesPerSession {
+		return fmt.Errorf("too many OPRF ranges: got %d, max %d", total, shared.MaxOPRFRangesPerSession)
+	}
 
 	teetState, err := t.sessionManager.stateForSession(session)
 	if err != nil {
@@ -48,10 +55,6 @@ func (t *TEET) handleOPRFOnlineFull(identity *teetSessionIdentity, msg *teeproto
 
 	if len(t.oprfKeyShare) != 16 {
 		return fmt.Errorf("OPRF key share length %d, want 16", len(t.oprfKeyShare))
-	}
-	total := int(msg.TotalRanges)
-	if total <= 0 {
-		return fmt.Errorf("OPRFOnlineFull with non-positive total_ranges %d", total)
 	}
 	rangeIndex := int(msg.RangeIndex)
 	if rangeIndex < 0 || rangeIndex >= total {

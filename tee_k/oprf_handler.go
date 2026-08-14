@@ -15,6 +15,13 @@ import (
 
 // handleOPRFRangesFromClient handles OPRFRangesSubmission from client
 func (t *TEEK) handleOPRFRangesFromClient(sessionID string, msg *teeproto.OPRFRangesSubmission) error {
+	rangeCount := len(msg.GetRanges())
+	if rangeCount > shared.MaxOPRFRangesPerSession {
+		err := fmt.Errorf("too many OPRF ranges: got %d, max %d", rangeCount, shared.MaxOPRFRangesPerSession)
+		t.terminateSessionWithError(sessionID, shared.ReasonProtocolViolation, err, "OPRF range limit exceeded")
+		return err
+	}
+
 	teekState, err := t.sessionManager.GetTEEKSessionState(sessionID)
 	if err != nil {
 		return fmt.Errorf("failed to get TEE_K session state: %w", err)
@@ -28,10 +35,10 @@ func (t *TEEK) handleOPRFRangesFromClient(sessionID string, msg *teeproto.OPRFRa
 		return err
 	}
 
-	t.logger.WithSession(sessionID).Info("OPRF ranges received", zap.Int("count", len(msg.GetRanges())))
+	t.logger.WithSession(sessionID).Info("OPRF ranges received", zap.Int("count", rangeCount))
 
 	// If no ranges, mark OPRF as not needed
-	if len(msg.GetRanges()) == 0 {
+	if rangeCount == 0 {
 		teekState.OPRFState.Store(int32(shared.OPRFStateNone))
 		t.logger.WithSession(sessionID).Debug("No OPRF ranges")
 		// Check if we can send signature now
@@ -46,7 +53,7 @@ func (t *TEEK) handleOPRFRangesFromClient(sessionID string, msg *teeproto.OPRFRa
 	// Initialize OPRF state. All non-atomic writes precede the publish.
 	teekState.OPRFRanges = msg.GetRanges()
 	teekState.OPRFState.Store(int32(shared.OPRFStateInProgress))
-	teekState.OPRFExpectedCount = len(msg.GetRanges())
+	teekState.OPRFExpectedCount = rangeCount
 	teekState.GarblerOnlineSessions = make(map[int]*mpc.GarblerSession)
 	teekState.OPRFResults = make(map[int]*shared.OPRFResult)
 	teekState.OPRFKeyShare = t.oprfKeyShare

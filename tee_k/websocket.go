@@ -19,7 +19,10 @@ import (
 )
 
 // MaxWebSocketMessageSize is the maximum allowed WebSocket message size (30 MB)
-// Sized for OT precomputation: 100,000 COSenderSetups at ~200 bytes each = ~20 MB
+// The 100,000-OT KOS initial response is 1,607,808 bytes before protobuf
+// framing, and the fixed online garbled-circuit payload is 1,034,536 bytes.
+// Preserve the existing larger policy limit for attestation and batched TLS
+// messages whose encoded sizes are not governed by those MPC constants.
 const MaxWebSocketMessageSize = 30 * 1024 * 1024
 
 // HandshakeReadTimeout bounds a single minitls read of the client-relayed target

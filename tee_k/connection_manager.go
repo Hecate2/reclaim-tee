@@ -381,7 +381,7 @@ func (cm *TEETConnectionManager) sendPairAssignment(conn *websocket.Conn) error 
 func (cm *TEETConnectionManager) attemptControlConnection() (*websocket.Conn, error) {
 	cm.logger.Debug("Starting control connection attempt")
 
-	conn, _, err := cm.dialer(cm.controlURL).Dial(cm.controlURL, nil)
+	conn, err := cm.dialControlConnection()
 	if err != nil {
 		return nil, err
 	}
@@ -469,6 +469,22 @@ func (cm *TEETConnectionManager) attemptControlConnection() (*websocket.Conn, er
 
 	cm.logger.Info("TEE_T attestation verified on control connection")
 
+	return conn, nil
+}
+
+// dialControlConnection returns a control socket only after installing the
+// same policy limit used by every other TEE WebSocket read path. Installing it
+// here keeps the attestation read inside attemptControlConnection bounded too.
+func (cm *TEETConnectionManager) dialControlConnection() (*websocket.Conn, error) {
+	return dialWebSocketWithReadLimit(cm.dialer(cm.controlURL), cm.controlURL, MaxWebSocketMessageSize)
+}
+
+func dialWebSocketWithReadLimit(dialer *websocket.Dialer, wsURL string, readLimit int64) (*websocket.Conn, error) {
+	conn, _, err := dialer.Dial(wsURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	conn.SetReadLimit(readLimit)
 	return conn, nil
 }
 

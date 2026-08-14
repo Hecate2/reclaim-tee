@@ -253,6 +253,7 @@ const (
 	MaxHTTPRequestSize         = 1 * 1024 * 1024
 	MaxEncryptedFragments      = 500
 	MaxResponseRedactionRanges = 1000
+	MaxOPRFRangesPerSession    = 20
 )
 
 // OPRFResult holds the result of MPC OPRF computation for a single range
