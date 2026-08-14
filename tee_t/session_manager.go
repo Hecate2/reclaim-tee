@@ -6,12 +6,12 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/reclaimprotocol/reclaim-tee/oprfmpc"
+	"github.com/reclaimprotocol/reclaim-tee/mpc"
 	"github.com/reclaimprotocol/reclaim-tee/shared"
 )
 
 type pendingOPRFEvaluation struct {
-	Session   *oprfmpc.CMACEvaluatorOnlineSession
+	Session   *mpc.EvaluatorSession
 	TLSStart  int
 	TLSLength int
 }

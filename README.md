@@ -12,7 +12,8 @@ Two TEE services split the TLS processing so neither has full access alone:
 
 Supporting:
 - `minitls/` -- Custom TLS 1.2/1.3 with split AEAD support
-- `oprfmpc/` -- MPC OPRF using garbled circuits with OT precomputation
+- `mpc/` -- Optimized MPC OPRF with half-gates and KOS OT extension
+- `oprfmpc/` -- Legacy MPC OPRF retained for differential tests
 - `shared/` -- GCP integrations (KMS, attestation, logging, cert management)
 - `proto/` -- Protocol buffer definitions
 - `providers/` -- HTTP request/response parsing and validation

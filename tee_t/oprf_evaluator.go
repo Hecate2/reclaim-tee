@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/reclaimprotocol/reclaim-tee/oprfmpc"
+	"github.com/reclaimprotocol/reclaim-tee/mpc"
 	teeproto "github.com/reclaimprotocol/reclaim-tee/proto"
 	"github.com/reclaimprotocol/reclaim-tee/shared"
 
@@ -41,8 +41,8 @@ func (t *TEET) handleOPRFOnlineFull(sessionID string, msg *teeproto.OPRFOnlineFu
 		}
 	}
 
-	if len(t.oprfKeyShare) == 0 {
-		return fmt.Errorf("OPRF key share not initialized")
+	if len(t.oprfKeyShare) != 16 {
+		return fmt.Errorf("OPRF key share length %d, want 16", len(t.oprfKeyShare))
 	}
 	total := int(msg.TotalRanges)
 	if total <= 0 {
@@ -92,7 +92,7 @@ func (t *TEET) handleOPRFOnlineFull(sessionID string, msg *teeproto.OPRFOnlineFu
 	ciphertext := teetState.ConsolidatedResponseCiphertext[start:end]
 
 	// Pad to 64 bytes
-	paddedCiphertext, err := oprfmpc.PadZeros64(ciphertext, int(msg.TlsLength))
+	paddedCiphertext, err := mpc.PadZeros64(ciphertext, int(msg.TlsLength))
 	if err != nil {
 		return fmt.Errorf("failed to pad ciphertext: %w", err)
 	}
@@ -102,30 +102,31 @@ func (t *TEET) handleOPRFOnlineFull(sessionID string, msg *teeproto.OPRFOnlineFu
 	copy(evaluatorInput[:64], paddedCiphertext[:])
 	copy(evaluatorInput[64:], teetState.OPRFKeyShare)
 
-	// Consume OT receiver entries from precomputed pool
-	otEntries, err := t.consumeOTReceiverEntries(int(msg.OtStartIndex), oprfmpc.OTsPerOPRF)
-	if err != nil {
-		return fmt.Errorf("failed to consume OT entries: %w", err)
-	}
-
-	otDone := time.Now()
-
 	// Deserialize online payload
-	payload, err := oprfmpc.DeserializeOnlinePayload(msg.GarbledTables)
+	payload, err := mpc.UnmarshalOnlinePayload(msg.GarbledTables)
 	if err != nil {
 		return fmt.Errorf("failed to deserialize online payload: %w", err)
 	}
 	if payload.SessionID != msg.GetOprfSessionId() {
 		return fmt.Errorf("OPRF round 1 session mismatch for range %d", rangeIndex)
 	}
-	if payload.OTStartIndex != int(msg.GetOtStartIndex()) {
+	if payload.OTStartIndex != uint64(msg.GetOtStartIndex()) {
 		return fmt.Errorf("OPRF OT start index mismatch: payload=%d message=%d",
 			payload.OTStartIndex, msg.GetOtStartIndex())
 	}
 
 	deserializePayloadDone := time.Now()
 
-	evaluatorSession, corrections, err := oprfmpc.CMACEvaluatorPrepare(payload, evaluatorInput, otEntries)
+	// Consume the single-use OTs only after the complete payload and its
+	// duplicated metadata pass validation.
+	otEntries, err := t.consumeOTReceiverEntries(uint64(msg.OtStartIndex), mpc.OTsPerOPRF)
+	if err != nil {
+		return fmt.Errorf("failed to consume OT entries: %w", err)
+	}
+
+	otDone := time.Now()
+
+	evaluatorSession, corrections, err := mpc.EvaluatorPrepare(payload, evaluatorInput, otEntries)
 	if err != nil {
 		return fmt.Errorf("failed to prepare evaluator OT corrections: %w", err)
 	}
@@ -136,7 +137,7 @@ func (t *TEET) handleOPRFOnlineFull(sessionID string, msg *teeproto.OPRFOnlineFu
 	}); err != nil {
 		return err
 	}
-	serializedCorrections, err := oprfmpc.SerializeChoiceCorrections(corrections)
+	serializedCorrections, err := mpc.MarshalChoiceCorrections(corrections)
 	if err != nil {
 		return fmt.Errorf("failed to serialize choice corrections: %w", err)
 	}
@@ -154,9 +155,9 @@ func (t *TEET) handleOPRFOnlineFull(sessionID string, msg *teeproto.OPRFOnlineFu
 
 	t.logger.WithSession(sessionID).Info("OPRF timing: round 1 prepared",
 		zap.Int("range_index", rangeIndex),
-		zap.Int64("ot_consume_ms", otDone.Sub(validationDone).Milliseconds()),
-		zap.Int64("deserialize_payload_ms", deserializePayloadDone.Sub(otDone).Milliseconds()),
-		zap.Int64("prepare_and_send_ms", preparedDone.Sub(deserializePayloadDone).Milliseconds()),
+		zap.Int64("deserialize_payload_ms", deserializePayloadDone.Sub(validationDone).Milliseconds()),
+		zap.Int64("ot_consume_ms", otDone.Sub(deserializePayloadDone).Milliseconds()),
+		zap.Int64("prepare_and_send_ms", preparedDone.Sub(otDone).Milliseconds()),
 		zap.Int64("total_ms", preparedDone.Sub(startTime).Milliseconds()))
 
 	return nil
@@ -186,13 +187,13 @@ func (t *TEET) handleOPRFMasks(sessionID string, msg *teeproto.OPRFMPCRound3) er
 		return fmt.Errorf("OPRF round 3 session mismatch for range %d", rangeIndex)
 	}
 
-	masks, err := oprfmpc.DeserializeOTMasks(msg.GetOtMasks())
+	masks, err := mpc.UnmarshalOTMasks(msg.GetOtMasks())
 	if err != nil {
 		return fmt.Errorf("failed to deserialize OT masks: %w", err)
 	}
 	deserializeDone := time.Now()
 
-	result, err := oprfmpc.CMACEvaluatorOnline(oprfmpc.Curve(), pending.Session, masks)
+	result, err := mpc.EvaluatorOnline(pending.Session, masks)
 	if err != nil {
 		return fmt.Errorf("CMACEvaluatorOnline failed: %w", err)
 	}
@@ -207,11 +208,15 @@ func (t *TEET) handleOPRFMasks(sessionID string, msg *teeproto.OPRFMPCRound3) er
 		HashOutput: hashOutput,
 	})
 
+	serializedOutputLabels, err := mpc.MarshalOutputLabels(result.OutputLabels)
+	if err != nil {
+		return fmt.Errorf("failed to serialize output labels: %w", err)
+	}
 	if err := t.sendOPRFMPCResultToTEEK(sessionID, &teeproto.OPRFMPCResult{
 		SessionId:     sessionID,
 		OprfSessionId: msg.OprfSessionId,
 		RangeIndex:    int32(rangeIndex),
-		OutputLabels:  oprfmpc.SerializeOutputLabels(result.OutputLabels),
+		OutputLabels:  serializedOutputLabels,
 	}); err != nil {
 		return err
 	}

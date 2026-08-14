@@ -19,7 +19,8 @@ import (
 )
 
 // MaxWebSocketMessageSize is the maximum allowed WebSocket message size (30 MB)
-// Sized for OT precomputation: 100,000 COSenderSetups at ~200 bytes each = ~20 MB
+// KOS precomputation for 100,000 OTs is about 1.7 MB; the larger limit also
+// covers online garbled-circuit messages and protocol overhead.
 const MaxWebSocketMessageSize = 30 * 1024 * 1024
 
 var teetUpgrader = websocket.Upgrader{

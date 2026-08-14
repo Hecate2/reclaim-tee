@@ -7,7 +7,7 @@ import (
 	"sync/atomic"
 
 	"github.com/reclaimprotocol/reclaim-tee/minitls"
-	"github.com/reclaimprotocol/reclaim-tee/oprfmpc"
+	"github.com/reclaimprotocol/reclaim-tee/mpc"
 	teeproto "github.com/reclaimprotocol/reclaim-tee/proto"
 	"github.com/reclaimprotocol/reclaim-tee/shared"
 
@@ -40,15 +40,15 @@ type TEEKSessionState struct {
 	responseTagSeqInit sync.Once
 
 	// MPC OPRF state with OT precomputation.
-	ConsolidatedKeystream []byte                                    // Keystream for response decryption
-	OPRFKeyShare          []byte                                    // 16-byte key share for MPC OPRF
-	GarblerOnlineSessions map[int]*oprfmpc.CMACGarblerOnlineSession // Per-range garbler sessions
-	OPRFRanges            []*teeproto.OPRFRangeSpec                 // Client-provided OPRF ranges
-	OPRFResults           map[int]*shared.OPRFResult                // Completed OPRF results by range index
-	OPRFState             atomic.Int32                              // Current OPRF processing state (shared.OPRFSessionState values)
-	OPRFExpectedCount     int                                       // Number of OPRF results expected
-	ClientRangesReceived  atomic.Bool                               // publishes OPRFRanges/OPRFKeyShare/GarblerOnlineSessions/OPRFResults
-	OPRFRangesSubmitted   atomic.Bool                               // one-shot: client submits ranges exactly once per session
+	ConsolidatedKeystream []byte                      // Keystream for response decryption
+	OPRFKeyShare          []byte                      // 16-byte key share for MPC OPRF
+	GarblerOnlineSessions map[int]*mpc.GarblerSession // Per-range garbler sessions
+	OPRFRanges            []*teeproto.OPRFRangeSpec   // Client-provided OPRF ranges
+	OPRFResults           map[int]*shared.OPRFResult  // Completed OPRF results by range index
+	OPRFState             atomic.Int32                // Current OPRF processing state (shared.OPRFSessionState values)
+	OPRFExpectedCount     int                         // Number of OPRF results expected
+	ClientRangesReceived  atomic.Bool                 // publishes OPRFRanges/OPRFKeyShare/GarblerOnlineSessions/OPRFResults
+	OPRFRangesSubmitted   atomic.Bool                 // one-shot: client submits ranges exactly once per session
 
 	// Per-session mutex for thread-safe access to OPRF state
 	// Must be held when accessing GarblerOnlineSessions, OPRFResults, or OPRFRanges
@@ -124,17 +124,17 @@ func (s *TEEKSessionState) UnlockOPRF() {
 }
 
 // SetGarblerOnlineSession safely sets a garbler session for the given range index
-func (s *TEEKSessionState) SetGarblerOnlineSession(rangeIdx int, session *oprfmpc.CMACGarblerOnlineSession) {
+func (s *TEEKSessionState) SetGarblerOnlineSession(rangeIdx int, session *mpc.GarblerSession) {
 	s.oprfMu.Lock()
 	defer s.oprfMu.Unlock()
 	if s.GarblerOnlineSessions == nil {
-		s.GarblerOnlineSessions = make(map[int]*oprfmpc.CMACGarblerOnlineSession)
+		s.GarblerOnlineSessions = make(map[int]*mpc.GarblerSession)
 	}
 	s.GarblerOnlineSessions[rangeIdx] = session
 }
 
 // GetGarblerOnlineSession safely retrieves a garbler session for the given range index
-func (s *TEEKSessionState) GetGarblerOnlineSession(rangeIdx int) (*oprfmpc.CMACGarblerOnlineSession, bool) {
+func (s *TEEKSessionState) GetGarblerOnlineSession(rangeIdx int) (*mpc.GarblerSession, bool) {
 	s.oprfMu.Lock()
 	defer s.oprfMu.Unlock()
 	session, ok := s.GarblerOnlineSessions[rangeIdx]

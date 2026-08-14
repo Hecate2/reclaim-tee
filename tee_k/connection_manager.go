@@ -8,7 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/reclaimprotocol/reclaim-tee/oprfmpc"
+	"github.com/reclaimprotocol/reclaim-tee/mpc"
 	teeproto "github.com/reclaimprotocol/reclaim-tee/proto"
 	"github.com/reclaimprotocol/reclaim-tee/shared"
 
@@ -206,7 +206,7 @@ func (cm *TEETConnectionManager) connectAndServe(onReady func()) error {
 		}
 	}
 	if !resumed {
-		if err := cm.teek.performOTPrecomputation(oprfmpc.OTPoolInitialSize, true); err != nil {
+		if err := cm.teek.performOTPrecomputation(mpc.OTPoolInitialSize, true); err != nil {
 			wsConn.Close()
 			<-handlerDone
 			cm.tearDownControl()
@@ -454,7 +454,8 @@ func (cm *TEETConnectionManager) handleControlMessages() {
 func (cm *TEETConnectionManager) handleControlMessage(msgBytes []byte) {
 	var env teeproto.Envelope
 	if err := proto.Unmarshal(msgBytes, &env); err != nil {
-		cm.logger.Error("Failed to parse control message", zap.Error(err))
+		cm.logger.Error("Failed to parse control message - closing connection", zap.Error(err))
+		cm.closeControlAfterProtocolError()
 		return
 	}
 
@@ -462,11 +463,13 @@ func (cm *TEETConnectionManager) handleControlMessage(msgBytes []byte) {
 	case *teeproto.Envelope_OtPrecomputeResponse:
 		if err := cm.teek.handleOTPrecomputeResponse(p.OtPrecomputeResponse); err != nil {
 			cm.logger.Error("OT precompute response failed", zap.Error(err))
+			cm.closeControlAfterProtocolError()
 		}
 
 	case *teeproto.Envelope_OtResumeResponse:
 		if err := cm.teek.handleOTResumeResponse(p.OtResumeResponse); err != nil {
 			cm.logger.Error("OT resume response failed", zap.Error(err))
+			cm.closeControlAfterProtocolError()
 		}
 
 	case *teeproto.Envelope_SessionCreatedAck:
@@ -491,6 +494,15 @@ func (cm *TEETConnectionManager) handleControlMessage(msgBytes []byte) {
 
 	default:
 		cm.logger.Warn("Unexpected message type on control connection", zap.String("type", fmt.Sprintf("%T", p)))
+	}
+}
+
+func (cm *TEETConnectionManager) closeControlAfterProtocolError() {
+	cm.mu.RLock()
+	conn := cm.controlConn
+	cm.mu.RUnlock()
+	if conn != nil {
+		_ = conn.Close()
 	}
 }
 

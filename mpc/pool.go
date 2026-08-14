@@ -1,0 +1,263 @@
+package mpc
+
+import (
+	"errors"
+	"fmt"
+	"sync"
+)
+
+const (
+	OTPoolInitialSize = 100_000
+	OTPoolExtendSize  = 50_000
+	OTPoolWatermark   = 50_000
+	OTsPerOPRF        = InputBits
+)
+
+// SenderPool is the garbler's compact, append-only random-OT pool.
+type SenderPool struct {
+	mu            sync.Mutex
+	entries       []SenderOT
+	baseIndex     uint64
+	nextIndex     uint64
+	extendPending bool
+}
+
+func NewSenderPool(capacity int) *SenderPool {
+	return &SenderPool{entries: make([]SenderOT, 0, capacity)}
+}
+
+// Add appends a verified extension batch. Indices must continue the pool.
+func (p *SenderPool) Add(entries []SenderOT) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	start := p.baseIndex + uint64(len(p.entries))
+	if err := validateSenderOTIndices(entries, start); err != nil {
+		return err
+	}
+	p.entries = append(p.entries, entries...)
+	return nil
+}
+
+// Reserve atomically consumes the next count sender entries.
+func (p *SenderPool) Reserve(count int) (uint64, []SenderOT, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if count <= 0 {
+		return 0, nil, fmt.Errorf("mpc: invalid OT reservation count %d", count)
+	}
+	if p.nextIndex < p.baseIndex {
+		return 0, nil, errors.New("mpc: invalid sender pool index state")
+	}
+	end := p.nextIndex + uint64(count)
+	total := p.baseIndex + uint64(len(p.entries))
+	if end < p.nextIndex || end > total {
+		return 0, nil, fmt.Errorf("mpc: insufficient sender OTs: need %d, available %d", count, total-p.nextIndex)
+	}
+	start := p.nextIndex
+	offset := start - p.baseIndex
+	result := append([]SenderOT(nil), p.entries[offset:offset+uint64(count)]...)
+	clear(p.entries[offset : offset+uint64(count)])
+	p.nextIndex = end
+	p.compactConsumed()
+	return start, result, nil
+}
+
+func (p *SenderPool) Clear() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	clear(p.entries)
+	p.entries = p.entries[:0]
+	p.baseIndex = 0
+	p.nextIndex = 0
+	p.extendPending = false
+}
+
+func (p *SenderPool) Available() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return int(p.baseIndex + uint64(len(p.entries)) - p.nextIndex)
+}
+
+func (p *SenderPool) TotalCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return int(p.baseIndex + uint64(len(p.entries)))
+}
+
+func (p *SenderPool) NextIndex() uint64 {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.nextIndex
+}
+
+func (p *SenderPool) NeedsExtend() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return int(p.baseIndex+uint64(len(p.entries))-p.nextIndex) < OTPoolWatermark && !p.extendPending
+}
+
+func (p *SenderPool) IsExtendPending() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.extendPending
+}
+
+func (p *SenderPool) SetExtendPending(pending bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.extendPending = pending
+}
+
+func (p *SenderPool) compactConsumed() {
+	consumed := p.nextIndex - p.baseIndex
+	if consumed < OTPoolWatermark && consumed < uint64(len(p.entries))/2 {
+		return
+	}
+	remaining := copy(p.entries, p.entries[consumed:])
+	clear(p.entries[remaining:])
+	p.entries = p.entries[:remaining]
+	p.baseIndex = p.nextIndex
+}
+
+// ReceiverPool is the evaluator's matching compact random-OT pool. It accepts
+// disjoint ranges in any order because online sessions use separate
+// connections. The used slice rejects replays and partial overlaps.
+type ReceiverPool struct {
+	mu             sync.Mutex
+	entries        []ReceiverOT
+	used           []bool
+	baseIndex      uint64
+	highWater      uint64
+	availableCount int
+}
+
+func NewReceiverPool(capacity int) *ReceiverPool {
+	return &ReceiverPool{entries: make([]ReceiverOT, 0, capacity)}
+}
+
+func (p *ReceiverPool) Add(entries []ReceiverOT) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	start := p.baseIndex + uint64(len(p.entries))
+	if err := validateReceiverOTIndices(entries, start); err != nil {
+		return err
+	}
+	p.entries = append(p.entries, entries...)
+	p.used = append(p.used, make([]bool, len(entries))...)
+	p.availableCount += len(entries)
+	return nil
+}
+
+// Consume returns one unused absolute range. It accepts out-of-order ranges
+// and validates the complete range before it changes the pool.
+func (p *ReceiverPool) Consume(start uint64, count int) ([]ReceiverOT, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if count <= 0 {
+		return nil, fmt.Errorf("mpc: invalid OT consume count %d", count)
+	}
+	if start < p.baseIndex {
+		return nil, fmt.Errorf("mpc: receiver OT range starts before retained index %d", p.baseIndex)
+	}
+	end := start + uint64(count)
+	total := p.baseIndex + uint64(len(p.entries))
+	if end < start || end > total {
+		return nil, fmt.Errorf("mpc: insufficient receiver OTs: need through %d, total %d", end, total)
+	}
+	offset := start - p.baseIndex
+	for i := offset; i < offset+uint64(count); i++ {
+		if p.used[i] {
+			return nil, fmt.Errorf("mpc: receiver OT index %d already used", p.baseIndex+i)
+		}
+	}
+	result := append([]ReceiverOT(nil), p.entries[offset:offset+uint64(count)]...)
+	for i := offset; i < offset+uint64(count); i++ {
+		p.used[i] = true
+	}
+	clear(p.entries[offset : offset+uint64(count)])
+	p.availableCount -= count
+	if end > p.highWater {
+		p.highWater = end
+	}
+	p.compactConsumed()
+	return result, nil
+}
+
+// AdvanceTo discards every entry below the sender's reservation frontier after
+// a reconnect. It rejects a frontier below any range already consumed here.
+func (p *ReceiverPool) AdvanceTo(next uint64) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	total := p.baseIndex + uint64(len(p.entries))
+	if next < p.highWater || next > total {
+		return fmt.Errorf("mpc: receiver OT resume index %d outside [%d,%d]", next, p.highWater, total)
+	}
+	end := next - p.baseIndex
+	for i := uint64(0); i < end; i++ {
+		if !p.used[i] {
+			p.used[i] = true
+			p.availableCount--
+		}
+	}
+	clear(p.entries[:end])
+	p.highWater = next
+	p.compactConsumed()
+	return nil
+}
+
+func (p *ReceiverPool) Clear() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	clear(p.entries)
+	p.entries = p.entries[:0]
+	clear(p.used)
+	p.used = p.used[:0]
+	p.baseIndex = 0
+	p.highWater = 0
+	p.availableCount = 0
+}
+
+func (p *ReceiverPool) Available() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.availableCount
+}
+
+func (p *ReceiverPool) TotalCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return int(p.baseIndex + uint64(len(p.entries)))
+}
+
+func (p *ReceiverPool) NextIndex() uint64 {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.highWater
+}
+
+func (p *ReceiverPool) compactConsumed() {
+	consumed := 0
+	for consumed < len(p.used) && p.used[consumed] {
+		consumed++
+	}
+	if consumed < OTPoolWatermark && consumed < len(p.entries)/2 {
+		return
+	}
+	remaining := copy(p.entries, p.entries[consumed:])
+	clear(p.entries[remaining:])
+	p.entries = p.entries[:remaining]
+	copy(p.used, p.used[consumed:])
+	clear(p.used[remaining:])
+	p.used = p.used[:remaining]
+	p.baseIndex += uint64(consumed)
+}
+
+func ValidatePoolAgreement(sender *SenderPool, receiver *ReceiverPool) error {
+	if sender == nil || receiver == nil {
+		return errors.New("mpc: nil OT pool")
+	}
+	if sender.TotalCount() != receiver.TotalCount() || sender.NextIndex() != receiver.NextIndex() {
+		return errors.New("mpc: sender and receiver OT pools disagree")
+	}
+	return nil
+}

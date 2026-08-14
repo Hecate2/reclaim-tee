@@ -728,7 +728,7 @@ type Envelope_OtPrecomputeResponse struct {
 }
 
 type Envelope_OtPrecomputeComplete struct {
-	OtPrecomputeComplete *OTPrecomputeComplete `protobuf:"bytes,66,opt,name=ot_precompute_complete,json=otPrecomputeComplete,proto3,oneof"` // TEE_K -> TEE_T (after initial setup only)
+	OtPrecomputeComplete *OTPrecomputeComplete `protobuf:"bytes,66,opt,name=ot_precompute_complete,json=otPrecomputeComplete,proto3,oneof"` // TEE_K -> TEE_T after each verified KOS batch
 }
 
 type Envelope_OprfOnlineFull struct {
@@ -2702,9 +2702,9 @@ func (x *CiphertextReady) GetTotalLength() int32 {
 type OTPrecomputeRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Count         uint32                 `protobuf:"varint,1,opt,name=count,proto3" json:"count,omitempty"`                                       // Number of OTs to precompute
-	OtSenderSetup []byte                 `protobuf:"bytes,2,opt,name=ot_sender_setup,json=otSenderSetup,proto3" json:"ot_sender_setup,omitempty"` // Serialized bulk COSenderSetup for all OTs
+	OtSenderSetup []byte                 `protobuf:"bytes,2,opt,name=ot_sender_setup,json=otSenderSetup,proto3" json:"ot_sender_setup,omitempty"` // Phase-framed KOS begin or 128 base-OT choices
 	IsInitial     bool                   `protobuf:"varint,3,opt,name=is_initial,json=isInitial,proto3" json:"is_initial,omitempty"`              // True for initial setup, false for extension
-	Epoch         string                 `protobuf:"bytes,4,opt,name=epoch,proto3" json:"epoch,omitempty"`                                        // Pool identity (UUID); set on initial setup so TEE_T can later resume it
+	Epoch         string                 `protobuf:"bytes,4,opt,name=epoch,proto3" json:"epoch,omitempty"`                                        // Pool synchronization token; rotates after every committed batch
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2771,7 +2771,7 @@ func (x *OTPrecomputeRequest) GetEpoch() string {
 // reconnect and asks TEE_T to keep using it instead of re-precomputing.
 type OTResumeRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	Epoch         string                 `protobuf:"bytes,1,opt,name=epoch,proto3" json:"epoch,omitempty"`                           // Pool identity TEE_K is resuming
+	Epoch         string                 `protobuf:"bytes,1,opt,name=epoch,proto3" json:"epoch,omitempty"`                           // Pool synchronization token TEE_K is resuming
 	NextIndex     uint32                 `protobuf:"varint,2,opt,name=next_index,json=nextIndex,proto3" json:"next_index,omitempty"` // TEE_K's next unreserved pool index (consistency check)
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -2868,7 +2868,7 @@ func (x *OTResumeResponse) GetAccepted() bool {
 type OTPrecomputeResponse struct {
 	state          protoimpl.MessageState `protogen:"open.v1"`
 	Count          uint32                 `protobuf:"varint,1,opt,name=count,proto3" json:"count,omitempty"`                                          // Number of OTs responded
-	OtReceiverData []byte                 `protobuf:"bytes,2,opt,name=ot_receiver_data,json=otReceiverData,proto3" json:"ot_receiver_data,omitempty"` // Serialized bulk receiver data for all OTs
+	OtReceiverData []byte                 `protobuf:"bytes,2,opt,name=ot_receiver_data,json=otReceiverData,proto3" json:"ot_receiver_data,omitempty"` // Phase-framed base-OT setup or verified KOS batch data
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
 }
@@ -2919,7 +2919,7 @@ func (x *OTPrecomputeResponse) GetOtReceiverData() []byte {
 
 type OTPrecomputeComplete struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	PoolSize      uint32                 `protobuf:"varint,1,opt,name=pool_size,json=poolSize,proto3" json:"pool_size,omitempty"` // Total OTs now available (sent after initial setup only)
+	PoolSize      uint32                 `protobuf:"varint,1,opt,name=pool_size,json=poolSize,proto3" json:"pool_size,omitempty"` // Total OTs generated after committing this batch
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }

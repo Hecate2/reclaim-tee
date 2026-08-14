@@ -394,18 +394,21 @@ func (cm *TEEKConnectionManager) handleControlMessages(conn *shared.WSConnection
 			// OT precomputation request
 			if err := cm.teet.handleOTPrecomputeRequest(conn, p.OtPrecomputeRequest); err != nil {
 				cm.logger.Error("Failed to handle OT precompute request", zap.Error(err))
+				return
 			}
 
 		case *teeproto.Envelope_OtPrecomputeComplete:
 			// OT precomputation complete acknowledgment
 			if err := cm.teet.handleOTPrecomputeComplete(p.OtPrecomputeComplete); err != nil {
 				cm.logger.Error("Failed to handle OT precompute complete", zap.Error(err))
+				return
 			}
 
 		case *teeproto.Envelope_OtResumeRequest:
 			// TEE_K asks to resume the retained pool instead of re-precomputing.
 			if err := cm.teet.handleOTResumeRequest(conn, p.OtResumeRequest); err != nil {
 				cm.logger.Error("Failed to handle OT resume request", zap.Error(err))
+				return
 			}
 
 		case *teeproto.Envelope_Error:

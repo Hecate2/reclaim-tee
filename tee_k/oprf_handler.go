@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/reclaimprotocol/reclaim-tee/oprfmpc"
+	"github.com/reclaimprotocol/reclaim-tee/mpc"
 	teeproto "github.com/reclaimprotocol/reclaim-tee/proto"
 	"github.com/reclaimprotocol/reclaim-tee/shared"
 
@@ -39,15 +39,15 @@ func (t *TEEK) handleOPRFRangesFromClient(sessionID string, msg *teeproto.OPRFRa
 	}
 
 	// Use persistent OPRF key share from TEEK instance
-	if len(t.oprfKeyShare) == 0 {
-		return fmt.Errorf("OPRF key share not initialized")
+	if len(t.oprfKeyShare) != 16 {
+		return fmt.Errorf("OPRF key share length %d, want 16", len(t.oprfKeyShare))
 	}
 
 	// Initialize OPRF state. All non-atomic writes precede the publish.
 	teekState.OPRFRanges = msg.GetRanges()
 	teekState.OPRFState.Store(int32(shared.OPRFStateInProgress))
 	teekState.OPRFExpectedCount = len(msg.GetRanges())
-	teekState.GarblerOnlineSessions = make(map[int]*oprfmpc.CMACGarblerOnlineSession)
+	teekState.GarblerOnlineSessions = make(map[int]*mpc.GarblerSession)
 	teekState.OPRFResults = make(map[int]*shared.OPRFResult)
 	teekState.OPRFKeyShare = t.oprfKeyShare
 	teekState.ClientRangesReceived.Store(true)
@@ -105,7 +105,7 @@ func (t *TEEK) processQueuedOPRFRanges(sessionID string, teekState *TEEKSessionS
 // random OT. The evaluator returns its choice corrections in round 2.
 func (t *TEEK) initiateOPRFForRange(sessionID string, teekState *TEEKSessionState, rangeIndex int, r *teeproto.OPRFRangeSpec) error {
 	// Reserve OT entries from the precomputed pool
-	startIdx, otEntries, err := t.reserveOTEntries(oprfmpc.OTsPerOPRF)
+	startIdx, otEntries, err := t.reserveOTEntries(mpc.OTsPerOPRF)
 	if err != nil {
 		return fmt.Errorf("failed to reserve OT entries: %w", err)
 	}
@@ -113,7 +113,7 @@ func (t *TEEK) initiateOPRFForRange(sessionID string, teekState *TEEKSessionStat
 	// Extract keystream for range and build garbler input
 	start := int(r.TlsStart)
 	keystream := teekState.ConsolidatedKeystream[start : start+int(r.TlsLength)]
-	paddedKeystream, err := oprfmpc.PadZeros64(keystream, int(r.TlsLength))
+	paddedKeystream, err := mpc.PadZeros64(keystream, int(r.TlsLength))
 	if err != nil {
 		return fmt.Errorf("failed to pad keystream: %w", err)
 	}
@@ -122,13 +122,13 @@ func (t *TEEK) initiateOPRFForRange(sessionID string, teekState *TEEKSessionStat
 	copy(garblerInput[:64], paddedKeystream[:])
 	copy(garblerInput[64:], teekState.OPRFKeyShare)
 
-	// Generate online payload using precomputed OT
-	// Use the curve from OT precomputation state
-	curve := oprfmpc.Curve()
-	payload, garblerSession, err := oprfmpc.CMACGarblerOnline(rand.Reader, curve, garblerInput, otEntries, startIdx)
+	// Generate the online payload from compact precomputed random OTs. The
+	// online path performs no elliptic-curve operations.
+	payload, garblerSession, err := mpc.GarblerOnline(rand.Reader, garblerInput, otEntries, startIdx)
 	if err != nil {
 		return fmt.Errorf("CMACGarblerOnline failed: %w", err)
 	}
+	defer payload.Release()
 
 	// Store garbler session for output verification later
 	teekState.SetGarblerOnlineSession(rangeIndex, garblerSession)
@@ -139,12 +139,14 @@ func (t *TEEK) initiateOPRFForRange(sessionID string, teekState *TEEKSessionStat
 		return fmt.Errorf("failed to compute TLS session hash: %w", err)
 	}
 
-	serializedPayload := oprfmpc.SerializeOnlinePayload(payload)
-	payload.Release()
+	serializedPayload, err := mpc.MarshalOnlinePayload(payload)
+	if err != nil {
+		return fmt.Errorf("failed to serialize online payload: %w", err)
+	}
 
 	t.logger.WithSession(sessionID).Debug("Sending OPRF online full",
 		zap.Int("range", rangeIndex),
-		zap.Int("ot_start_index", startIdx))
+		zap.Uint64("ot_start_index", startIdx))
 
 	// Send OPRFOnlineFull to TEE_T
 	return t.sendOPRFOnlineFullToTEET(sessionID, &teeproto.OPRFOnlineFull{
@@ -185,19 +187,23 @@ func (t *TEEK) handleOPRFChoiceCorrections(sessionID string, msg *teeproto.OPRFM
 		return fmt.Errorf("OPRF round 2 session mismatch for range %d", rangeIndex)
 	}
 
-	corrections, err := oprfmpc.DeserializeChoiceCorrections(msg.GetChoiceCorrections())
+	corrections, err := mpc.UnmarshalChoiceCorrections(msg.GetChoiceCorrections())
 	if err != nil {
 		return fmt.Errorf("failed to deserialize choice corrections: %w", err)
 	}
-	masks, err := oprfmpc.CMACGarblerApplyCorrections(garblerSession, corrections)
+	masks, err := mpc.ApplyCorrections(garblerSession, corrections)
 	if err != nil {
 		return fmt.Errorf("failed to apply choice corrections: %w", err)
 	}
 
+	serializedMasks, err := mpc.MarshalOTMasks(masks)
+	if err != nil {
+		return fmt.Errorf("failed to serialize OT masks: %w", err)
+	}
 	return t.sendOPRFMasksToTEET(sessionID, &teeproto.OPRFMPCRound3{
 		SessionId:     sessionID,
 		OprfSessionId: garblerSession.SessionID,
-		OtMasks:       oprfmpc.SerializeOTMasks(masks),
+		OtMasks:       serializedMasks,
 		RangeIndex:    int32(rangeIndex),
 	})
 }
@@ -228,7 +234,7 @@ func (t *TEEK) handleOPRFResult(sessionID string, msg *teeproto.OPRFMPCResult) e
 	}
 
 	// Deserialize output labels
-	outputLabels, err := oprfmpc.DeserializeOutputLabels(msg.GetOutputLabels())
+	outputLabels, err := mpc.UnmarshalOutputLabels(msg.GetOutputLabels())
 	if err != nil {
 		return fmt.Errorf("failed to deserialize output labels: %w", err)
 	}
@@ -237,7 +243,7 @@ func (t *TEEK) handleOPRFResult(sessionID string, msg *teeproto.OPRFMPCResult) e
 	// ignore msg.CmacOutput/msg.HashOutput — a compromised TEE_T could send
 	// any bytes there. The labels are the only thing we cryptographically
 	// verified, so they're the only thing we trust.
-	cmacOutput, err := oprfmpc.CMACGarblerVerifyOutput(garblerSession, outputLabels)
+	cmacOutput, err := mpc.VerifyOutput(garblerSession, outputLabels)
 	if err != nil {
 		return fmt.Errorf("CRITICAL: output label verification failed - possible attack: %w", err)
 	}

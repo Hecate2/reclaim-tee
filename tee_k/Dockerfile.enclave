@@ -7,7 +7,7 @@ WORKDIR /app
 # Copy shared dependencies first
 COPY --chown=0:0 shared/ /app/shared/
 COPY --chown=0:0 minitls/ /app/minitls/
-COPY --chown=0:0 oprfmpc/ /app/oprfmpc/
+COPY --chown=0:0 mpc/ /app/mpc/
 COPY --chown=0:0 proto/*.go /app/proto/
 
 # Copy TEE_K source files

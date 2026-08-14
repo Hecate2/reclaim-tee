@@ -4,7 +4,7 @@
 
 The MPC OPRF computes AES-CMAC on XOR-shared data and an XOR-shared key.
 
-TEE_K has a TLS keystream share and a 16-byte key share. TEE_T has a ciphertext share and another 16-byte key share.
+TEE_K has a TLS keystream share and a 16-byte key share. TEE_T has a ciphertext share and another key share.
 
 The circuit computes these values:
 
@@ -14,147 +14,222 @@ key       = key_share_K XOR key_share_T
 output    = AES-CMAC(key, plaintext)
 ```
 
-The plaintext and the combined key do not leave the circuit. Both TEEs learn the 16-byte CMAC output.
+The plaintext and combined key do not leave the circuit. Both TEEs learn the 16-byte CMAC output.
+
+The caller zero-pads each range to 64 bytes. The circuit processes four complete CMAC blocks.
 
 ## Roles
 
-- TEE_K is the garbler and the random-OT sender.
-- TEE_T is the evaluator and the random-OT receiver.
+- TEE_K is the garbler and random OT sender.
+
+- TEE_T is the evaluator and random OT receiver.
+
 - The client sends each OPRF range to TEE_K.
-- TEE_K sends the authoritative range data to TEE_T in `OPRFOnlineFull`.
 
-The TEEs use a mutually attested connection. Each application session uses a separate WebSocket connection between the TEEs.
+- TEE_K sends the authoritative range data to TEE_T.
 
-## OT Precomputation
+The TEEs use a mutually attested connection. Each application session uses a separate WebSocket connection.
 
-TEE_K creates P-256 Chou-Orlandi sender setups. TEE_T creates one cryptographically random choice `d` for each setup.
+## Circuit
 
-Each side stores its half of the random OT. The initial pool contains 100,000 entries. One OPRF consumes 640 entries.
+The package compiles the legacy AES-CMAC MPCL source once. It converts the result into a flat execution plan.
 
-Both pools mark entries as used before the online computation. A second use returns an error and terminates the application session.
+The circuit has 184,496 gates. It contains 32,007 AND gates and has nonlinear depth 240.
 
-## Online Protocol
+Free-XOR handles XOR and XNOR gates. Half-gates use two labels for each AND gate.
+
+The amd64 path hashes four labels in one AES-NI assembly call. Portable targets use standard-library AES.
+
+## OT precomputation
+
+TEE_K starts each batch with a random 32-byte extension session identifier.
+
+TEE_T creates one P-256 Chou-Orlandi sender setup. It owns 128 random seed pairs.
+
+TEE_K selects one seed from each pair. Its 128 selection bits form the KOS correlation value.
+
+TEE_T expands both seed sets and creates the IKNP matrix correction. It also creates the KOS consistency proof.
+
+TEE_K expands its selected seeds and verifies the proof. It rejects the complete batch after any proof failure.
+
+TEE_K sends a commit message after successful verification. TEE_T commits its pending receiver entries after this message.
+
+The initial batch contains 100,000 entries. One OPRF consumes 640 entries.
+
+The following flow uses the existing protobuf byte fields:
+
+```text
+TEE_K                                             TEE_T
+  |                                                  |
+  |-- KOB1: batch session, start, count ------------>|
+  |                                                  |
+  |<-- BOS1: P-256 base-OT sender point -------------|
+  |                                                  |
+  |-- BOC1: 128 base-OT choice points -------------->|
+  |                                                  |
+  |<-- KOF1: base ciphertexts, IKNP matrix, proof ---|
+  |                                                  |
+  |-- OTPrecomputeComplete: generated total -------->|
+  |                                                  |
+```
+
+Both sides derive a new pool token from the committed extension session. A lost commit message makes resume fail closed.
+
+## Pool rules
+
+TEE_K reserves increasing absolute ranges. It sends each starting index in the first online message.
+
+Different application sessions use different connections. Their messages can reach TEE_T in a different order.
+
+TEE_T therefore accepts disjoint unused ranges in any order. It rejects a replay or any partial overlap.
+
+Both pools return owned copies to online sessions. Disconnect cleanup cannot change a range after reservation.
+
+Both pools clear consumed secrets. They compact only a contiguous consumed prefix.
+
+On reconnect, TEE_K sends its reservation frontier and pool token. TEE_T rejects a rewind, overflow, or token mismatch.
+
+TEE_T clears every unused entry below an accepted sender frontier. This step closes gaps from interrupted sessions.
+
+## Online protocol
 
 The online protocol uses four messages for each OPRF range:
 
 ```text
-TEE_K                                              TEE_T
-  |                                                   |
-  |-- OPRFOnlineFull: circuit and translations ------>|
-  |                                                   |
-  |<-- OPRFMPCRound2: choice corrections -------------|
-  |                                                   |
-  |-- OPRFMPCRound3: corrected OT masks ------------->|
-  |                                                   |
-  |<-- OPRFMPCResult: evaluated output labels --------|
-  |                                                   |
+TEE_K                                             TEE_T
+  |                                                  |
+  |-- OPRFOnlineFull: circuit and translations ----->|
+  |                                                  |
+  |<-- OPRFMPCRound2: choice corrections ------------|
+  |                                                  |
+  |-- OPRFMPCRound3: corrected OT masks ------------>|
+  |                                                  |
+  |<-- OPRFMPCResult: evaluated output labels -------|
+  |                                                  |
 ```
 
-### Message 1: Circuit
+### Message 1
 
-TEE_K garbles the AES-CMAC circuit. It sends the garbled tables, its input labels, and one translation bit for each output wire.
+TEE_K garbles the AES-CMAC circuit. It sends tables, its input labels, and one translation bit for each output wire.
 
-TEE_K keeps both labels for each evaluator input wire. It also keeps both labels for each output wire.
+TEE_K keeps both labels for every evaluator input wire. It also keeps both output labels.
 
-TEE_K derives random-OT pads `R0` and `R1`. These pads stay in the garbler session until message 2 arrives.
+The `MPC1` payload has an exact size of 1,034,536 bytes.
 
-### Message 2: Choice Corrections
+### Message 2
 
-TEE_T converts its 80-byte input into 640 bits. For each bit `b`, TEE_T sends this correction:
+TEE_T converts its 80-byte input into 640 bits. It sends this correction for every bit:
 
 ```text
 c = d XOR b
 ```
 
-The random choice `d` is uniform, private, and single-use. Thus, the correction does not disclose `b` to TEE_K.
+The random choice `d` is uniform, private, and single-use. The correction does not disclose `b` to TEE_K.
 
-### Message 3: OT Masks
+### Message 3
 
-For `c=0`, TEE_K sends these masks:
+TEE_K sends two masks for every evaluator input wire.
+
+For `c=0`, it sends these masks:
 
 ```text
 M0 = L0 XOR R0
 M1 = L1 XOR R1
 ```
 
-For `c=1`, TEE_K swaps the pads:
+For `c=1`, it swaps the random OT pads:
 
 ```text
 M0 = L0 XOR R1
 M1 = L1 XOR R0
 ```
 
-TEE_T knows only `R_d`. It selects `M_b` and computes `L_b = M_b XOR R_d`.
+TEE_T knows only `R_d`. It selects `M_b` and recovers `L_b`.
 
-The message does not contain `R0 XOR R1`. Therefore, TEE_T cannot derive the other pad from the protocol transcript.
+The message never contains `R0 XOR R1`. TEE_T cannot derive the other pad from the transcript.
 
-### Message 4: Result
+### Message 4
 
-TEE_T evaluates the circuit with one label for each input wire. It decodes each output with the corresponding translation bit.
+TEE_T evaluates the circuit with one label for every input wire. It returns only the selected output labels.
 
-TEE_T returns only the evaluated output labels. It does not send a trusted CMAC value or hash value.
+TEE_K compares each label with its local pair. It derives the CMAC only from valid labels.
 
-TEE_K compares each returned label with its two local output labels. TEE_K derives the CMAC only from labels that match.
+## Message definitions
 
-## Output Translation
+The protocol uses these existing messages from `proto/transport.proto`:
 
-The garbling library uses a global Free-XOR offset. A complete output-label pair discloses that offset.
+- `OTPrecomputeRequest` carries the KOS begin message or base-OT choices.
 
-`OPRFOnlineFull` contains one `L0` permutation bit for each output wire. It never contains complete output-label pairs.
+- `OTPrecomputeResponse` carries the base setup or final KOS data.
 
-The permutation bit lets TEE_T decode the output. It does not disclose the 128-bit Free-XOR offset.
+- `OTPrecomputeComplete` commits one verified extension batch.
 
-## Message Definitions
+- `OTResumeRequest` and `OTResumeResponse` synchronize a retained pool.
 
-The protocol uses these messages from `proto/transport.proto`:
+- `OPRFOnlineFull` carries the circuit, range, OT index, TLS hash, and OPRF session identifier.
 
-- `OPRFOnlineFull` carries the circuit payload, range data, OT index, TLS session hash, and OPRF session ID.
-- `OPRFMPCRound2` carries 640 packed correction bits. The encoded value is exactly 80 bytes.
-- `OPRFMPCRound3` carries 640 pairs of 16-byte OT masks.
+- `OPRFMPCRound2` carries exactly 80 bytes of packed corrections.
+
+- `OPRFMPCRound3` carries 640 pairs of 16-byte masks.
+
 - `OPRFMPCResult` carries 128 evaluated output labels.
 
-The protobuf keeps fields 8, 9, and 11 of `OPRFOnlineFull` reserved. These fields previously carried unsafe or obsolete values.
+Fields 8, 9, and 11 of `OPRFOnlineFull` remain reserved. They previously carried unsafe or obsolete values.
 
-## Replay and State Protection
+## Replay and failure handling
 
-TEE_K creates a random OPRF session ID for each garbled circuit. Every online message carries this ID and the range index.
+TEE_K creates a random OPRF session identifier for each circuit. Every online message carries it and the range index.
 
-Both handlers compare the envelope session ID, the OPRF session ID, and the range index. A mismatch terminates the session.
+Both handlers validate the envelope session, OPRF session, and range. A mismatch terminates the application session.
 
-TEE_K applies choice corrections once. TEE_T evaluates each prepared session once. TEE_K accepts one output result for each session.
+TEE_K applies corrections once. TEE_T evaluates once. TEE_K accepts one output result.
 
-TEE_K also sends a TLS session hash. TEE_T stores the first hash and compares all later hashes in the same application session.
+TEE_T validates the complete online payload before it consumes random OTs.
+
+Any disconnect aborts an active precomputation waiter. A committed pool remains available only through a successful resume exchange.
+
+## Security scope
+
+The protocol relies on mutual attestation for the expected TEE code. It does not use cut-and-choose against a malicious garbler.
+
+The KOS proof checks receiver consistency during OT extension. Chou-Orlandi supplies the 128 base OTs.
+
+The output-label check prevents the evaluator from substituting arbitrary output bytes.
+
+The fixed-key half-gate hash uses a public AES-128 key. This key is independent from the secret global offset.
+
+The hash applies invertible GF(2^128) doubling. Tests reject the legacy truncating-shift collision.
+
+Any OPRF error terminates the application session. A failed state cannot produce a signed session result.
 
 ## Implementation
 
-The main package functions are:
+The `mpc` package owns the circuit, OT extension, pool, serializers, and CPU-specific helpers.
 
-- `CMACGarblerOnline` creates the garbled circuit and stores random-OT pads.
-- `CMACEvaluatorPrepare` creates the correction bits and stores evaluator state.
-- `CMACGarblerApplyCorrections` creates correction-aware OT masks.
-- `CMACEvaluatorOnline` evaluates the circuit and returns output labels.
-- `CMACGarblerVerifyOutput` compares output labels and derives the CMAC.
+TEE_K routes online messages in `tee_k/oprf_handler.go`. It routes precomputation in `tee_k/ot_precompute.go`.
 
-TEE_K routes these messages in `tee_k/oprf_handler.go`. TEE_T routes them in `tee_t/oprf_evaluator.go`.
+TEE_T routes online messages in `tee_t/oprf_evaluator.go`. It routes precomputation in `tee_t/ot_precompute.go`.
 
-## Security Scope
-
-The protocol relies on mutual attestation for the expected TEE code. It does not use cut-and-choose to protect against a malicious garbler.
-
-The random-OT conversion relies on the privacy of the Chou-Orlandi choice. It also relies on cryptographically random, single-use receiver choices.
-
-The garbled-circuit verification stops an evaluator from substituting arbitrary output bytes. It does not make an invalid TEE measurement trustworthy.
-
-Any OPRF protocol error terminates the application session. A failed OPRF state cannot produce a signed session result.
+See [mpc/README.md](../mpc/README.md) for benchmarks, alternative protocols, and the SEV-SNP deployment gate.
 
 ## Tests
 
-The `oprfmpc` tests cover these properties:
+The tests cover these properties:
 
-- All four combinations of `d` and `b` recover the selected label.
-- The corrected transcript does not decrypt the unselected mask with `R_d`.
-- A regression test reproduces the removed `R0 XOR R1` disclosure.
-- The circuit output matches NIST AES-CMAC vectors.
+- The new circuit matches the legacy circuit and direct AES-CMAC.
+
 - Modified output labels fail verification.
-- Correction, evaluation, and output sessions reject reuse.
-- Serialization rejects incorrect lengths and trailing data.
+
+- Correction, evaluation, output, and base-OT states reject reuse.
+
+- KOS rejects matrix, proof, session, and index changes.
+
+- Pools reject replay and overlap while accepting out-of-order ranges.
+
+- Resume rejects rewinds, overflow, and pool-token mismatch.
+
+- Assembly AES and PCLMUL results match their portable implementations.
+
+- The half-gate hash keeps every label bit through field doubling.
+
+- Serializers reject incorrect sizes, counts, versions, and trailing data.

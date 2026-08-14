@@ -3,21 +3,23 @@ package main
 import (
 	"testing"
 
-	"github.com/reclaimprotocol/reclaim-tee/oprfmpc"
+	"github.com/reclaimprotocol/reclaim-tee/mpc"
 )
 
 // poolWith returns a receiver pool holding n entries (TotalCount == n).
-func poolWith(n int) *oprfmpc.OTReceiverPool {
-	p := oprfmpc.NewOTReceiverPool(n)
-	entries := make([]*oprfmpc.OTReceiverEntry, n)
+func poolWith(n int) *mpc.ReceiverPool {
+	p := mpc.NewReceiverPool(n)
+	entries := make([]mpc.ReceiverOT, n)
 	for i := range entries {
-		entries[i] = &oprfmpc.OTReceiverEntry{}
+		entries[i].Index = uint64(i)
 	}
-	p.AddEntries(entries)
+	if err := p.Add(entries); err != nil {
+		panic(err)
+	}
 	return p
 }
 
-func TestCanResumeOTPool(t *testing.T) {
+func TestResumeOTPool(t *testing.T) {
 	const epoch = "epoch-abc"
 
 	cases := []struct {
@@ -28,11 +30,24 @@ func TestCanResumeOTPool(t *testing.T) {
 		want      bool
 	}{
 		{
-			name:      "accept: ready, matching epoch, index within pool",
+			name:      "accept: ready, matching epoch, sender ahead within pool",
 			state:     &OTReceiverState{pool: poolWith(100), ready: true, epoch: epoch},
 			reqEpoch:  epoch,
 			nextIndex: 40,
 			want:      true,
+		},
+		{
+			name: "deny: receiver ahead of sender",
+			state: func() *OTReceiverState {
+				pool := poolWith(100)
+				if _, err := pool.Consume(0, 50); err != nil {
+					panic(err)
+				}
+				return &OTReceiverState{pool: pool, ready: true, epoch: epoch}
+			}(),
+			reqEpoch:  epoch,
+			nextIndex: 40,
+			want:      false,
 		},
 		{
 			name:      "accept: nextIndex equals total (boundary)",
@@ -81,8 +96,12 @@ func TestCanResumeOTPool(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			teet := &TEET{otReceiverState: tc.state}
-			if got := teet.canResumeOTPool(tc.reqEpoch, tc.nextIndex); got != tc.want {
-				t.Fatalf("canResumeOTPool(%q, %d) = %v, want %v", tc.reqEpoch, tc.nextIndex, got, tc.want)
+			got := teet.resumeOTPool(tc.reqEpoch, tc.nextIndex)
+			if got != tc.want {
+				t.Fatalf("resumeOTPool(%q, %d) = %v, want %v", tc.reqEpoch, tc.nextIndex, got, tc.want)
+			}
+			if got && tc.state.pool.NextIndex() != uint64(tc.nextIndex) {
+				t.Fatalf("receiver next index %d, want %d", tc.state.pool.NextIndex(), tc.nextIndex)
 			}
 		})
 	}

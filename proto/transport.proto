@@ -72,7 +72,7 @@ message Envelope {
     // OT precomputation messages (TEE_K <-> TEE_T)
     OTPrecomputeRequest ot_precompute_request = 64;     // TEE_K -> TEE_T (init or extend)
     OTPrecomputeResponse ot_precompute_response = 65;   // TEE_T -> TEE_K
-    OTPrecomputeComplete ot_precompute_complete = 66;   // TEE_K -> TEE_T (after initial setup only)
+    OTPrecomputeComplete ot_precompute_complete = 66;   // TEE_K -> TEE_T after each verified KOS batch
     OPRFOnlineFull oprf_online_full = 67;               // TEE_K -> TEE_T (online round 1)
     OPRFMPCRound2 oprf_mpc_round2 = 73;                 // TEE_T -> TEE_K (choice corrections)
     OPRFMPCRound3 oprf_mpc_round3 = 74;                 // TEE_K -> TEE_T (corrected OT masks)
@@ -286,15 +286,15 @@ message CiphertextReady {
 // OT Precomputation - Request (used for both initial setup and extension)
 message OTPrecomputeRequest {
   uint32 count = 1;           // Number of OTs to precompute
-  bytes ot_sender_setup = 2;  // Serialized bulk COSenderSetup for all OTs
+  bytes ot_sender_setup = 2;  // Phase-framed KOS begin or 128 base-OT choices
   bool is_initial = 3;        // True for initial setup, false for extension
-  string epoch = 4;           // Pool identity (UUID); set on initial setup so TEE_T can later resume it
+  string epoch = 4;           // Pool synchronization token; rotates after every committed batch
 }
 
 // OT pool resume: TEE_K still holds a ready pool after a transient control
 // reconnect and asks TEE_T to keep using it instead of re-precomputing.
 message OTResumeRequest {
-  string epoch = 1;           // Pool identity TEE_K is resuming
+  string epoch = 1;           // Pool synchronization token TEE_K is resuming
   uint32 next_index = 2;      // TEE_K's next unreserved pool index (consistency check)
 }
 
@@ -304,11 +304,11 @@ message OTResumeResponse {
 
 message OTPrecomputeResponse {
   uint32 count = 1;           // Number of OTs responded
-  bytes ot_receiver_data = 2; // Serialized bulk receiver data for all OTs
+  bytes ot_receiver_data = 2; // Phase-framed base-OT setup or verified KOS batch data
 }
 
 message OTPrecomputeComplete {
-  uint32 pool_size = 1;       // Total OTs now available (sent after initial setup only)
+  uint32 pool_size = 1;       // Total OTs generated after committing this batch
 }
 
 // Online round 1: the garbler sends the circuit before it knows the receiver's
