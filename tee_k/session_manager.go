@@ -15,6 +15,8 @@ import (
 )
 
 type TEEKSessionState struct {
+	session *shared.Session
+
 	HandshakeComplete bool
 	ClientHello       []byte
 	ServerHello       []byte
@@ -61,6 +63,26 @@ type TEEKSessionManager struct {
 	stateMutex sync.Mutex
 }
 
+type teekSessionIdentity struct {
+	session     *shared.Session
+	sessionConn *SessionTEETConnection
+	validate    func() error
+
+	// beforeDispatch is a request-local synchronization hook used only by
+	// deterministic buffered-frame replacement tests.
+	beforeDispatch func()
+}
+
+func (i *teekSessionIdentity) ensureCurrent() error {
+	if i == nil || i.session == nil || i.sessionConn == nil {
+		return fmt.Errorf("TEE_K session identity is incomplete")
+	}
+	if i.validate != nil {
+		return i.validate()
+	}
+	return nil
+}
+
 func NewTEEKSessionManager() *TEEKSessionManager {
 	return &TEEKSessionManager{
 		SessionManager: shared.NewSessionManager(),
@@ -78,7 +100,25 @@ func (t *TEEKSessionManager) GetTEEKSessionState(sessionID string) (*TEEKSession
 	return state, nil
 }
 
+func (t *TEEKSessionManager) stateForSession(session *shared.Session) (*TEEKSessionState, error) {
+	if session == nil {
+		return nil, fmt.Errorf("session is nil")
+	}
+	t.stateMutex.Lock()
+	defer t.stateMutex.Unlock()
+	state := t.teekStates[session.ID]
+	if state == nil || state.session != session {
+		return nil, fmt.Errorf("TEE_K session state changed for session %s", session.ID)
+	}
+	return state, nil
+}
+
 func (t *TEEKSessionManager) SetTEEKSessionState(sessionID string, state *TEEKSessionState) {
+	if state != nil && state.session == nil {
+		if session, err := t.SessionManager.GetSession(sessionID); err == nil {
+			state.session = session
+		}
+	}
 	t.stateMutex.Lock()
 	t.teekStates[sessionID] = state
 	t.stateMutex.Unlock()
@@ -93,6 +133,18 @@ func (t *TEEKSessionManager) RemoveTEEKSessionState(sessionID string) {
 func (t *TEEKSessionManager) CloseSession(sessionID string) error {
 	t.RemoveTEEKSessionState(sessionID)
 	return t.SessionManager.CloseSession(sessionID)
+}
+
+func (t *TEEKSessionManager) CloseSessionIfCurrent(session *shared.Session) error {
+	if session == nil {
+		return fmt.Errorf("session is nil")
+	}
+	t.stateMutex.Lock()
+	if state := t.teekStates[session.ID]; state != nil && state.session == session {
+		delete(t.teekStates, session.ID)
+	}
+	t.stateMutex.Unlock()
+	return t.SessionManager.CloseSessionIfCurrent(session)
 }
 
 // NextResponseTagSeq returns the next server-app-seq to use for a response

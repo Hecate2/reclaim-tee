@@ -36,13 +36,16 @@ const OTReadyWatchdogTimeout = 90 * time.Second
 // - One persistent control connection for attestation, OT precomputation, and session lifecycle
 // - One per-session connection for each active session's data flow
 type TEEKConnectionManager struct {
-	mu sync.RWMutex
+	mu             sync.RWMutex
+	controlStateMu sync.RWMutex
 
 	// Control connection (persistent)
-	controlConn *shared.WSConnection
+	controlConn       *shared.WSConnection
+	controlGeneration uint64
 
 	// Per-session connections (limited to MaxConcurrentSessions)
-	sessionConns map[string]*SessionTEEKConnection // sessionID -> connection
+	sessionConns  map[string]*SessionTEEKConnection // sessionID -> connection
+	sessionOwners map[string]controlSessionOwner    // sessionID -> acknowledged session identity
 
 	// References
 	teet   *TEET
@@ -55,19 +58,33 @@ type TEEKConnectionManager struct {
 
 // SessionTEEKConnection represents a per-session connection from TEE_K
 type SessionTEEKConnection struct {
-	sessionID   string
-	conn        *shared.WSConnection
-	established time.Time
-	mu          sync.Mutex // Protects writes to this connection
-	closed      bool
+	sessionID         string
+	controlGeneration uint64
+	session           *shared.Session
+	conn              *shared.WSConnection
+	established       time.Time
+	mu                sync.Mutex // Protects writes to this connection
+	closed            bool
+}
+
+type controlSessionOwner struct {
+	controlGeneration uint64
+	session           *shared.Session
+}
+
+func (c *SessionTEEKConnection) isClosed() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.closed
 }
 
 // NewTEEKConnectionManager creates a new connection manager
 func NewTEEKConnectionManager(teet *TEET, logger *shared.Logger) *TEEKConnectionManager {
 	return &TEEKConnectionManager{
-		sessionConns: make(map[string]*SessionTEEKConnection),
-		teet:         teet,
-		logger:       logger,
+		sessionConns:  make(map[string]*SessionTEEKConnection),
+		sessionOwners: make(map[string]controlSessionOwner),
+		teet:          teet,
+		logger:        logger,
 	}
 }
 
@@ -182,26 +199,20 @@ func (cm *TEEKConnectionManager) HandleControlConnection(conn *websocket.Conn) e
 		return fmt.Errorf("failed to marshal attestation response: %v", err)
 	}
 
-	if err := shared.WriteWSBinary(conn, data); err != nil {
+	// Install the new generation before publishing the successful attestation.
+	// Activation invalidates old-generation state immediately; handlers perform
+	// crypto and writes without the state lease and must revalidate before commit.
+	wsConn := shared.NewWSConnection(conn)
+	controlGeneration, previousControl, previousSessions, previousSessionOwners := cm.activateControlConnection(wsConn)
+	cm.closeSupersededConnections(previousControl, previousSessions, previousSessionOwners)
+
+	if err := cm.completeControlAttestation(wsConn, controlGeneration, func() error {
+		return shared.WriteWSBinary(conn, data)
+	}); err != nil {
 		return fmt.Errorf("failed to send attestation response: %v", err)
 	}
 
 	cm.logger.Info("Mutual attestation completed on control connection")
-
-	// Create wrapper and store connection
-	wsConn := shared.NewWSConnection(conn)
-
-	cm.mu.Lock()
-	cm.controlConn = wsConn
-	cm.mu.Unlock()
-
-	cm.attestationMutex.Lock()
-	cm.attestationVerified = true
-	cm.attestationMutex.Unlock()
-
-	// Update TEET's connection state
-	cm.teet.setTEEKConnected(true)
-	cm.teet.controlHealthy.Store(true)
 
 	// Bidirectional ping/pong heartbeat. Sets the read deadline that
 	// handleControlMessages relies on, so a dead peer is detected even when no
@@ -221,26 +232,145 @@ func (cm *TEEKConnectionManager) HandleControlConnection(conn *websocket.Conn) e
 	go cm.runOTReadyWatchdog(wsConn, watchdogStop)
 
 	// Handle control messages in a loop
-	cm.handleControlMessages(wsConn)
+	cm.handleControlMessages(wsConn, controlGeneration)
 
-	// Cleanup on disconnect
+	// Cleanup on disconnect. A superseded handler may return after its
+	// replacement is already serving; only this exact generation owns teardown.
+	cm.tearDownControlConnection(wsConn, controlGeneration)
+
+	return nil
+}
+
+func (cm *TEEKConnectionManager) activateControlConnection(conn *shared.WSConnection) (uint64, *shared.WSConnection, []*SessionTEEKConnection, []*shared.Session) {
+	cm.controlStateMu.Lock()
+	defer cm.controlStateMu.Unlock()
+
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+	previousControl := cm.controlConn
+	previousGeneration := cm.controlGeneration
+	var supersededControl *shared.WSConnection
+	var previousSessions []*SessionTEEKConnection
+	var previousSessionOwners []*shared.Session
+	if previousControl != nil && previousControl != conn {
+		supersededControl = previousControl
+		for sessionID, owner := range cm.sessionOwners {
+			if owner.controlGeneration == previousGeneration {
+				if cm.teet.sessionManager.isCurrentControlSession(owner.session, previousGeneration) {
+					previousSessionOwners = append(previousSessionOwners, owner.session)
+				}
+				delete(cm.sessionOwners, sessionID)
+			}
+		}
+		for sessionID, sessionConn := range cm.sessionConns {
+			if sessionConn.controlGeneration == previousGeneration {
+				previousSessions = append(previousSessions, sessionConn)
+				delete(cm.sessionConns, sessionID)
+			}
+		}
+
+		// A ready committed prefix remains resumable, but no pending extension
+		// from the superseded generation may survive into the replacement.
+		cm.teet.suspendOTReceiverPoolForReconnect()
+	}
+
+	cm.controlGeneration++
+	generation := cm.controlGeneration
+	cm.controlConn = conn
+	cm.attestationMutex.Lock()
+	cm.attestationVerified = false
+	cm.attestationMutex.Unlock()
+	cm.teet.setTEEKConnected(false)
+	cm.teet.controlHealthy.Store(false)
+	cm.teet.otReady.Store(false)
+	return generation, supersededControl, previousSessions, previousSessionOwners
+}
+
+func (cm *TEEKConnectionManager) completeControlAttestation(conn *shared.WSConnection, generation uint64, writeResponse func() error) error {
+	if err := writeResponse(); err != nil {
+		cm.tearDownControlConnection(conn, generation)
+		return err
+	}
+	cm.controlStateMu.RLock()
+	defer cm.controlStateMu.RUnlock()
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+	if cm.controlConn != conn || cm.controlGeneration != generation {
+		return fmt.Errorf("control connection was superseded during attestation response")
+	}
+	cm.attestationMutex.Lock()
+	cm.attestationVerified = true
+	cm.attestationMutex.Unlock()
+	cm.teet.setTEEKConnected(true)
+	cm.teet.controlHealthy.Store(true)
+	return nil
+}
+
+func (cm *TEEKConnectionManager) closeSupersededConnections(control *shared.WSConnection, sessions []*SessionTEEKConnection, sessionOwners []*shared.Session) {
+	if control != nil {
+		_ = control.Close()
+	}
+	if len(sessions) > 0 {
+		cm.logger.Info("Purging per-session connections from superseded control generation", zap.Int("count", len(sessions)))
+	}
+	for _, sessionConn := range sessions {
+		sessionConn.mu.Lock()
+		if !sessionConn.closed {
+			sessionConn.closed = true
+			_ = sessionConn.conn.Close()
+		}
+		sessionConn.mu.Unlock()
+	}
+	for _, session := range sessionOwners {
+		cm.teet.cleanupSessionWithSession(session)
+	}
+}
+
+func (cm *TEEKConnectionManager) tearDownControlConnection(conn *shared.WSConnection, generation uint64) {
+	cm.controlStateMu.Lock()
+	cm.mu.Lock()
+	if cm.controlConn != conn || cm.controlGeneration != generation {
+		cm.mu.Unlock()
+		cm.controlStateMu.Unlock()
+		return
+	}
+	cm.controlConn = nil
+
 	cm.attestationMutex.Lock()
 	cm.attestationVerified = false
 	cm.attestationMutex.Unlock()
 
-	cm.mu.Lock()
-	cm.controlConn = nil
 	// Snapshot + reset sessionConns under the lock, then close them
 	// outside the lock. Orphaned per-session WSes from before the control
 	// disconnect would otherwise hold MaxConcurrentSessions slots until
 	// their 60s read deadline fires, surfacing as "Max concurrent
 	// sessions reached" rejections during recovery.
 	orphans := make([]*SessionTEEKConnection, 0, len(cm.sessionConns))
-	for _, c := range cm.sessionConns {
-		orphans = append(orphans, c)
+	for sessionID, sessionConn := range cm.sessionConns {
+		if sessionConn.controlGeneration == generation {
+			orphans = append(orphans, sessionConn)
+			delete(cm.sessionConns, sessionID)
+		}
 	}
-	cm.sessionConns = make(map[string]*SessionTEEKConnection)
+	orphanSessionOwners := make([]*shared.Session, 0, len(cm.sessionOwners))
+	for sessionID, owner := range cm.sessionOwners {
+		if owner.controlGeneration == generation {
+			if cm.teet.sessionManager.isCurrentControlSession(owner.session, generation) {
+				orphanSessionOwners = append(orphanSessionOwners, owner.session)
+			}
+			delete(cm.sessionOwners, sessionID)
+		}
+	}
+
+	cm.teet.setTEEKConnected(false)
+	cm.teet.controlHealthy.Store(false)
+
+	// Retain a ready pool so TEE_K can resume it on reconnect; clear it only if
+	// it was mid-precompute (nothing to resume). This is an in-memory state
+	// transition and completes before a replacement generation can activate.
+	cm.teet.suspendOTReceiverPoolForReconnect()
 	cm.mu.Unlock()
+	cm.controlStateMu.Unlock()
 
 	if len(orphans) > 0 {
 		cm.logger.Info("Purging orphaned per-session connections after control disconnect",
@@ -254,15 +384,9 @@ func (cm *TEEKConnectionManager) HandleControlConnection(conn *websocket.Conn) e
 		}
 		c.mu.Unlock()
 	}
-
-	cm.teet.setTEEKConnected(false)
-	cm.teet.controlHealthy.Store(false)
-
-	// Retain a ready pool so TEE_K can resume it on reconnect; clears only if
-	// it was mid-precompute (nothing to resume).
-	cm.teet.suspendOTReceiverPoolForReconnect()
-
-	return nil
+	for _, session := range orphanSessionOwners {
+		cm.teet.cleanupSessionWithSession(session)
+	}
 }
 
 // runOTReadyWatchdog monitors the receiver pool's ready flag while the control
@@ -308,7 +432,7 @@ func (cm *TEEKConnectionManager) runOTReadyWatchdog(wsConn *shared.WSConnection,
 }
 
 // handleControlMessages processes messages on the control connection
-func (cm *TEEKConnectionManager) handleControlMessages(conn *shared.WSConnection) {
+func (cm *TEEKConnectionManager) handleControlMessages(conn *shared.WSConnection, generation uint64) {
 	cm.logger.Info("Starting control message handler - ready to receive messages")
 
 	messageCount := 0
@@ -329,6 +453,9 @@ func (cm *TEEKConnectionManager) handleControlMessages(conn *shared.WSConnection
 			}
 			return
 		}
+		if !cm.isCurrentControlConnection(conn, generation) {
+			return
+		}
 
 		var env teeproto.Envelope
 		if err := proto.Unmarshal(msgBytes, &env); err != nil {
@@ -344,12 +471,7 @@ func (cm *TEEKConnectionManager) handleControlMessages(conn *shared.WSConnection
 		case *teeproto.Envelope_SessionCreated:
 			// Session lifecycle notification - create session
 			cm.logger.Info("New session from TEE_K (control)", zap.String("sid", shared.TruncateSessionID(sessionID)))
-			msg := &shared.Message{
-				SessionID: sessionID,
-				Type:      shared.MsgSessionCreated,
-				Data:      map[string]any{"session_id": sessionID},
-			}
-			if err := cm.teet.handleSessionCreation(msg); err != nil {
+			if err := cm.registerSessionOwner(conn, generation, sessionID); err != nil {
 				cm.logger.WithSession(sessionID).Error("Failed to create session", zap.Error(err))
 			} else {
 				// Send acknowledgment so TEE_K knows it can establish per-session connection
@@ -362,7 +484,7 @@ func (cm *TEEKConnectionManager) handleControlMessages(conn *shared.WSConnection
 						},
 					},
 				}
-				if err := cm.SendOnControl(ackEnv); err != nil {
+				if err := cm.sendOnControlConnection(conn, generation, ackEnv); err != nil {
 					cm.logger.WithSession(sessionID).Error("Failed to send SessionCreatedAck", zap.Error(err))
 				}
 			}
@@ -372,41 +494,31 @@ func (cm *TEEKConnectionManager) handleControlMessages(conn *shared.WSConnection
 			cm.logger.Info("Session closed from TEE_K (control)",
 				zap.String("sid", shared.TruncateSessionID(sessionID)),
 				zap.String("reason", p.SessionClosed.GetReason()))
-			cm.teet.cleanupSession(sessionID)
-
-			// Also cleanup per-session connection if exists
-			cm.mu.Lock()
-			if sessionConn, ok := cm.sessionConns[sessionID]; ok {
-				delete(cm.sessionConns, sessionID)
-				cm.mu.Unlock()
-				// Lock sessionConn.mu to safely set closed flag
-				sessionConn.mu.Lock()
-				if !sessionConn.closed {
-					sessionConn.closed = true
-					sessionConn.conn.Close()
-				}
-				sessionConn.mu.Unlock()
-			} else {
-				cm.mu.Unlock()
-			}
+			cm.closeOwnedSession(conn, generation, sessionID)
 
 		case *teeproto.Envelope_OtPrecomputeRequest:
 			// OT precomputation request
-			if err := cm.teet.handleOTPrecomputeRequest(conn, p.OtPrecomputeRequest); err != nil {
+			if err := cm.teet.handleOTPrecomputeRequest(conn, generation, func(mutate func() error) error {
+				return cm.withCurrentControlState(conn, generation, mutate)
+			}, p.OtPrecomputeRequest); err != nil {
 				cm.logger.Error("Failed to handle OT precompute request", zap.Error(err))
 				return
 			}
 
 		case *teeproto.Envelope_OtPrecomputeComplete:
 			// OT precomputation complete acknowledgment
-			if err := cm.teet.handleOTPrecomputeComplete(p.OtPrecomputeComplete); err != nil {
+			if err := cm.teet.handleOTPrecomputeComplete(generation, func(mutate func() error) error {
+				return cm.withCurrentControlState(conn, generation, mutate)
+			}, p.OtPrecomputeComplete); err != nil {
 				cm.logger.Error("Failed to handle OT precompute complete", zap.Error(err))
 				return
 			}
 
 		case *teeproto.Envelope_OtResumeRequest:
 			// TEE_K asks to resume the retained pool instead of re-precomputing.
-			if err := cm.teet.handleOTResumeRequest(conn, p.OtResumeRequest); err != nil {
+			if err := cm.teet.handleOTResumeRequest(conn, func(mutate func() error) error {
+				return cm.withCurrentControlState(conn, generation, mutate)
+			}, p.OtResumeRequest); err != nil {
 				cm.logger.Error("Failed to handle OT resume request", zap.Error(err))
 				return
 			}
@@ -416,22 +528,7 @@ func (cm *TEEKConnectionManager) handleControlMessages(conn *shared.WSConnection
 			cm.logger.WithSession(sessionID).Error("Received error from TEE_K (control)",
 				zap.String("error", p.Error.GetMessage()))
 			if sessionID != "" && sessionID != "control" {
-				cm.teet.cleanupSession(sessionID)
-				// Also cleanup per-session connection if exists
-				cm.mu.Lock()
-				if sessionConn, ok := cm.sessionConns[sessionID]; ok {
-					delete(cm.sessionConns, sessionID)
-					cm.mu.Unlock()
-					// Lock sessionConn.mu to safely set closed flag
-					sessionConn.mu.Lock()
-					if !sessionConn.closed {
-						sessionConn.closed = true
-						sessionConn.conn.Close()
-					}
-					sessionConn.mu.Unlock()
-				} else {
-					cm.mu.Unlock()
-				}
+				cm.closeOwnedSession(conn, generation, sessionID)
 			}
 
 		default:
@@ -442,8 +539,69 @@ func (cm *TEEKConnectionManager) handleControlMessages(conn *shared.WSConnection
 	}
 }
 
+func (cm *TEEKConnectionManager) withCurrentControlState(conn *shared.WSConnection, generation uint64, mutate func() error) error {
+	cm.controlStateMu.RLock()
+	defer cm.controlStateMu.RUnlock()
+	if !cm.isCurrentControlConnection(conn, generation) {
+		return fmt.Errorf("control generation %d was superseded", generation)
+	}
+	return mutate()
+}
+
+func (cm *TEEKConnectionManager) registerSessionOwner(conn *shared.WSConnection, generation uint64, sessionID string) error {
+	return cm.withCurrentControlState(conn, generation, func() error {
+		cm.mu.Lock()
+		if _, exists := cm.sessionOwners[sessionID]; exists {
+			cm.mu.Unlock()
+			return fmt.Errorf("session %s already has a control owner", sessionID)
+		}
+		cm.mu.Unlock()
+		session, err := cm.teet.registerSessionForControl(sessionID, generation)
+		if err != nil {
+			return err
+		}
+		cm.mu.Lock()
+		cm.sessionOwners[sessionID] = controlSessionOwner{controlGeneration: generation, session: session}
+		cm.mu.Unlock()
+		return nil
+	})
+}
+
+func (cm *TEEKConnectionManager) closeOwnedSession(conn *shared.WSConnection, generation uint64, sessionID string) {
+	var sessionConn *SessionTEEKConnection
+	var ownedSession *shared.Session
+	err := cm.withCurrentControlState(conn, generation, func() error {
+		cm.mu.Lock()
+		defer cm.mu.Unlock()
+		owner, exists := cm.sessionOwners[sessionID]
+		if !exists || owner.controlGeneration != generation || owner.session == nil {
+			return fmt.Errorf("session %s is not owned by control generation %d", sessionID, generation)
+		}
+		ownedSession = owner.session
+		delete(cm.sessionOwners, sessionID)
+		if current := cm.sessionConns[sessionID]; current != nil && current.controlGeneration == generation && current.session == ownedSession {
+			sessionConn = current
+			delete(cm.sessionConns, sessionID)
+		}
+		return nil
+	})
+	if err != nil {
+		cm.logger.WithSession(sessionID).Warn("Ignored stale session cleanup", zap.Error(err))
+		return
+	}
+	if sessionConn != nil {
+		sessionConn.mu.Lock()
+		if !sessionConn.closed {
+			sessionConn.closed = true
+			_ = sessionConn.conn.Close()
+		}
+		sessionConn.mu.Unlock()
+	}
+	cm.teet.cleanupSessionWithSession(ownedSession)
+}
+
 // HandleSessionConnection handles a new per-session connection from TEE_K
-func (cm *TEEKConnectionManager) HandleSessionConnection(conn *websocket.Conn) error {
+func (cm *TEEKConnectionManager) HandleSessionConnection(conn *websocket.Conn, expectedGeneration uint64) error {
 	cm.logger.Debug("Handling session connection from TEE_K")
 
 	// Check session limit to prevent resource exhaustion
@@ -497,22 +655,22 @@ func (cm *TEEKConnectionManager) HandleSessionConnection(conn *websocket.Conn) e
 	// Create wrapper and store connection
 	wsConn := shared.NewWSConnection(conn)
 	sessionConn := &SessionTEEKConnection{
-		sessionID:   sessionID,
-		conn:        wsConn,
-		established: time.Now(),
+		sessionID:         sessionID,
+		controlGeneration: expectedGeneration,
+		conn:              wsConn,
+		established:       time.Now(),
 	}
 
-	cm.mu.Lock()
-	cm.sessionConns[sessionID] = sessionConn
-	cm.mu.Unlock()
+	if err := cm.publishSessionConnection(sessionID, sessionConn); err != nil {
+		cm.sendSessionConnectionAck(conn, sessionID, false, err.Error())
+		return err
+	}
 	// Defer the cleanup so it runs even if the handler below panics or
 	// any future change adds an early return between here and the
 	// existing teardown path. Without this, a goroutine death between
 	// map-insert and map-delete would leak the slot forever.
 	defer func() {
-		cm.mu.Lock()
-		delete(cm.sessionConns, sessionID)
-		cm.mu.Unlock()
+		cm.removeSessionConnection(sessionID, sessionConn)
 		sessionConn.mu.Lock()
 		if !sessionConn.closed {
 			sessionConn.closed = true
@@ -520,14 +678,6 @@ func (cm *TEEKConnectionManager) HandleSessionConnection(conn *websocket.Conn) e
 		}
 		sessionConn.mu.Unlock()
 	}()
-
-	// Associate connection with session for routing (use mutex to prevent race)
-	session, _ := cm.teet.sessionManager.GetSession(sessionID)
-	if session != nil {
-		session.ConnMutex.Lock()
-		session.TEEKConn = wsConn
-		session.ConnMutex.Unlock()
-	}
 
 	// Send acknowledgment
 	cm.sendSessionConnectionAck(conn, sessionID, true, "")
@@ -540,10 +690,68 @@ func (cm *TEEKConnectionManager) HandleSessionConnection(conn *websocket.Conn) e
 	return nil
 }
 
+func (cm *TEEKConnectionManager) publishSessionConnection(sessionID string, sessionConn *SessionTEEKConnection) error {
+	generation := sessionConn.controlGeneration
+	cm.controlStateMu.RLock()
+	defer cm.controlStateMu.RUnlock()
+	cm.mu.Lock()
+	owner, ownerExists := cm.sessionOwners[sessionID]
+	if cm.controlConn == nil || cm.controlGeneration != generation || !ownerExists || owner.controlGeneration != generation || owner.session == nil {
+		cm.mu.Unlock()
+		return fmt.Errorf("session %s is not owned by current control generation", sessionID)
+	}
+	if current := cm.sessionConns[sessionID]; current != nil && current != sessionConn {
+		cm.mu.Unlock()
+		return fmt.Errorf("session %s already has a TEE_K connection", sessionID)
+	}
+	cm.attestationMutex.RLock()
+	ready := cm.attestationVerified
+	cm.attestationMutex.RUnlock()
+	if !ready {
+		cm.mu.Unlock()
+		return fmt.Errorf("control generation %d is not attested", generation)
+	}
+	// The early HandleSessionConnection check is only advisory. Recheck under
+	// the publication lock so concurrent handshakes cannot both consume the
+	// final slot and raise the map above MaxConcurrentSessions.
+	if len(cm.sessionConns) >= MaxConcurrentSessions {
+		cm.mu.Unlock()
+		return fmt.Errorf("max concurrent sessions (%d) reached during publication", MaxConcurrentSessions)
+	}
+	sessionConn.session = owner.session
+	cm.sessionConns[sessionID] = sessionConn
+	cm.mu.Unlock()
+
+	if !cm.teet.sessionManager.isCurrentControlSession(owner.session, generation) {
+		cm.removeSessionConnection(sessionID, sessionConn)
+		return fmt.Errorf("session %s changed before connection publication", sessionID)
+	}
+	owner.session.ConnMutex.Lock()
+	owner.session.TEEKConn = sessionConn.conn
+	owner.session.ConnMutex.Unlock()
+	return nil
+}
+
+func (cm *TEEKConnectionManager) removeSessionConnection(sessionID string, expected *SessionTEEKConnection) {
+	cm.mu.Lock()
+	if cm.sessionConns[sessionID] == expected {
+		delete(cm.sessionConns, sessionID)
+	}
+	cm.mu.Unlock()
+}
+
 // handleSessionMessages processes messages on a per-session connection
 // ZERO TOLERANCE: Any error terminates the session immediately
 func (cm *TEEKConnectionManager) handleSessionMessages(sessionID string, sessionConn *SessionTEEKConnection) {
 	cm.logger.WithSession(sessionID).Debug("Starting session message handler")
+	identity := &teetSessionIdentity{
+		session:           sessionConn.session,
+		controlGeneration: sessionConn.controlGeneration,
+		sessionConn:       sessionConn,
+		validate: func() error {
+			return cm.validateSessionConnection(sessionConn)
+		},
+	}
 
 	for {
 		// Set read deadline to prevent stuck connections
@@ -552,9 +760,12 @@ func (cm *TEEKConnectionManager) handleSessionMessages(sessionID string, session
 		if err != nil {
 			if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
 				cm.logger.WithSession(sessionID).Debug("Session connection closed normally")
-			} else if !sessionConn.closed {
+			} else if !sessionConn.isClosed() {
 				cm.logger.WithSession(sessionID).Error("Session connection error", zap.Error(err))
 			}
+			return
+		}
+		if err := identity.ensureCurrent(); err != nil {
 			return
 		}
 
@@ -562,7 +773,7 @@ func (cm *TEEKConnectionManager) handleSessionMessages(sessionID string, session
 		if err := proto.Unmarshal(msgBytes, &env); err != nil {
 			// ZERO TOLERANCE: Parse failure terminates session
 			cm.logger.WithSession(sessionID).Error("Failed to parse session message - terminating", zap.Error(err))
-			cm.teet.terminateSessionWithError(sessionID, shared.ReasonMessageParsingFailed, err, "Failed to parse message from TEE_K")
+			cm.teet.terminateSessionWithErrorForIdentity(identity, shared.ReasonMessageParsingFailed, err, "Failed to parse message from TEE_K")
 			return
 		}
 
@@ -570,7 +781,7 @@ func (cm *TEEKConnectionManager) handleSessionMessages(sessionID string, session
 		if env.GetSessionId() != sessionID {
 			err := fmt.Errorf("expected %s, got %s", sessionID, env.GetSessionId())
 			cm.logger.WithSession(sessionID).Error("Session ID mismatch - terminating", zap.Error(err))
-			cm.teet.terminateSessionWithError(sessionID, shared.ReasonSessionIDMismatch, err, "Session ID mismatch from TEE_K")
+			cm.teet.terminateSessionWithErrorForIdentity(identity, shared.ReasonSessionIDMismatch, err, "Session ID mismatch from TEE_K")
 			return
 		}
 
@@ -586,7 +797,7 @@ func (cm *TEEKConnectionManager) handleSessionMessages(sessionID string, session
 					IVLength:  int(p.KeyShareRequest.GetIvLength()),
 				},
 			}
-			handlerErr = cm.teet.handleKeyShareRequestSession(msg)
+			handlerErr = cm.teet.handleKeyShareRequestSession(identity, msg)
 
 		case *teeproto.Envelope_BatchedEncryptedRequest:
 			var fragments []shared.EncryptedRequestData
@@ -615,7 +826,7 @@ func (cm *TEEKConnectionManager) handleSessionMessages(sessionID string, session
 					CipherSuite: uint16(p.BatchedEncryptedRequest.GetCipherSuite()),
 				},
 			}
-			handlerErr = cm.teet.handleBatchedEncryptedRequest(msg)
+			handlerErr = cm.teet.handleBatchedEncryptedRequest(identity, msg)
 
 		case *teeproto.Envelope_Finished:
 			msg := &shared.Message{
@@ -623,7 +834,7 @@ func (cm *TEEKConnectionManager) handleSessionMessages(sessionID string, session
 				Type:      shared.MsgFinished,
 				Data:      shared.FinishedMessage{},
 			}
-			handlerErr = cm.teet.handleFinishedFromTEEK(msg)
+			handlerErr = cm.teet.handleFinishedFromTEEK(identity, msg)
 
 		case *teeproto.Envelope_BatchedTagSecrets:
 			var ts []struct {
@@ -648,40 +859,42 @@ func (cm *TEEKConnectionManager) handleSessionMessages(sessionID string, session
 					TotalCount: int(p.BatchedTagSecrets.GetTotalCount()),
 				},
 			}
-			handlerErr = cm.teet.handleBatchedTagSecrets(msg)
+			handlerErr = cm.teet.handleBatchedTagSecrets(identity, msg)
 
 		case *teeproto.Envelope_OprfOnlineFull:
 			cm.logger.WithSession(sessionID).Info("OPRF timing: round 1 received from TEE_K (session conn)",
 				zap.Int("range_index", int(p.OprfOnlineFull.RangeIndex)),
 				zap.Int("garbled_tables_bytes", len(p.OprfOnlineFull.GarbledTables)))
-			if err := cm.teet.handleOPRFOnlineFull(sessionID, p.OprfOnlineFull); err != nil {
-				cm.teet.terminateSessionWithError(sessionID, shared.ReasonOPRFEvaluationFailed, err, "Failed to handle OPRF online")
+			if err := cm.teet.handleOPRFOnlineFull(identity, p.OprfOnlineFull); err != nil {
+				cm.teet.terminateSessionWithErrorForIdentity(identity, shared.ReasonOPRFEvaluationFailed, err, "Failed to handle OPRF online")
 				return // ZERO TOLERANCE: terminate on OPRF failure
 			}
 
 		case *teeproto.Envelope_OprfMpcRound3:
-			if err := cm.teet.handleOPRFMasks(sessionID, p.OprfMpcRound3); err != nil {
-				cm.teet.terminateSessionWithError(sessionID, shared.ReasonOPRFEvaluationFailed, err, "Failed to handle OPRF masks")
+			if err := cm.teet.handleOPRFMasks(identity, p.OprfMpcRound3); err != nil {
+				cm.teet.terminateSessionWithErrorForIdentity(identity, shared.ReasonOPRFEvaluationFailed, err, "Failed to handle OPRF masks")
 				return
 			}
 
 		case *teeproto.Envelope_Error:
 			// TEE_K encountered an error - terminate immediately
 			cm.logger.WithSession(sessionID).Error("Received error from TEE_K - terminating session")
-			cm.teet.cleanupSession(sessionID)
+			if identity.ensureCurrent() == nil {
+				cm.teet.cleanupSessionWithSession(identity.session)
+			}
 			return
 
 		default:
 			// ZERO TOLERANCE: Unknown message type terminates session
 			err := fmt.Errorf("unknown message type: %T", p)
 			cm.logger.WithSession(sessionID).Error("Unknown message type - terminating session", zap.Error(err))
-			cm.teet.terminateSessionWithError(sessionID, shared.ReasonUnknownMessageType, err, "Unknown message type from TEE_K")
+			cm.teet.terminateSessionWithErrorForIdentity(identity, shared.ReasonUnknownMessageType, err, "Unknown message type from TEE_K")
 			return
 		}
 
 		// ZERO TOLERANCE: Any handler error terminates session
 		if handlerErr != nil {
-			cm.teet.terminateSessionWithError(sessionID, shared.ReasonHandlerFailed, handlerErr, "Handler failed")
+			cm.teet.terminateSessionWithErrorForIdentity(identity, shared.ReasonHandlerFailed, handlerErr, "Handler failed")
 			return
 		}
 	}
@@ -751,6 +964,17 @@ func (cm *TEEKConnectionManager) IsAttestationVerified() bool {
 	return cm.attestationVerified
 }
 
+func (cm *TEEKConnectionManager) readyControlGeneration() (uint64, bool) {
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
+	if cm.controlConn == nil {
+		return 0, false
+	}
+	cm.attestationMutex.RLock()
+	defer cm.attestationMutex.RUnlock()
+	return cm.controlGeneration, cm.attestationVerified
+}
+
 // IsControlConnected returns whether the control connection is established
 func (cm *TEEKConnectionManager) IsControlConnected() bool {
 	cm.mu.RLock()
@@ -789,10 +1013,18 @@ func (cm *TEEKConnectionManager) LogConnectionStatus() {
 func (cm *TEEKConnectionManager) SendOnControl(env *teeproto.Envelope) error {
 	cm.mu.RLock()
 	conn := cm.controlConn
+	generation := cm.controlGeneration
 	cm.mu.RUnlock()
 
 	if conn == nil {
 		return fmt.Errorf("control connection not available")
+	}
+	return cm.sendOnControlConnection(conn, generation, env)
+}
+
+func (cm *TEEKConnectionManager) sendOnControlConnection(conn *shared.WSConnection, generation uint64, env *teeproto.Envelope) error {
+	if !cm.isCurrentControlConnection(conn, generation) {
+		return fmt.Errorf("control connection changed before send")
 	}
 
 	data, err := proto.Marshal(env)
@@ -807,13 +1039,102 @@ func (cm *TEEKConnectionManager) SendOnControl(env *teeproto.Envelope) error {
 	return conn.WriteMessage(websocket.BinaryMessage, data)
 }
 
+func (cm *TEEKConnectionManager) SendOnControlForSession(session *shared.Session, env *teeproto.Envelope) error {
+	if session == nil {
+		return fmt.Errorf("session is nil")
+	}
+	cm.mu.RLock()
+	owner, exists := cm.sessionOwners[session.ID]
+	conn := cm.controlConn
+	generation := cm.controlGeneration
+	cm.mu.RUnlock()
+	if !exists || owner.controlGeneration != generation || owner.session != session || conn == nil {
+		return fmt.Errorf("session is not owned by current control connection")
+	}
+	return cm.sendOnControlConnection(conn, generation, env)
+}
+
+func (cm *TEEKConnectionManager) validateSessionConnection(sessionConn *SessionTEEKConnection) error {
+	if sessionConn == nil || sessionConn.session == nil {
+		return fmt.Errorf("session connection identity is incomplete")
+	}
+	cm.controlStateMu.RLock()
+	defer cm.controlStateMu.RUnlock()
+	return cm.validateSessionConnectionUnderControlStateLock(sessionConn)
+}
+
+// validateSessionConnectionUnderControlStateLock validates the exact session
+// binding while the caller holds controlStateMu for reading.
+func (cm *TEEKConnectionManager) validateSessionConnectionUnderControlStateLock(sessionConn *SessionTEEKConnection) error {
+	cm.mu.RLock()
+	owner, ownerExists := cm.sessionOwners[sessionConn.sessionID]
+	currentConn := cm.sessionConns[sessionConn.sessionID]
+	controlCurrent := cm.controlConn != nil && cm.controlGeneration == sessionConn.controlGeneration
+	cm.mu.RUnlock()
+	if !controlCurrent || !ownerExists || owner.controlGeneration != sessionConn.controlGeneration || owner.session != sessionConn.session || currentConn != sessionConn {
+		return fmt.Errorf("session connection was superseded")
+	}
+	if !cm.teet.sessionManager.isCurrentControlSession(sessionConn.session, sessionConn.controlGeneration) {
+		return fmt.Errorf("session identity was superseded")
+	}
+	return nil
+}
+
+// withCurrentSessionControlState keeps exact session/generation validation and
+// one short state mutation atomic with respect to control replacement. Callers
+// must not perform network I/O or expensive cryptography in mutate.
+func (cm *TEEKConnectionManager) withCurrentSessionControlState(identity *teetSessionIdentity, mutate func() error) error {
+	if identity == nil || identity.session == nil || identity.sessionConn == nil {
+		return fmt.Errorf("session control identity is incomplete")
+	}
+	if identity.sessionConn.session != identity.session || identity.sessionConn.controlGeneration != identity.controlGeneration {
+		return fmt.Errorf("session control identity does not match its connection")
+	}
+	cm.controlStateMu.RLock()
+	defer cm.controlStateMu.RUnlock()
+	if err := cm.validateSessionConnectionUnderControlStateLock(identity.sessionConn); err != nil {
+		return err
+	}
+	return mutate()
+}
+
+func (cm *TEEKConnectionManager) validateSessionOwner(session *shared.Session) error {
+	if session == nil {
+		return fmt.Errorf("session is nil")
+	}
+	generation, ok := cm.teet.sessionManager.controlGenerationForSession(session)
+	if !ok {
+		return fmt.Errorf("session state was superseded")
+	}
+	cm.mu.RLock()
+	owner, ownerExists := cm.sessionOwners[session.ID]
+	controlCurrent := cm.controlConn != nil && cm.controlGeneration == generation
+	cm.mu.RUnlock()
+	if !controlCurrent || !ownerExists || owner.controlGeneration != generation || owner.session != session {
+		return fmt.Errorf("session owner was superseded")
+	}
+	return nil
+}
+
+func (cm *TEEKConnectionManager) isCurrentControlConnection(conn *shared.WSConnection, generation uint64) bool {
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
+	return cm.controlConn == conn && cm.controlGeneration == generation
+}
+
 // CloseSessionConnection closes a per-session connection from TEE_T side
 // Called when client disconnects from TEE_T, to prevent TEE_K from timing out
-func (cm *TEEKConnectionManager) CloseSessionConnection(sessionID string) {
+func (cm *TEEKConnectionManager) CloseSessionConnection(sessionID string, expectedGeneration uint64, expectedSession *shared.Session) {
 	cm.mu.Lock()
+	owner, ownerExists := cm.sessionOwners[sessionID]
+	if ownerExists && owner.controlGeneration == expectedGeneration && owner.session == expectedSession {
+		delete(cm.sessionOwners, sessionID)
+	}
 	sessionConn := cm.sessionConns[sessionID]
-	if sessionConn != nil {
+	if sessionConn != nil && sessionConn.controlGeneration == expectedGeneration && sessionConn.session == expectedSession {
 		delete(cm.sessionConns, sessionID)
+	} else {
+		sessionConn = nil
 	}
 	cm.mu.Unlock()
 

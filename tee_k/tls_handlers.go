@@ -28,6 +28,7 @@ func (t *TEEK) performTLSHandshakeAndHTTP(sessionID string) error {
 
 	// Initialize TEE_K session state first
 	initialState := &TEEKSessionState{
+		session:           session,
 		HandshakeComplete: false,
 		TCPReady:          make(chan bool, 1),
 	}

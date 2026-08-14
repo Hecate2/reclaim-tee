@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/reclaimprotocol/reclaim-tee/mpc"
 	teeproto "github.com/reclaimprotocol/reclaim-tee/proto"
+	"github.com/reclaimprotocol/reclaim-tee/shared"
 
 	"github.com/gorilla/websocket"
 	"go.uber.org/zap"
@@ -24,6 +25,13 @@ type senderPrecompute struct {
 	baseReceiver *mpc.BaseOTReceiverState
 	finalizing   bool
 	done         chan error
+
+	controlConn       *shared.WSConnection
+	controlGeneration uint64
+
+	// sendComplete is a request-local synchronization/error hook for
+	// deterministic ownership tests. Production leaves it nil.
+	sendComplete func(uint32) error
 }
 
 // OTPrecomputeState holds the compact random-OT pool and one in-flight KOS
@@ -54,27 +62,57 @@ func (t *TEEK) performOTPrecomputation(count int, isInitial bool) error {
 	if err := mpc.Initialize(); err != nil {
 		return fmt.Errorf("initialize MPC circuit: %w", err)
 	}
+	if t.connManager == nil {
+		return fmt.Errorf("connection manager not initialized")
+	}
+	origin, err := t.connManager.currentAttestedControlToken()
+	if err != nil {
+		return err
+	}
 	if t.otPrecomputeState == nil {
 		t.otPrecomputeState = NewOTPrecomputeState()
 	}
 	state := t.otPrecomputeState
+	session, err := mpc.NewExtensionSession(rand.Reader)
+	if err != nil {
+		return err
+	}
+	initialEpoch := ""
+	if isInitial {
+		initialEpoch = uuid.NewString()
+	}
+	pending := &senderPrecompute{
+		session: session, count: count, isInitial: isInitial,
+		done: make(chan error, 1), controlConn: origin.conn, controlGeneration: origin.generation,
+	}
 
+	// Make control validation and all initial pool mutations one short atomic
+	// ownership step. A superseded goroutine must not clear a replacement pool
+	// after capturing an older control token.
+	t.connManager.mu.RLock()
+	if t.connManager.controlConn != origin.conn || t.connManager.controlGeneration != origin.generation {
+		t.connManager.mu.RUnlock()
+		return fmt.Errorf("TEE_T control connection changed before OT precomputation setup")
+	}
 	state.mu.Lock()
 	if state.pending != nil {
 		state.mu.Unlock()
+		t.connManager.mu.RUnlock()
 		return fmt.Errorf("OT precomputation already in progress")
 	}
 	if isInitial {
-		state.epoch = uuid.NewString()
+		state.epoch = initialEpoch
 		state.pool.Clear()
 		state.ready = false
 	} else {
 		if !state.ready {
 			state.mu.Unlock()
+			t.connManager.mu.RUnlock()
 			return fmt.Errorf("cannot extend: OT pool not ready")
 		}
 		if state.pool.IsExtendPending() {
 			state.mu.Unlock()
+			t.connManager.mu.RUnlock()
 			t.logger.Debug("OT extend already pending, skipping")
 			return nil
 		}
@@ -84,40 +122,30 @@ func (t *TEEK) performOTPrecomputation(count int, isInitial bool) error {
 	if startIndex > math.MaxUint32 || uint64(count) > math.MaxUint32-startIndex {
 		state.pool.SetExtendPending(false)
 		state.mu.Unlock()
+		t.connManager.mu.RUnlock()
 		return fmt.Errorf("OT pool index exceeds protobuf uint32 range")
 	}
-	session, err := mpc.NewExtensionSession(rand.Reader)
-	if err != nil {
-		state.pool.SetExtendPending(false)
-		state.mu.Unlock()
-		return err
-	}
+	pending.startIndex = startIndex
 	begin := mpc.PrecomputeBegin{SessionID: session, StartIndex: startIndex, Count: uint32(count)}
 	beginData, err := mpc.MarshalPrecomputeBegin(begin)
 	if err != nil {
 		state.pool.SetExtendPending(false)
 		state.mu.Unlock()
+		t.connManager.mu.RUnlock()
 		return err
 	}
-	state.pending = &senderPrecompute{
-		session: session, count: count, startIndex: startIndex, isInitial: isInitial,
-		done: make(chan error, 1),
-	}
-	pending := state.pending
+	state.pending = pending
 	epoch := state.epoch
 	state.mu.Unlock()
+	t.connManager.mu.RUnlock()
 
-	if t.connManager == nil {
-		t.failPendingPrecompute(fmt.Errorf("connection manager not initialized"))
-		return fmt.Errorf("connection manager not initialized")
+	if !t.connManager.isCurrentControlConnection(pending.controlConn, pending.controlGeneration) {
+		err := fmt.Errorf("TEE_T control connection changed before OT precomputation request")
+		t.failPendingPrecompute(state, pending, err)
+		return err
 	}
-	conn := t.connManager.GetControlConnection()
-	if conn == nil {
-		t.failPendingPrecompute(fmt.Errorf("no TEE_T control connection available"))
-		return fmt.Errorf("no TEE_T control connection available")
-	}
-	if err := t.sendOTPrecomputeRequest(conn, count, isInitial, epoch, beginData); err != nil {
-		t.failPendingPrecompute(err)
+	if err := t.sendOTPrecomputeRequest(pending.controlConn, count, isInitial, epoch, beginData); err != nil {
+		t.failPendingPrecompute(state, pending, err)
 		return err
 	}
 
@@ -130,7 +158,7 @@ func (t *TEEK) performOTPrecomputation(count int, isInitial bool) error {
 		return nil
 	case <-time.After(60 * time.Second):
 		err := fmt.Errorf("OT precomputation timed out")
-		t.failPendingPrecompute(err)
+		t.failPendingPrecompute(state, pending, err)
 		return err
 	}
 }
@@ -157,137 +185,115 @@ func (t *TEEK) sendOTPrecomputeRequest(conn interface {
 // handleOTPrecomputeResponse advances the two-response base-OT/KOS state
 // machine. The first response contains A; the second contains base ciphertexts
 // and the extension proof.
-func (t *TEEK) handleOTPrecomputeResponse(msg *teeproto.OTPrecomputeResponse) error {
+func (t *TEEK) handleOTPrecomputeResponse(conn *shared.WSConnection, generation uint64, msg *teeproto.OTPrecomputeResponse) error {
 	state := t.otPrecomputeState
 	if state == nil {
 		return fmt.Errorf("OT precompute state not initialized")
+	}
+	if t.connManager == nil {
+		return fmt.Errorf("connection manager not initialized")
+	}
+
+	// Take the locks in the same order as control teardown. The lease covers
+	// only identity inspection/state reservation, never curve work or writes.
+	t.connManager.mu.RLock()
+	if t.connManager.controlConn != conn || t.connManager.controlGeneration != generation {
+		t.connManager.mu.RUnlock()
+		return fmt.Errorf("OT precompute response control connection is no longer current")
 	}
 	state.mu.Lock()
 	pending := state.pending
 	if pending == nil {
 		state.mu.Unlock()
+		t.connManager.mu.RUnlock()
 		return fmt.Errorf("unexpected OT precompute response")
+	}
+	if pending.controlConn != conn || pending.controlGeneration != generation {
+		state.mu.Unlock()
+		t.connManager.mu.RUnlock()
+		return fmt.Errorf("OT precompute response belongs to a superseded control connection")
 	}
 	if int(msg.GetCount()) != pending.count {
 		err := fmt.Errorf("OT count mismatch: got %d want %d", msg.GetCount(), pending.count)
 		state.mu.Unlock()
-		t.failPendingPrecompute(err)
+		t.connManager.mu.RUnlock()
+		t.failPendingPrecompute(state, pending, err)
 		return err
 	}
 
 	if pending.baseReceiver == nil {
-		baseReceiver, choices, err := mpc.StartBaseOTReceiver(rand.Reader, pending.session, msg.GetOtReceiverData())
+		session := pending.session
+		state.mu.Unlock()
+		t.connManager.mu.RUnlock()
+
+		baseReceiver, choices, err := mpc.StartBaseOTReceiver(rand.Reader, session, msg.GetOtReceiverData())
 		if err != nil {
-			state.mu.Unlock()
-			t.failPendingPrecompute(err)
+			t.failPendingPrecompute(state, pending, err)
 			return err
+		}
+
+		// Publish the base-OT result only while the exact originating control
+		// and pending request are still current.
+		t.connManager.mu.RLock()
+		controlCurrent := t.connManager.controlConn == conn && t.connManager.controlGeneration == generation
+		state.mu.Lock()
+		if !controlCurrent || state.pending != pending || pending.controlConn != conn || pending.controlGeneration != generation || pending.baseReceiver != nil {
+			state.mu.Unlock()
+			t.connManager.mu.RUnlock()
+			return fmt.Errorf("OT sender state changed during base OT")
 		}
 		pending.baseReceiver = baseReceiver
 		count, initial, epoch := pending.count, pending.isInitial, state.epoch
 		state.mu.Unlock()
+		t.connManager.mu.RUnlock()
 
-		if t.connManager == nil {
-			err := fmt.Errorf("connection manager not initialized")
-			t.failPendingPrecompute(err)
-			return err
-		}
-		conn := t.connManager.GetControlConnection()
-		if conn == nil {
-			err := fmt.Errorf("no TEE_T control connection available")
-			t.failPendingPrecompute(err)
+		if !t.connManager.isCurrentControlConnection(conn, generation) {
+			err := fmt.Errorf("TEE_T control connection changed before OT precomputation continuation")
+			t.failPendingPrecompute(state, pending, err)
 			return err
 		}
 		if err := t.sendOTPrecomputeRequest(conn, count, initial, epoch, choices); err != nil {
-			t.failPendingPrecompute(err)
+			t.failPendingPrecompute(state, pending, err)
 			return err
 		}
 		return nil
 	}
 	if pending.finalizing {
 		state.mu.Unlock()
+		t.connManager.mu.RUnlock()
 		return fmt.Errorf("duplicate OT precompute final response")
 	}
 	pending.finalizing = true
+	baseReceiver := pending.baseReceiver
+	session := pending.session
+	startIndex := pending.startIndex
+	count := pending.count
 	state.mu.Unlock()
+	t.connManager.mu.RUnlock()
 
 	ciphertexts, request, err := mpc.UnmarshalPrecomputeFinal(msg.GetOtReceiverData())
 	if err != nil {
-		t.failPendingPrecompute(err)
+		t.failPendingPrecompute(state, pending, err)
 		return err
 	}
-	if request.SessionID != pending.session || request.StartIndex != pending.startIndex || int(request.Count) != pending.count {
+	if request.SessionID != session || request.StartIndex != startIndex || int(request.Count) != count {
 		err := fmt.Errorf("OT extension response metadata mismatch")
-		t.failPendingPrecompute(err)
+		t.failPendingPrecompute(state, pending, err)
 		return err
 	}
-	selected, delta, err := mpc.FinishBaseOTReceiver(pending.baseReceiver, ciphertexts)
+	selected, delta, err := mpc.FinishBaseOTReceiver(baseReceiver, ciphertexts)
 	if err != nil {
-		t.failPendingPrecompute(err)
+		t.failPendingPrecompute(state, pending, err)
 		return err
 	}
 	entries, err := mpc.ExtendSender(selected, delta, request)
 	clear(selected[:])
 	delta = mpc.Label{}
 	if err != nil {
-		t.failPendingPrecompute(err)
+		t.failPendingPrecompute(state, pending, err)
 		return err
 	}
-
-	state.mu.Lock()
-	if state.pending != pending || state.pool.TotalCount() != int(pending.startIndex) {
-		state.mu.Unlock()
-		err := fmt.Errorf("OT sender state changed during extension")
-		t.failPendingPrecompute(err)
-		return err
-	}
-	expectedTotal := pending.startIndex + uint64(len(entries))
-	state.mu.Unlock()
-
-	// TEE_T commits its pending receiver entries on this acknowledgment. The
-	// total generated count does not change when online sessions reserve OTs.
-	if err := t.sendOTPrecomputeComplete(uint32(expectedTotal)); err != nil {
-		state.mu.Lock()
-		state.ready = false
-		state.pool.Clear()
-		state.pending = nil
-		state.pool.SetExtendPending(false)
-		state.mu.Unlock()
-		t.otReady.Store(false)
-		signalSenderPrecompute(pending, err)
-		return err
-	}
-
-	state.mu.Lock()
-	if state.pending != pending || state.pool.TotalCount() != int(pending.startIndex) {
-		state.ready = false
-		state.pool.Clear()
-		state.pending = nil
-		state.mu.Unlock()
-		t.otReady.Store(false)
-		err := fmt.Errorf("OT sender state changed before local commit")
-		signalSenderPrecompute(pending, err)
-		return err
-	}
-	if err := state.pool.Add(entries); err != nil {
-		state.ready = false
-		state.pool.Clear()
-		state.pending = nil
-		state.mu.Unlock()
-		t.otReady.Store(false)
-		signalSenderPrecompute(pending, err)
-		return err
-	}
-	wasInitial := pending.isInitial
-	state.epoch = mpc.ExtensionEpoch(pending.session)
-	state.pending = nil
-	state.pool.SetExtendPending(false)
-	if wasInitial {
-		state.ready = true
-	}
-	state.mu.Unlock()
-	t.otReady.Store(true)
-	signalSenderPrecompute(pending, nil)
-	return nil
+	return t.completeSenderPrecompute(state, pending, entries)
 }
 
 func signalSenderPrecompute(pending *senderPrecompute, err error) {
@@ -300,26 +306,117 @@ func signalSenderPrecompute(pending *senderPrecompute, err error) {
 	}
 }
 
-func (t *TEEK) failPendingPrecompute(err error) {
-	state := t.otPrecomputeState
-	if state == nil {
-		return
+func (t *TEEK) completeSenderPrecompute(state *OTPrecomputeState, pending *senderPrecompute, entries []mpc.SenderOT) error {
+	if state == nil || pending == nil || t.connManager == nil {
+		return fmt.Errorf("OT precompute identity is incomplete")
+	}
+
+	// Validate the exact control and pending request atomically before the
+	// irreversible Complete acknowledgment. Do not retain the lease while the
+	// network write can block.
+	t.connManager.mu.RLock()
+	controlCurrent := t.connManager.controlConn == pending.controlConn && t.connManager.controlGeneration == pending.controlGeneration
+	state.mu.Lock()
+	stateCurrent := t.otPrecomputeState == state && state.pending == pending && state.pool.TotalCount() == int(pending.startIndex)
+	state.mu.Unlock()
+	t.connManager.mu.RUnlock()
+	if !controlCurrent || !stateCurrent {
+		err := fmt.Errorf("OT sender state changed during extension")
+		t.failPendingPrecomputeAndClear(state, pending, err)
+		return err
+	}
+
+	expectedTotal := pending.startIndex + uint64(len(entries))
+	sendComplete := pending.sendComplete
+	if sendComplete == nil {
+		sendComplete = func(poolSize uint32) error {
+			return t.sendOTPrecomputeComplete(pending, poolSize)
+		}
+	}
+	if err := sendComplete(uint32(expectedTotal)); err != nil {
+		t.failPendingPrecomputeAndClear(state, pending, err)
+		return err
+	}
+
+	// Commit locally under the short control-generation lease. This closes the
+	// window where a successful old-generation Complete write could append to a
+	// replacement pool after the connection was superseded.
+	t.connManager.mu.RLock()
+	controlCurrent = t.connManager.controlConn == pending.controlConn && t.connManager.controlGeneration == pending.controlGeneration
+	state.mu.Lock()
+	if !controlCurrent || t.otPrecomputeState != state || state.pending != pending || state.pool.TotalCount() != int(pending.startIndex) {
+		state.mu.Unlock()
+		t.connManager.mu.RUnlock()
+		err := fmt.Errorf("OT sender state changed before local commit")
+		t.failPendingPrecomputeAndClear(state, pending, err)
+		return err
+	}
+	if err := state.pool.Add(entries); err != nil {
+		state.ready = false
+		state.pool.Clear()
+		state.pending = nil
+		state.pool.SetExtendPending(false)
+		state.mu.Unlock()
+		t.connManager.mu.RUnlock()
+		t.otReady.Store(false)
+		signalSenderPrecompute(pending, err)
+		return err
+	}
+	wasInitial := pending.isInitial
+	state.epoch = mpc.ExtensionEpoch(pending.session)
+	state.pending = nil
+	state.pool.SetExtendPending(false)
+	if wasInitial {
+		state.ready = true
+	}
+	state.mu.Unlock()
+	t.connManager.mu.RUnlock()
+	t.otReady.Store(true)
+	signalSenderPrecompute(pending, nil)
+	return nil
+}
+
+func (t *TEEK) failPendingPrecompute(state *OTPrecomputeState, expected *senderPrecompute, err error) bool {
+	if state == nil || expected == nil || t.otPrecomputeState != state {
+		return false
 	}
 	state.mu.Lock()
-	pending := state.pending
+	if t.otPrecomputeState != state || state.pending != expected {
+		state.mu.Unlock()
+		return false
+	}
 	state.pending = nil
 	state.pool.SetExtendPending(false)
 	state.mu.Unlock()
-	signalSenderPrecompute(pending, err)
+	signalSenderPrecompute(expected, err)
+	return true
 }
 
-func (t *TEEK) sendOTPrecomputeComplete(poolSize uint32) error {
-	if t.connManager == nil {
+func (t *TEEK) failPendingPrecomputeAndClear(state *OTPrecomputeState, expected *senderPrecompute, err error) bool {
+	if state == nil || expected == nil || t.otPrecomputeState != state {
+		return false
+	}
+	state.mu.Lock()
+	if t.otPrecomputeState != state || state.pending != expected {
+		state.mu.Unlock()
+		return false
+	}
+	state.ready = false
+	state.pool.Clear()
+	state.pending = nil
+	state.pool.SetExtendPending(false)
+	state.mu.Unlock()
+	t.otReady.Store(false)
+	signalSenderPrecompute(expected, err)
+	return true
+}
+
+func (t *TEEK) sendOTPrecomputeComplete(pending *senderPrecompute, poolSize uint32) error {
+	if t.connManager == nil || pending == nil || pending.controlConn == nil {
 		return fmt.Errorf("connection manager not initialized")
 	}
-	conn := t.connManager.GetControlConnection()
-	if conn == nil {
-		return fmt.Errorf("no TEE_T control connection available")
+	if !t.connManager.isCurrentControlConnection(pending.controlConn, pending.controlGeneration) {
+		return fmt.Errorf("TEE_T control connection changed before OT precompute completion")
 	}
 	env := &teeproto.Envelope{
 		SessionId: "ot_precompute", TimestampMs: time.Now().UnixMilli(),
@@ -329,7 +426,7 @@ func (t *TEEK) sendOTPrecomputeComplete(poolSize uint32) error {
 	if err != nil {
 		return fmt.Errorf("marshal OT precompute complete: %w", err)
 	}
-	if err := conn.WriteMessage(websocket.BinaryMessage, data); err != nil {
+	if err := pending.controlConn.WriteMessage(websocket.BinaryMessage, data); err != nil {
 		return fmt.Errorf("send OT precompute complete: %w", err)
 	}
 	return nil

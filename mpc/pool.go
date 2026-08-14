@@ -153,23 +153,11 @@ func (p *ReceiverPool) Add(entries []ReceiverOT) error {
 func (p *ReceiverPool) Consume(start uint64, count int) ([]ReceiverOT, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if count <= 0 {
-		return nil, fmt.Errorf("mpc: invalid OT consume count %d", count)
-	}
-	if start < p.baseIndex {
-		return nil, fmt.Errorf("mpc: receiver OT range starts before retained index %d", p.baseIndex)
+	if err := p.validateConsumableLocked(start, count); err != nil {
+		return nil, err
 	}
 	end := start + uint64(count)
-	total := p.baseIndex + uint64(len(p.entries))
-	if end < start || end > total {
-		return nil, fmt.Errorf("mpc: insufficient receiver OTs: need through %d, total %d", end, total)
-	}
 	offset := start - p.baseIndex
-	for i := offset; i < offset+uint64(count); i++ {
-		if p.used[i] {
-			return nil, fmt.Errorf("mpc: receiver OT index %d already used", p.baseIndex+i)
-		}
-	}
 	result := append([]ReceiverOT(nil), p.entries[offset:offset+uint64(count)]...)
 	for i := offset; i < offset+uint64(count); i++ {
 		p.used[i] = true
@@ -181,6 +169,37 @@ func (p *ReceiverPool) Consume(start uint64, count int) ([]ReceiverOT, error) {
 	}
 	p.compactConsumed()
 	return result, nil
+}
+
+// ValidateConsumable checks whether a range in the currently committed pool is
+// unused without consuming it. TEE_T uses this while deciding whether an
+// online request that crosses into the current pending batch may wait for the
+// existing completion message.
+func (p *ReceiverPool) ValidateConsumable(start uint64, count int) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.validateConsumableLocked(start, count)
+}
+
+func (p *ReceiverPool) validateConsumableLocked(start uint64, count int) error {
+	if count <= 0 {
+		return fmt.Errorf("mpc: invalid OT consume count %d", count)
+	}
+	if start < p.baseIndex {
+		return fmt.Errorf("mpc: receiver OT range starts before retained index %d", p.baseIndex)
+	}
+	end := start + uint64(count)
+	total := p.baseIndex + uint64(len(p.entries))
+	if end < start || end > total {
+		return fmt.Errorf("mpc: insufficient receiver OTs: need through %d, total %d", end, total)
+	}
+	offset := start - p.baseIndex
+	for i := offset; i < offset+uint64(count); i++ {
+		if p.used[i] {
+			return fmt.Errorf("mpc: receiver OT index %d already used", p.baseIndex+i)
+		}
+	}
+	return nil
 }
 
 // AdvanceTo discards every entry below the sender's reservation frontier after

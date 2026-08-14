@@ -17,6 +17,9 @@ type pendingOPRFEvaluation struct {
 }
 
 type TEETSessionState struct {
+	session           *shared.Session
+	controlGeneration uint64
+
 	KeyShare                       []byte
 	CipherSuite                    uint16
 	PendingEncryptedRequest        *shared.EncryptedRequestData            // Legacy: single request
@@ -54,6 +57,28 @@ type TEETSessionManager struct {
 	stateMutex sync.Mutex
 }
 
+type teetSessionIdentity struct {
+	session           *shared.Session
+	controlGeneration uint64
+	sessionConn       *SessionTEEKConnection
+	validate          func() error
+
+	// beforeOTReceiverConsume is a request-local synchronization hook used by
+	// deterministic generation-replacement tests. Production identities leave
+	// it nil.
+	beforeOTReceiverConsume func()
+}
+
+func (i *teetSessionIdentity) ensureCurrent() error {
+	if i == nil || i.session == nil {
+		return fmt.Errorf("session identity is nil")
+	}
+	if i.validate != nil {
+		return i.validate()
+	}
+	return nil
+}
+
 func NewTEETSessionManager() *TEETSessionManager {
 	return &TEETSessionManager{
 		SessionManager: shared.NewSessionManager(),
@@ -71,6 +96,19 @@ func (t *TEETSessionManager) GetTEETSessionState(sessionID string) (*TEETSession
 	return state, nil
 }
 
+func (t *TEETSessionManager) stateForSession(session *shared.Session) (*TEETSessionState, error) {
+	if session == nil {
+		return nil, fmt.Errorf("session is nil")
+	}
+	t.stateMutex.Lock()
+	defer t.stateMutex.Unlock()
+	state := t.teetStates[session.ID]
+	if state == nil || state.session != session {
+		return nil, fmt.Errorf("TEE_T session state changed for session %s", session.ID)
+	}
+	return state, nil
+}
+
 func (t *TEETSessionManager) SetTEETSessionState(sessionID string, state *TEETSessionState) {
 	t.stateMutex.Lock()
 	t.teetStates[sessionID] = state
@@ -81,6 +119,52 @@ func (t *TEETSessionManager) RemoveTEETSessionState(sessionID string) {
 	t.stateMutex.Lock()
 	delete(t.teetStates, sessionID)
 	t.stateMutex.Unlock()
+}
+
+func (t *TEETSessionManager) controlGenerationForSession(session *shared.Session) (uint64, bool) {
+	if session == nil {
+		return 0, false
+	}
+	t.stateMutex.Lock()
+	defer t.stateMutex.Unlock()
+	state := t.teetStates[session.ID]
+	if state == nil || state.session != session {
+		return 0, false
+	}
+	return state.controlGeneration, true
+}
+
+func (t *TEETSessionManager) isCurrentControlSession(session *shared.Session, controlGeneration uint64) bool {
+	generation, ok := t.controlGenerationForSession(session)
+	if !ok || generation != controlGeneration {
+		return false
+	}
+	current, err := t.SessionManager.GetSession(session.ID)
+	return err == nil && current == session
+}
+
+func (t *TEETSessionManager) isCurrentSession(session *shared.Session) bool {
+	if session == nil {
+		return false
+	}
+	if _, ok := t.controlGenerationForSession(session); !ok {
+		return false
+	}
+	current, err := t.SessionManager.GetSession(session.ID)
+	return err == nil && current == session
+}
+
+func (t *TEETSessionManager) closeSessionIfCurrent(session *shared.Session) error {
+	if session == nil {
+		return fmt.Errorf("session is nil")
+	}
+	t.stateMutex.Lock()
+	state := t.teetStates[session.ID]
+	if state != nil && state.session == session {
+		delete(t.teetStates, session.ID)
+	}
+	t.stateMutex.Unlock()
+	return t.SessionManager.CloseSessionIfCurrent(session)
 }
 
 func (t *TEETSessionManager) CloseSession(sessionID string) error {

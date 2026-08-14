@@ -79,11 +79,11 @@ func (sm *SessionManager) CreateSession(clientConn Connection) (string, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	session := &Session{
-		ID:           sessionID.String(),
-		ClientConn:   clientConn,
-		CreatedAt:    time.Now(),
-		LastActiveAt: time.Now(),
-		State:        SessionStateNew,
+		ID:             sessionID.String(),
+		ClientConn:     clientConn,
+		CreatedAt:      time.Now(),
+		LastActiveAt:   time.Now(),
+		State:          SessionStateNew,
 		RedactionState: &RedactionSessionState{},
 		ResponseState: &ResponseSessionState{
 			PendingResponses:          make(map[string][]byte),
@@ -156,12 +156,57 @@ func (sm *SessionManager) ActivateSession(sessionID string, clientConn Connectio
 		return fmt.Errorf("session %s not found", sessionID)
 	}
 
+	session.ConnMutex.Lock()
+	if session.ClientConn != nil && session.ClientConn != clientConn {
+		session.ConnMutex.Unlock()
+		return fmt.Errorf("session %s already has a client connection", sessionID)
+	}
 	session.ClientConn = clientConn
+	session.ConnMutex.Unlock()
 	session.LastActiveAt = time.Now()
 	session.State = SessionStateActive
 	sm.sessionsByConn[clientConn] = session
 
 	return nil
+}
+
+// ActivateSessionIfCurrent activates expected only while it remains the exact
+// session registered under its ID.
+func (sm *SessionManager) ActivateSessionIfCurrent(expected *Session, clientConn Connection) error {
+	if expected == nil {
+		return fmt.Errorf("session is nil")
+	}
+	sm.mutex.Lock()
+	defer sm.mutex.Unlock()
+
+	if sm.sessions[expected.ID] != expected {
+		return fmt.Errorf("session %s is no longer current", expected.ID)
+	}
+	expected.ConnMutex.Lock()
+	if expected.ClientConn != nil && expected.ClientConn != clientConn {
+		expected.ConnMutex.Unlock()
+		return fmt.Errorf("session %s already has a client connection", expected.ID)
+	}
+	expected.ClientConn = clientConn
+	expected.ConnMutex.Unlock()
+	expected.LastActiveAt = time.Now()
+	expected.State = SessionStateActive
+	sm.sessionsByConn[clientConn] = expected
+	return nil
+}
+
+func (sm *SessionManager) IsCurrentSessionWithClient(expected *Session, clientConn Connection) bool {
+	if expected == nil {
+		return false
+	}
+	sm.mutex.Lock()
+	defer sm.mutex.Unlock()
+	if sm.sessions[expected.ID] != expected {
+		return false
+	}
+	expected.ConnMutex.RLock()
+	defer expected.ConnMutex.RUnlock()
+	return expected.ClientConn == clientConn
 }
 
 // GetSession retrieves a session by ID
@@ -199,6 +244,30 @@ func (sm *SessionManager) CloseSession(sessionID string) error {
 	if !exists {
 		return fmt.Errorf("session %s not found", sessionID)
 	}
+	sm.closeSessionLocked(session)
+	return nil
+}
+
+// CloseSessionIfCurrent closes expected only while it remains the exact session
+// registered under its ID. Expiry callbacks use this to avoid closing a newer
+// session that reused the same ID after expected was removed.
+func (sm *SessionManager) CloseSessionIfCurrent(expected *Session) error {
+	if expected == nil {
+		return fmt.Errorf("session is nil")
+	}
+	sm.mutex.Lock()
+	defer sm.mutex.Unlock()
+
+	if sm.sessions[expected.ID] != expected {
+		return fmt.Errorf("session %s is no longer current", expected.ID)
+	}
+	sm.closeSessionLocked(expected)
+	return nil
+}
+
+// closeSessionLocked closes and removes session. sm.mutex must be held.
+func (sm *SessionManager) closeSessionLocked(session *Session) {
+	sessionID := session.ID
 
 	session.IsClosed = true
 	session.State = SessionStateClosed
@@ -214,7 +283,6 @@ func (sm *SessionManager) CloseSession(sessionID string) error {
 	}
 
 	delete(sm.sessions, sessionID)
-	return nil
 }
 
 // StartCleanupRoutine starts the session cleanup routine

@@ -16,6 +16,7 @@ import (
 	"github.com/gorilla/websocket"
 	"go.uber.org/zap"
 	"golang.org/x/sync/singleflight"
+	"google.golang.org/protobuf/proto"
 )
 
 // MaxWebSocketMessageSize is the maximum allowed WebSocket message size (30 MB)
@@ -70,7 +71,8 @@ type TEET struct {
 	teekConnectedMu sync.RWMutex
 
 	// Per-session connection manager (control + per-session connections)
-	connManager *TEEKConnectionManager
+	connManager     *TEEKConnectionManager
+	connManagerOnce sync.Once
 
 	// V2 router-mode wiring. Nil/zero in standalone mode; filled by
 	// NewTEETForRouter when ROUTER_URL is set.
@@ -134,10 +136,18 @@ func NewTEETWithLogger(port int, logger *shared.Logger) *TEET {
 		signingKeyPair:    signingKeyPair,
 		oprfKeyShare:      oprfKeyShare,
 	}
+	teet.connectionManager()
 
 	sessionManager.SetOnSessionExpired(teet.cleanupSessionWithSession)
 
 	return teet
+}
+
+func (t *TEET) connectionManager() *TEEKConnectionManager {
+	t.connManagerOnce.Do(func() {
+		t.connManager = NewTEEKConnectionManager(t, t.logger)
+	})
+	return t.connManager
 }
 
 // NewTEETForRouter constructs a TEET wired for the V2 router-mode path.
@@ -240,12 +250,15 @@ func (t *TEET) cleanupSessionWithSession(session *shared.Session) {
 		t.logger.WithSession(session.ID).Debug("Session cleanup already claimed by another caller")
 		return
 	}
-	if t.connManager != nil {
-		t.connManager.CloseSessionConnection(session.ID)
+	ownerGeneration, ownsSessionState := t.sessionManager.controlGenerationForSession(session)
+	if t.connManager != nil && ownsSessionState {
+		t.connManager.CloseSessionConnection(session.ID, ownerGeneration, session)
 	}
-	_ = t.sessionManager.CloseSession(session.ID)
+	_ = t.sessionManager.closeSessionIfCurrent(session)
 	t.activeSessions.Add(-1)
-	t.sessionTerminator.CleanupSession(session.ID)
+	if ownsSessionState {
+		t.sessionTerminator.CleanupSession(session.ID)
+	}
 	t.logger.WithSession(session.ID).Info("Session terminated and cleaned up")
 }
 
@@ -294,4 +307,73 @@ func (t *TEET) terminateSessionWithError(sessionID string, reason shared.Termina
 
 	// Cleanup session resources
 	t.cleanupSession(sessionID)
+}
+
+func (t *TEET) terminateSessionWithErrorForIdentity(identity *teetSessionIdentity, reason shared.TerminationReason, err error, message string) {
+	if identity == nil || identity.session == nil {
+		return
+	}
+	session := identity.session
+	if currentErr := identity.ensureCurrent(); currentErr != nil {
+		t.logger.WithSession(session.ID).Debug("Ignoring stale session termination", zap.Error(currentErr))
+		return
+	}
+
+	t.logger.WithSession(session.ID).Error(message, zap.Error(err), zap.String("reason", string(reason)))
+	errorMsg := message
+	if err != nil {
+		errorMsg = fmt.Sprintf("%s: %v", message, err)
+	}
+	env := &teeproto.Envelope{
+		SessionId: session.ID, TimestampMs: time.Now().UnixMilli(),
+		Payload: &teeproto.Envelope_Error{Error: &teeproto.ErrorData{Message: errorMsg}},
+	}
+	if routeErr := t.routeToClientForSession(session, env); routeErr != nil {
+		t.logger.WithSession(session.ID).Warn("Failed to send error to client", zap.Error(routeErr))
+	}
+	if t.connManager != nil {
+		if sendErr := t.connManager.SendOnControlForSession(session, env); sendErr != nil {
+			t.logger.WithSession(session.ID).Warn("Failed to send error to TEE_K on control", zap.Error(sendErr))
+		}
+	}
+	time.Sleep(50 * time.Millisecond)
+	t.cleanupSessionWithSession(session)
+}
+
+func (t *TEET) routeToClientForSession(session *shared.Session, env *teeproto.Envelope) error {
+	if session == nil {
+		return fmt.Errorf("session is nil")
+	}
+	session.ConnMutex.RLock()
+	conn := session.ClientConn
+	session.ConnMutex.RUnlock()
+	return writeEnvelopeToExactSessionConnection(session.ID, conn, env, "client")
+}
+
+func (t *TEET) routeToTEEKForSession(session *shared.Session, env *teeproto.Envelope) error {
+	if session == nil {
+		return fmt.Errorf("session is nil")
+	}
+	session.ConnMutex.RLock()
+	conn := session.TEEKConn
+	session.ConnMutex.RUnlock()
+	return writeEnvelopeToExactSessionConnection(session.ID, conn, env, "TEE_K")
+}
+
+func writeEnvelopeToExactSessionConnection(sessionID string, conn shared.Connection, env *teeproto.Envelope, peer string) error {
+	if conn == nil {
+		return fmt.Errorf("no %s connection in session %s", peer, sessionID)
+	}
+	ws, ok := conn.(*shared.WSConnection)
+	if !ok {
+		return fmt.Errorf("unsupported %s connection type", peer)
+	}
+	if env.GetSessionId() == "" {
+		env.SessionId = sessionID
+	}
+	data, err := proto.Marshal(env)
+	if err != nil {
+		return err
+	}
+	return ws.WriteMessage(websocket.BinaryMessage, data)
 }

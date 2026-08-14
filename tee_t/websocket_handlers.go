@@ -64,6 +64,7 @@ func (t *TEET) handleClientWebSocket(w http.ResponseWriter, r *http.Request) {
 	t.logger.Debug("Client WebSocket connection established")
 
 	var sessionID string
+	var sessionIdentity *teetSessionIdentity
 
 	for {
 
@@ -72,15 +73,15 @@ func (t *TEET) handleClientWebSocket(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			if ne, ok := errors.AsType[net.Error](err); ok && ne.Timeout() {
 				t.logger.Warn("Client session read timeout", zap.Duration("timeout", SessionReadTimeout))
-				if sessionID != "" {
-					t.terminateSessionWithError(sessionID, shared.ReasonTimeoutExceeded, err, "client session idle timeout")
+				if sessionIdentity != nil {
+					t.terminateSessionWithErrorForIdentity(sessionIdentity, shared.ReasonTimeoutExceeded, err, "client session idle timeout")
 				}
 			} else if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
 				t.logger.Debug("Client connection closed")
 			} else if !isNetworkShutdownError(err) {
 				t.logger.Error("Client connection error", zap.Error(err))
-				if sessionID != "" {
-					t.terminateSessionWithError(sessionID, shared.ReasonConnectionLost, err, "Client connection lost")
+				if sessionIdentity != nil {
+					t.terminateSessionWithErrorForIdentity(sessionIdentity, shared.ReasonConnectionLost, err, "Client connection lost")
 				}
 			}
 			break
@@ -93,8 +94,8 @@ func (t *TEET) handleClientWebSocket(w http.ResponseWriter, r *http.Request) {
 		var env teeproto.Envelope
 		if err := proto.Unmarshal(msgBytes, &env); err != nil {
 			t.logger.Error("Failed to parse message from client", zap.Error(err))
-			if sessionID != "" {
-				t.terminateSessionWithError(sessionID, shared.ReasonMessageParsingFailed, err, "Failed to parse message from client")
+			if sessionIdentity != nil {
+				t.terminateSessionWithErrorForIdentity(sessionIdentity, shared.ReasonMessageParsingFailed, err, "Failed to parse message from client")
 			}
 			break
 		}
@@ -113,7 +114,7 @@ func (t *TEET) handleClientWebSocket(w http.ResponseWriter, r *http.Request) {
 			t.logger.Warn("Unknown envelope payload from client; ignoring",
 				zap.String("session_id", env.GetSessionId()),
 				zap.String("payload_type", fmt.Sprintf("%T", env.Payload)))
-			t.sendErrorToClient(sessionID, "Unknown message type")
+			t.sendErrorToClient(sessionIdentity, "Unknown message type")
 			continue
 		}
 
@@ -123,7 +124,13 @@ func (t *TEET) handleClientWebSocket(w http.ResponseWriter, r *http.Request) {
 			if sessionID == "" {
 				sessionID = msg.SessionID
 				wsConn := shared.NewWSConnection(conn)
-				if err := t.sessionManager.ActivateSession(sessionID, wsConn); err != nil {
+				session, getErr := t.sessionManager.GetSession(sessionID)
+				if getErr != nil {
+					err = getErr
+				} else {
+					err = t.sessionManager.ActivateSessionIfCurrent(session, wsConn)
+				}
+				if err != nil {
 					t.logger.WithSession(sessionID).Error("Failed to activate session", zap.Error(err))
 					// Send error directly to client since session doesn't exist
 					errEnv := &teeproto.Envelope{
@@ -139,30 +146,35 @@ func (t *TEET) handleClientWebSocket(w http.ResponseWriter, r *http.Request) {
 					break
 				}
 
-				if _, err := t.sessionManager.GetTEETSessionState(sessionID); err != nil {
+				if _, err := t.sessionManager.stateForSession(session); err != nil {
 					t.logger.WithSession(sessionID).Error("TEETSessionState not found - session not registered via control connection", zap.Error(err))
-					t.terminateSessionWithError(sessionID, shared.ReasonSessionNotFound, err, "Session state not initialized")
+					identity := t.clientSessionIdentity(session, wsConn)
+					t.terminateSessionWithErrorForIdentity(identity, shared.ReasonSessionNotFound, err, "Session state not initialized")
 					break
 				}
+				sessionIdentity = t.clientSessionIdentity(session, wsConn)
 				t.logger.Info("Session activated", zap.String("sid", shared.TruncateSessionID(sessionID)))
 			} else if msg.SessionID != sessionID {
 				err := fmt.Errorf("expected %s, got %s", sessionID, msg.SessionID)
-				t.terminateSessionWithError(sessionID, shared.ReasonSessionIDMismatch, err, "Session ID mismatch")
+				t.terminateSessionWithErrorForIdentity(sessionIdentity, shared.ReasonSessionIDMismatch, err, "Session ID mismatch")
 				break
 			}
+		}
+		if sessionIdentity == nil || sessionIdentity.ensureCurrent() != nil {
+			break
 		}
 
 		var handlerErr error
 		switch msg.Type {
 		case shared.MsgRedactionStreams:
 			t.logger.Debug("Handling MsgRedactionStreams", zap.String("session_id", sessionID))
-			handlerErr = t.handleRedactionStreams(sessionID, msg)
+			handlerErr = t.handleRedactionStreams(sessionIdentity, msg)
 		case shared.MsgBatchedEncryptedResponses:
 			t.logger.WithSession(sessionID).Debug("Handling batched encrypted responses")
-			handlerErr = t.handleBatchedEncryptedResponses(sessionID, msg)
+			handlerErr = t.handleBatchedEncryptedResponses(sessionIdentity, msg)
 		default:
 			err := fmt.Errorf("unknown message type: %s", string(msg.Type))
-			t.terminateSessionWithError(sessionID, shared.ReasonUnknownMessageType, err, "Unknown message type")
+			t.terminateSessionWithErrorForIdentity(sessionIdentity, shared.ReasonUnknownMessageType, err, "Unknown message type")
 			return
 		}
 
@@ -172,10 +184,22 @@ func (t *TEET) handleClientWebSocket(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if sessionID != "" {
+	if sessionIdentity != nil {
 		t.logger.Info("Session finished", zap.String("sid", shared.TruncateSessionID(sessionID)))
-		t.cleanupSession(sessionID)
+		t.cleanupSessionWithSession(sessionIdentity.session)
 	}
+}
+
+func (t *TEET) clientSessionIdentity(session *shared.Session, clientConn *shared.WSConnection) *teetSessionIdentity {
+	return &teetSessionIdentity{session: session, validate: func() error {
+		if !t.sessionManager.IsCurrentSessionWithClient(session, clientConn) {
+			return fmt.Errorf("client session was superseded")
+		}
+		if t.connManager != nil {
+			return t.connManager.validateSessionOwner(session)
+		}
+		return nil
+	}}
 }
 
 // Helper function to detect network errors that occur during normal shutdown
@@ -190,11 +214,15 @@ func isNetworkShutdownError(err error) bool {
 }
 
 // sendErrorToClient sends an error message to a client
-func (t *TEET) sendErrorToClient(sessionID, errMsg string) {
+func (t *TEET) sendErrorToClient(identity *teetSessionIdentity, errMsg string) {
+	if identity == nil || identity.session == nil || identity.ensureCurrent() != nil {
+		return
+	}
+	sessionID := identity.session.ID
 	env := &teeproto.Envelope{SessionId: sessionID, TimestampMs: time.Now().UnixMilli(),
 		Payload: &teeproto.Envelope_Error{Error: &teeproto.ErrorData{Message: errMsg}},
 	}
-	if err := t.sessionManager.RouteToClient(sessionID, env); err != nil {
+	if err := t.routeToClientForSession(identity.session, env); err != nil {
 		t.logger.Error("Failed to send error message to client session",
 			zap.String("session_id", sessionID),
 			zap.Error(err))
@@ -233,13 +261,10 @@ func (t *TEET) handleControlWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	t.logger.Debug("Control WebSocket connection from TEE_K")
 
-	// Initialize connection manager if not already done
-	if t.connManager == nil {
-		t.connManager = NewTEEKConnectionManager(t, t.logger)
-	}
+	manager := t.connectionManager()
 
 	// Handle the control connection (blocks until disconnect)
-	if err := t.connManager.HandleControlConnection(conn); err != nil {
+	if err := manager.HandleControlConnection(conn); err != nil {
 		t.logger.Error("Control connection failed", zap.Error(err))
 	}
 
@@ -259,14 +284,16 @@ func (t *TEET) handleSessionWebSocket(w http.ResponseWriter, r *http.Request) {
 	t.logger.Debug("Session WebSocket connection from TEE_K")
 
 	// Check that control connection is established and attested
-	if t.connManager == nil || !t.connManager.IsAttestationVerified() {
+	manager := t.connectionManager()
+	controlGeneration, ready := manager.readyControlGeneration()
+	if !ready {
 		t.logger.Warn("Rejecting session connection - control not attested")
 		t.sendErrorAndClose(conn, "", "Control connection not established or attested")
 		return
 	}
 
 	// Handle the session connection (blocks until disconnect)
-	if err := t.connManager.HandleSessionConnection(conn); err != nil {
+	if err := manager.HandleSessionConnection(conn, controlGeneration); err != nil {
 		t.logger.Error("Session connection failed", zap.Error(err))
 	}
 

@@ -12,22 +12,20 @@ import (
 )
 
 // handleBatchedResponseLengths handles batched response lengths from TEE_T
-func (t *TEEK) handleBatchedResponseLengths(sessionID string, msg *shared.Message) error {
+func (t *TEEK) handleBatchedResponseLengths(identity *teekSessionIdentity, msg *shared.Message) error {
+	if err := identity.ensureCurrent(); err != nil {
+		return err
+	}
+	session := identity.session
+	sessionID := session.ID
 	var batchedLengths shared.BatchedResponseLengthData
 	if err := msg.UnmarshalData(&batchedLengths); err != nil {
-		t.terminateSessionWithError(sessionID, shared.ReasonMessageParsingFailed, err, "Failed to unmarshal batched response lengths")
+		t.terminateSessionWithErrorForIdentity(identity, shared.ReasonMessageParsingFailed, err, "Failed to unmarshal batched response lengths")
 		return err
 	}
 
 	t.logger.WithSession(sessionID).Debug("Received batched response lengths",
 		zap.Int("total_count", batchedLengths.TotalCount))
-
-	// Get session to store response lengths
-	session, err := t.sessionManager.GetSession(sessionID)
-	if err != nil {
-		t.terminateSessionWithError(sessionID, shared.ReasonSessionNotFound, err, "Failed to get session for batched lengths")
-		return err
-	}
 
 	// Initialize ResponseState if needed
 	if session.ResponseState == nil {
@@ -47,9 +45,9 @@ func (t *TEEK) handleBatchedResponseLengths(sessionID string, msg *shared.Messag
 	// TLS 1.3: TEE_K owns the server-app-seq, ignoring the client's seq for
 	// nonce purposes. See [[tcpdata-ack-protocol-2026-06-10]] / Option 3.
 	// TLS 1.2: client's seq is correct (no NSTs to throw off alignment).
-	tlsState, tlsErr := t.getSessionTLSState(sessionID)
+	tlsState, tlsErr := t.sessionManager.stateForSession(session)
 	if tlsErr != nil {
-		t.terminateSessionWithError(sessionID, shared.ReasonInternalError, tlsErr, "Failed to get TLS state for tag-secret generation")
+		t.terminateSessionWithErrorForIdentity(identity, shared.ReasonInternalError, tlsErr, "Failed to get TLS state for tag-secret generation")
 		return tlsErr
 	}
 	useTEEKSeq := minitls.IsTLS13CipherSuite(tlsState.CipherSuite)
@@ -77,7 +75,7 @@ func (t *TEEK) handleBatchedResponseLengths(sessionID string, msg *shared.Messag
 
 		// Generate tag secrets for this response
 		tagSecretsBytes, nonce, err := t.generateResponseTagSecrets(
-			sessionID,
+			tlsState,
 			lengthData.Length,
 			nonceSeq,
 			lengthData.RecordHeader,
@@ -85,7 +83,7 @@ func (t *TEEK) handleBatchedResponseLengths(sessionID string, msg *shared.Messag
 		)
 		if err != nil {
 			session.ResponseState.ResponsesMutex.Unlock()
-			t.terminateSessionWithError(sessionID, shared.ReasonCryptoTagComputationFailed, err, "Failed to generate tag secrets for sequence in batch")
+			t.terminateSessionWithErrorForIdentity(identity, shared.ReasonCryptoTagComputationFailed, err, "Failed to generate tag secrets for sequence in batch")
 			return err
 		}
 
@@ -130,8 +128,11 @@ func (t *TEEK) handleBatchedResponseLengths(sessionID string, msg *shared.Messag
 		},
 	}
 
-	if err := t.sendEnvelopeToTEET(sessionID, env); err != nil {
-		t.terminateSessionWithError(sessionID, shared.ReasonNetworkFailure, err, "Failed to send batched tag secrets to TEE_T")
+	if err := identity.ensureCurrent(); err != nil {
+		return err
+	}
+	if err := t.connManager.SendOnExactSession(identity, env); err != nil {
+		t.terminateSessionWithErrorForIdentity(identity, shared.ReasonNetworkFailure, err, "Failed to send batched tag secrets to TEE_T")
 		return err
 	}
 
@@ -141,10 +142,15 @@ func (t *TEEK) handleBatchedResponseLengths(sessionID string, msg *shared.Messag
 }
 
 // handleBatchedTagVerifications handles batched tag verifications from TEE_T
-func (t *TEEK) handleBatchedTagVerifications(sessionID string, msg *shared.Message) error {
+func (t *TEEK) handleBatchedTagVerifications(identity *teekSessionIdentity, msg *shared.Message) error {
+	if err := identity.ensureCurrent(); err != nil {
+		return err
+	}
+	session := identity.session
+	sessionID := session.ID
 	var batchedVerification shared.BatchedTagVerificationData
 	if err := msg.UnmarshalData(&batchedVerification); err != nil {
-		t.terminateSessionWithError(sessionID, shared.ReasonMessageParsingFailed, err, "Failed to unmarshal batched tag verification")
+		t.terminateSessionWithErrorForIdentity(identity, shared.ReasonMessageParsingFailed, err, "Failed to unmarshal batched tag verification")
 		return err
 	}
 
@@ -157,18 +163,19 @@ func (t *TEEK) handleBatchedTagVerifications(sessionID string, msg *shared.Messa
 
 	if batchedVerification.AllSuccessful {
 		// All verifications passed - generate streams for all responses
-		responseState, err := t.getSessionResponseState(sessionID)
-		if err != nil {
-			t.terminateSessionWithError(sessionID, shared.ReasonSessionNotFound, err, "Failed to get response state")
+		responseState := session.ResponseState
+		if responseState == nil {
+			err := fmt.Errorf("response state is not initialized")
+			t.terminateSessionWithErrorForIdentity(identity, shared.ReasonSessionNotFound, err, "Failed to get response state")
 			return err
 		}
 
 		// Generate decryption streams for all response sequences
 		for seqNum, responseLength := range responseState.ResponseLengthBySeq {
 			// Generate decryption stream using session-aware logic
-			decryptionStream, err := t.generateSingleDecryptionStream(sessionID, responseLength, seqNum)
+			decryptionStream, err := t.generateSingleDecryptionStreamForIdentity(identity, responseLength, seqNum)
 			if err != nil {
-				t.terminateSessionWithError(sessionID, shared.ReasonCryptoStreamGenerationFailed, err, "Failed to generate decryption stream for sequence")
+				t.terminateSessionWithErrorForIdentity(identity, shared.ReasonCryptoStreamGenerationFailed, err, "Failed to generate decryption stream for sequence")
 				return err
 			}
 
@@ -183,7 +190,7 @@ func (t *TEEK) handleBatchedTagVerifications(sessionID string, msg *shared.Messa
 		}
 	} else {
 		err := fmt.Errorf("tag verification failed")
-		t.terminateSessionWithError(sessionID, shared.ReasonCryptoTagVerificationFailed, err, "Tag verification failed")
+		t.terminateSessionWithErrorForIdentity(identity, shared.ReasonCryptoTagVerificationFailed, err, "Tag verification failed")
 		return err
 	}
 
@@ -199,14 +206,43 @@ func (t *TEEK) handleBatchedTagVerifications(sessionID string, msg *shared.Messa
 		Payload: &teeproto.Envelope_BatchedDecryptionStreams{BatchedDecryptionStreams: &teeproto.BatchedDecryptionStreams{DecryptionStreams: streams, SessionId: sessionID, TotalCount: int32(len(streams))}},
 	}
 
-	if err := t.sessionManager.RouteToClient(sessionID, envStreams); err != nil {
-		t.terminateSessionWithError(sessionID, shared.ReasonNetworkFailure, err, "Failed to send batched decryption streams to client")
+	if err := identity.ensureCurrent(); err != nil {
+		return err
+	}
+	if err := t.routeToClientForSession(session, envStreams); err != nil {
+		t.terminateSessionWithErrorForIdentity(identity, shared.ReasonNetworkFailure, err, "Failed to send batched decryption streams to client")
 		return err
 	}
 
 	t.logger.WithSession(sessionID).Debug("Successfully sent batched decryption streams to client",
 		zap.Int("count", len(decryptionStreams)))
 	return nil
+}
+
+func (t *TEEK) checkAndSendSignatureIfReadyForIdentity(identity *teekSessionIdentity) error {
+	if err := identity.ensureCurrent(); err != nil {
+		return err
+	}
+	session := identity.session
+	teekState, err := t.sessionManager.stateForSession(session)
+	if err != nil {
+		return fmt.Errorf("TEE_K session state not found: %v", err)
+	}
+	session.StreamsMutex.Lock()
+	session.TranscriptMutex.Lock()
+	transcriptReady := len(session.TranscriptData) > 0
+	session.TranscriptMutex.Unlock()
+	allProcessingComplete := transcriptReady && session.RedactionProcessingComplete && len(session.RedactedStreams) > 0 && !session.SignatureSent && isOPRFReady(teekState.OPRFState.Load())
+	if !allProcessingComplete {
+		session.StreamsMutex.Unlock()
+		return nil
+	}
+	session.SignatureSent = true
+	session.StreamsMutex.Unlock()
+	if err := identity.ensureCurrent(); err != nil {
+		return err
+	}
+	return t.generateComprehensiveSignatureForIdentity(identity)
 }
 
 // checkAndSendSignatureIfReady checks if all processing is complete and sends signature if ready

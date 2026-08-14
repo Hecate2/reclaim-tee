@@ -11,11 +11,12 @@ import (
 )
 
 // verifyTagForResponse verifies the authentication tag for a response
-func (t *TEET) verifyTagForResponse(sessionID string, encryptedResp *shared.EncryptedResponseData, tagSecretsData *struct {
+func (t *TEET) verifyTagForResponse(identity *teetSessionIdentity, encryptedResp *shared.EncryptedResponseData, tagSecretsData *struct {
 	TagSecrets []byte `json:"tag_secrets"`
 	SeqNum     uint64 `json:"seq_num"`
 }) shared.ResponseTagVerificationData {
-	teetState, err := t.sessionManager.GetTEETSessionState(sessionID)
+	sessionID := identity.session.ID
+	teetState, err := t.sessionManager.stateForSession(identity.session)
 	if err != nil {
 		return shared.ResponseTagVerificationData{Success: false, SeqNum: encryptedResp.SeqNum, Message: fmt.Sprintf("Failed to get TEE_T session state: %v", err)}
 	}
@@ -128,8 +129,9 @@ func (t *TEET) tagOK(cipherSuite uint16, resp *shared.EncryptedResponseData, sec
 // ISOLATED; a tail where the first record authenticates under a shifted nonce
 // (same key) = SEQ_DRIFT of k; a tail where no neighbouring nonce authenticates
 // = KEY_CHANGE (a mid-stream rekey; a ~6-byte predecessor points to it). TLS 1.3.
-func (t *TEET) classifyTagFailure(sessionID string, failed *shared.EncryptedResponseData, tagSecretBySeq map[uint64][]byte, pendingBySeq map[uint64]*shared.EncryptedResponseData) {
-	teetState, err := t.sessionManager.GetTEETSessionState(sessionID)
+func (t *TEET) classifyTagFailure(identity *teetSessionIdentity, failed *shared.EncryptedResponseData, tagSecretBySeq map[uint64][]byte, pendingBySeq map[uint64]*shared.EncryptedResponseData) {
+	sessionID := identity.session.ID
+	teetState, err := t.sessionManager.stateForSession(identity.session)
 	if err != nil {
 		return
 	}

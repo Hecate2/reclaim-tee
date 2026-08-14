@@ -13,8 +13,10 @@ import (
 	teeproto "github.com/reclaimprotocol/reclaim-tee/proto"
 	"github.com/reclaimprotocol/reclaim-tee/shared"
 
+	"github.com/gorilla/websocket"
 	"go.uber.org/zap"
 	"golang.org/x/sync/singleflight"
+	"google.golang.org/protobuf/proto"
 )
 
 // RedactionOperation represents a redaction to be applied to a specific sequence
@@ -279,16 +281,59 @@ func (t *TEEK) cleanupSessionWithSession(session *shared.Session) {
 	}
 	// Unblock any TCPData sender that's waiting on a full pendingData
 	// buffer because minitls has stopped draining.
-	if tlsState, err := t.getSessionTLSState(session.ID); err == nil && tlsState.WSConn2TLS != nil {
+	if tlsState, err := t.sessionManager.stateForSession(session); err == nil && tlsState.WSConn2TLS != nil {
 		tlsState.WSConn2TLS.Shutdown()
 	}
 	if t.connManager != nil {
-		t.connManager.CloseSessionConnection(session.ID, "session_cleanup")
+		t.connManager.CloseSessionConnection(session, "session_cleanup")
 	}
-	_ = t.sessionManager.CloseSession(session.ID)
+	_ = t.sessionManager.CloseSessionIfCurrent(session)
 	t.activeSessions.Add(-1)
 	t.sessionTerminator.CleanupSession(session.ID)
 	t.logger.WithSession(session.ID).Info("Session terminated and cleaned up")
+}
+
+func (t *TEEK) terminateSessionWithErrorForIdentity(identity *teekSessionIdentity, reason shared.TerminationReason, err error, message string) {
+	if identity == nil || identity.ensureCurrent() != nil {
+		return
+	}
+	session := identity.session
+	sessionID := session.ID
+	t.logger.WithSession(sessionID).Error(message, zap.Error(err), zap.String("reason", string(reason)))
+	errorMsg := message
+	if err != nil {
+		errorMsg = fmt.Sprintf("%s: %v", message, err)
+	}
+	env := &teeproto.Envelope{
+		SessionId: sessionID, TimestampMs: time.Now().UnixMilli(),
+		Payload: &teeproto.Envelope_Error{Error: &teeproto.ErrorData{Message: errorMsg}},
+	}
+	if routeErr := t.routeToClientForSession(session, env); routeErr != nil {
+		t.logger.WithSession(sessionID).Warn("Failed to send error to client", zap.Error(routeErr))
+	}
+	if sendErr := t.connManager.SendOnExactSession(identity, env); sendErr != nil {
+		t.logger.WithSession(sessionID).Warn("Failed to send error to TEE_T", zap.Error(sendErr))
+	}
+	time.Sleep(50 * time.Millisecond)
+	t.cleanupSessionWithSession(session)
+}
+
+func (t *TEEK) routeToClientForSession(session *shared.Session, env *teeproto.Envelope) error {
+	if session == nil {
+		return fmt.Errorf("session is nil")
+	}
+	session.ConnMutex.RLock()
+	conn := session.ClientConn
+	session.ConnMutex.RUnlock()
+	ws, ok := conn.(*shared.WSConnection)
+	if !ok || ws == nil {
+		return fmt.Errorf("no client connection in session %s", session.ID)
+	}
+	data, err := proto.Marshal(env)
+	if err != nil {
+		return err
+	}
+	return ws.WriteMessage(websocket.BinaryMessage, data)
 }
 
 // terminateSessionWithError terminates a session due to a critical error

@@ -172,15 +172,9 @@ func (t *TEEK) encryptAndSendRequest(sessionID string, redactedRequest shared.Re
 }
 
 // generateResponseTagSecrets generates tag secrets for response verification and returns the nonce used
-func (t *TEEK) generateResponseTagSecrets(sessionID string, responseLength int, seqNum uint64, recordHeader []byte, explicitIV []byte) ([]byte, []byte, error) {
-	if sessionID == "" {
-		return nil, nil, fmt.Errorf("sessionID is empty")
-	}
-
-	// Get TLS client from session state
-	tlsState, err := t.getSessionTLSState(sessionID)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to get TLS state: %v", err)
+func (t *TEEK) generateResponseTagSecrets(tlsState *TEEKSessionState, responseLength int, seqNum uint64, recordHeader []byte, explicitIV []byte) ([]byte, []byte, error) {
+	if tlsState == nil {
+		return nil, nil, fmt.Errorf("TLS state is nil")
 	}
 	tlsClient := tlsState.TLSClient
 	cipherSuite := tlsState.CipherSuite
@@ -318,10 +312,38 @@ func (t *TEEK) generateResponseTagSecrets(sessionID string, responseLength int, 
 
 // generateSingleDecryptionStream generates a decryption stream for a single response
 func (t *TEEK) generateSingleDecryptionStream(sessionID string, responseLength int, seqNum uint64) ([]byte, error) {
-	// Get session to access cache and stored nonces
 	session, err := t.sessionManager.GetSession(sessionID)
 	if err != nil {
 		return nil, fmt.Errorf("session %s not found: %v", sessionID, err)
+	}
+	tlsState, err := t.getSessionTLSState(sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get TLS state: %v", err)
+	}
+	return t.generateSingleDecryptionStreamForSession(session, tlsState, responseLength, seqNum)
+}
+
+func (t *TEEK) generateSingleDecryptionStreamForIdentity(identity *teekSessionIdentity, responseLength int, seqNum uint64) ([]byte, error) {
+	if err := identity.ensureCurrent(); err != nil {
+		return nil, err
+	}
+	tlsState, err := t.sessionManager.stateForSession(identity.session)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get TLS state: %v", err)
+	}
+	stream, err := t.generateSingleDecryptionStreamForSession(identity.session, tlsState, responseLength, seqNum)
+	if err != nil {
+		return nil, err
+	}
+	if err := identity.ensureCurrent(); err != nil {
+		return nil, err
+	}
+	return stream, nil
+}
+
+func (t *TEEK) generateSingleDecryptionStreamForSession(session *shared.Session, tlsState *TEEKSessionState, responseLength int, seqNum uint64) ([]byte, error) {
+	if session == nil || tlsState == nil {
+		return nil, fmt.Errorf("session identity is incomplete")
 	}
 
 	// Check if we already have this stream cached
@@ -341,12 +363,6 @@ func (t *TEEK) generateSingleDecryptionStream(sessionID string, responseLength i
 
 	if nonce == nil {
 		return nil, fmt.Errorf("no nonce found for sequence %d - tag secrets must be generated first", seqNum)
-	}
-
-	// Get TLS client and keys
-	tlsState, err := t.getSessionTLSState(sessionID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get TLS state: %v", err)
 	}
 
 	if tlsState.TLSClient == nil {
@@ -377,6 +393,7 @@ func (t *TEEK) generateSingleDecryptionStream(sessionID string, responseLength i
 
 	// Generate decryption stream using the stored nonce and cipher suite
 	var decryptionStream []byte
+	var err error
 	switch tlsState.CipherSuite {
 	case minitls.TLS_AES_128_GCM_SHA256, minitls.TLS_AES_256_GCM_SHA384,
 		minitls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256, minitls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,

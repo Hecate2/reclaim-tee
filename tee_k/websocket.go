@@ -83,17 +83,28 @@ func (t *TEEK) establishSharedTEETConnection() {
 }
 
 // handleSharedTEETMessage processes messages from TEE_T and routes them to sessions
-func (t *TEEK) handleSharedTEETMessage(msgBytes []byte) {
+func (t *TEEK) handleSharedTEETMessage(identity *teekSessionIdentity, msgBytes []byte) error {
+	if err := identity.ensureCurrent(); err != nil {
+		return err
+	}
 	var env teeproto.Envelope
 	if err := proto.Unmarshal(msgBytes, &env); err != nil {
 		t.logger.Error("Failed to parse TEE_T message", zap.Error(err))
-		return
+		t.terminateSessionWithErrorForIdentity(identity, shared.ReasonMessageParsingFailed, err, "Failed to parse TEE_T message")
+		return err
 	}
 
 	sessionID := env.GetSessionId()
-	if sessionID == "" {
-		t.logger.Error("Received TEE_T message without session ID")
-		return
+	if sessionID != identity.session.ID {
+		err := fmt.Errorf("session ID mismatch: expected %s, got %s", identity.session.ID, sessionID)
+		t.terminateSessionWithErrorForIdentity(identity, shared.ReasonSessionIDMismatch, err, "Session ID mismatch from TEE_T")
+		return err
+	}
+	if identity.beforeDispatch != nil {
+		identity.beforeDispatch()
+	}
+	if err := identity.ensureCurrent(); err != nil {
+		return err
 	}
 
 	// Route session-aware messages
@@ -121,7 +132,7 @@ func (t *TEEK) handleSharedTEETMessage(msgBytes []byte) {
 				return out
 			}(),
 		}
-		handlerErr = t.handleBatchedResponseLengths(sessionID, msg)
+		handlerErr = t.handleBatchedResponseLengths(identity, msg)
 
 	case *teeproto.Envelope_BatchedTagVerifications:
 		msg := &shared.Message{SessionID: sessionID, Type: shared.MsgBatchedTagVerifications,
@@ -136,53 +147,54 @@ func (t *TEEK) handleSharedTEETMessage(msgBytes []byte) {
 				return out
 			}(),
 		}
-		if handlerErr = t.handleBatchedTagVerifications(sessionID, msg); handlerErr != nil {
-			t.terminateSessionWithError(sessionID, shared.ReasonCryptoTagVerificationFailed, handlerErr, "Tag verification processing failed")
+		if handlerErr = t.handleBatchedTagVerifications(identity, msg); handlerErr != nil {
+			t.terminateSessionWithErrorForIdentity(identity, shared.ReasonCryptoTagVerificationFailed, handlerErr, "Tag verification processing failed")
 		}
-		return
+		return handlerErr
 
 	case *teeproto.Envelope_Error:
 		// TEE_T encountered an error (likely a response to our earlier error)
 		// Log it but don't terminate again (session is likely already terminating)
 		t.logger.WithSession(sessionID).Info("Received error from TEE_T", zap.String("error", p.Error.GetMessage()))
-		return
+		return nil
 
 	// OT precomputation messages.
 	case *teeproto.Envelope_OtPrecomputeResponse:
-		if handlerErr = t.handleOTPrecomputeResponse(p.OtPrecomputeResponse); handlerErr != nil {
-			t.logger.Error("OT precompute response failed", zap.Error(handlerErr))
-		}
-		return
+		handlerErr = fmt.Errorf("OT precompute response received on per-session connection")
+		t.terminateSessionWithErrorForIdentity(identity, shared.ReasonProtocolViolation, handlerErr, "Control message received on session connection")
+		return handlerErr
 
 	case *teeproto.Envelope_OprfMpcRound2:
-		if handlerErr = t.handleOPRFChoiceCorrections(sessionID, p.OprfMpcRound2); handlerErr != nil {
-			t.terminateSessionWithError(sessionID, shared.ReasonOPRFProtocolFailed, handlerErr, "MPC OPRF correction handling failed")
+		if handlerErr = t.handleOPRFChoiceCorrections(identity, p.OprfMpcRound2); handlerErr != nil {
+			t.terminateSessionWithErrorForIdentity(identity, shared.ReasonOPRFProtocolFailed, handlerErr, "MPC OPRF correction handling failed")
 		}
-		return
+		return handlerErr
 
 	case *teeproto.Envelope_OprfMpcResult:
-		if handlerErr = t.handleOPRFResult(sessionID, p.OprfMpcResult); handlerErr != nil {
-			t.terminateSessionWithError(sessionID, shared.ReasonOPRFProtocolFailed, handlerErr, "MPC OPRF result handling failed")
+		if handlerErr = t.handleOPRFResult(identity, p.OprfMpcResult); handlerErr != nil {
+			t.terminateSessionWithErrorForIdentity(identity, shared.ReasonOPRFProtocolFailed, handlerErr, "MPC OPRF result handling failed")
 		}
-		return
+		return handlerErr
 
 	case *teeproto.Envelope_CiphertextReady:
-		if handlerErr = t.handleCiphertextReady(sessionID, p.CiphertextReady); handlerErr != nil {
-			t.terminateSessionWithError(sessionID, shared.ReasonResponseValidationFailed, handlerErr, "Ciphertext verification failed")
+		if handlerErr = t.handleCiphertextReady(identity, p.CiphertextReady); handlerErr != nil {
+			t.terminateSessionWithErrorForIdentity(identity, shared.ReasonResponseValidationFailed, handlerErr, "Ciphertext verification failed")
 		}
-		return
+		return handlerErr
 
 	default:
 		err := fmt.Errorf("unknown TEE_T message type: %T", p)
-		t.terminateSessionWithError(sessionID, shared.ReasonUnknownMessageType, err, "Unknown TEE_T message type")
-		return
+		t.terminateSessionWithErrorForIdentity(identity, shared.ReasonUnknownMessageType, err, "Unknown TEE_T message type")
+		return err
 	}
 
 	// ZERO ERROR POLICY: Any handler error terminates the session immediately
 	// This catches handleBatchedResponseLengths errors
 	if handlerErr != nil {
-		t.terminateSessionWithError(sessionID, shared.ReasonResponseValidationFailed, handlerErr, "Response processing failed")
+		t.terminateSessionWithErrorForIdentity(identity, shared.ReasonResponseValidationFailed, handlerErr, "Response processing failed")
+		return handlerErr
 	}
+	return nil
 }
 
 // handleWebSocket handles incoming WebSocket connections from clients
@@ -386,19 +398,17 @@ func (t *TEEK) notifyTEETNewSession(sessionID string) error {
 	t.logger.WithSession(sessionID).Info("Sending to TEE_T",
 		zap.String("type", "SessionCreated"))
 
-	if err := t.connManager.SendOnControl(env); err != nil {
-		return fmt.Errorf("failed to send SessionCreated: %v", err)
-	}
-
-	// Step 2: Wait for TEE_T to acknowledge session creation
-	if err := t.connManager.WaitForSessionCreatedAck(sessionID); err != nil {
-		return fmt.Errorf("failed to get session ack: %v", err)
+	origin, err := t.connManager.sendSessionCreatedAndWait(sessionID, func(conn *shared.WSConnection, generation uint64) error {
+		return t.connManager.sendOnControlConnection(conn, generation, env)
+	})
+	if err != nil {
+		return err
 	}
 
 	t.logger.WithSession(sessionID).Debug("TEE_T acknowledged session creation")
 
 	// Step 3: Establish per-session connection
-	if err := t.connManager.EstablishSessionConnection(sessionID); err != nil {
+	if err := t.connManager.EstablishSessionConnection(sessionID, origin); err != nil {
 		return fmt.Errorf("failed to establish per-session connection: %v", err)
 	}
 

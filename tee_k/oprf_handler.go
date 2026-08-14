@@ -164,12 +164,16 @@ func (t *TEEK) initiateOPRFForRange(sessionID string, teekState *TEEKSessionStat
 
 // handleOPRFChoiceCorrections applies c=d XOR b to the precomputed random OT
 // pads and returns masks that let TEE_T recover only its selected wire labels.
-func (t *TEEK) handleOPRFChoiceCorrections(sessionID string, msg *teeproto.OPRFMPCRound2) error {
+func (t *TEEK) handleOPRFChoiceCorrections(identity *teekSessionIdentity, msg *teeproto.OPRFMPCRound2) error {
+	if err := identity.ensureCurrent(); err != nil {
+		return err
+	}
+	sessionID := identity.session.ID
 	if msg.GetSessionId() != sessionID {
 		return fmt.Errorf("OPRF round 2 session ID mismatch")
 	}
 
-	teekState, err := t.sessionManager.GetTEEKSessionState(sessionID)
+	teekState, err := t.sessionManager.stateForSession(identity.session)
 	if err != nil {
 		return fmt.Errorf("failed to get TEE_K session state: %w", err)
 	}
@@ -200,7 +204,10 @@ func (t *TEEK) handleOPRFChoiceCorrections(sessionID string, msg *teeproto.OPRFM
 	if err != nil {
 		return fmt.Errorf("failed to serialize OT masks: %w", err)
 	}
-	return t.sendOPRFMasksToTEET(sessionID, &teeproto.OPRFMPCRound3{
+	if err := identity.ensureCurrent(); err != nil {
+		return err
+	}
+	return t.sendOPRFMasksToExactTEET(identity, &teeproto.OPRFMPCRound3{
 		SessionId:     sessionID,
 		OprfSessionId: garblerSession.SessionID,
 		OtMasks:       serializedMasks,
@@ -209,12 +216,16 @@ func (t *TEEK) handleOPRFChoiceCorrections(sessionID string, msg *teeproto.OPRFM
 }
 
 // handleOPRFResult handles the final OPRF result from TEE_T
-func (t *TEEK) handleOPRFResult(sessionID string, msg *teeproto.OPRFMPCResult) error {
+func (t *TEEK) handleOPRFResult(identity *teekSessionIdentity, msg *teeproto.OPRFMPCResult) error {
+	if err := identity.ensureCurrent(); err != nil {
+		return err
+	}
+	sessionID := identity.session.ID
 	if msg.GetSessionId() != sessionID {
 		return fmt.Errorf("OPRF result session ID mismatch")
 	}
 
-	teekState, err := t.sessionManager.GetTEEKSessionState(sessionID)
+	teekState, err := t.sessionManager.stateForSession(identity.session)
 	if err != nil {
 		return fmt.Errorf("failed to get TEE_K session state: %w", err)
 	}
@@ -248,6 +259,9 @@ func (t *TEEK) handleOPRFResult(sessionID string, msg *teeproto.OPRFMPCResult) e
 		return fmt.Errorf("CRITICAL: output label verification failed - possible attack: %w", err)
 	}
 	hashOutput := sha256.Sum256(cmacOutput[:])
+	if err := identity.ensureCurrent(); err != nil {
+		return err
+	}
 
 	r := teekState.OPRFRanges[rangeIndex]
 
@@ -267,7 +281,7 @@ func (t *TEEK) handleOPRFResult(sessionID string, msg *teeproto.OPRFMPCResult) e
 		t.logger.WithSession(sessionID).Info("OPRF complete", zap.Int("count", teekState.GetOPRFResultCount()))
 
 		// Check if we can send signature now
-		t.checkAndSendSignatureIfReady(sessionID)
+		t.checkAndSendSignatureIfReadyForIdentity(identity)
 	}
 
 	return nil
@@ -327,6 +341,14 @@ func (t *TEEK) sendOPRFMasksToTEET(sessionID string, msg *teeproto.OPRFMPCRound3
 	return t.connManager.SendOnSession(sessionID, env)
 }
 
+func (t *TEEK) sendOPRFMasksToExactTEET(identity *teekSessionIdentity, msg *teeproto.OPRFMPCRound3) error {
+	env := &teeproto.Envelope{
+		SessionId: identity.session.ID, TimestampMs: time.Now().UnixMilli(),
+		Payload: &teeproto.Envelope_OprfMpcRound3{OprfMpcRound3: msg},
+	}
+	return t.connManager.SendOnExactSession(identity, env)
+}
+
 // buildOPRFOutputsForSigning builds OPRF outputs for inclusion in signed payload
 // IMPORTANT: Iterates over OPRFRanges slice (not OPRFResults map) for deterministic ordering
 // ZERO ERROR POLICY: Returns nil if any expected result is missing (caller should check)
@@ -370,8 +392,12 @@ func isOPRFReady(state int32) bool {
 }
 
 // handleCiphertextReady verifies ciphertext length matches keystream
-func (t *TEEK) handleCiphertextReady(sessionID string, msg *teeproto.CiphertextReady) error {
-	teekState, err := t.sessionManager.GetTEEKSessionState(sessionID)
+func (t *TEEK) handleCiphertextReady(identity *teekSessionIdentity, msg *teeproto.CiphertextReady) error {
+	if err := identity.ensureCurrent(); err != nil {
+		return err
+	}
+	sessionID := identity.session.ID
+	teekState, err := t.sessionManager.stateForSession(identity.session)
 	if err != nil {
 		return fmt.Errorf("failed to get TEE_K session state: %w", err)
 	}

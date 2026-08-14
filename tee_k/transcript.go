@@ -41,13 +41,35 @@ func (t *TEEK) addToTranscript(sessionID string, data []byte, dataType string) e
 
 // generateComprehensiveSignatureAndSendTranscript creates comprehensive signature and sends all verification data to client
 func (t *TEEK) generateComprehensiveSignatureAndSendTranscript(sessionID string) error {
-	t.logger.WithSession(sessionID).Debug("Generating comprehensive signature")
-
-	// Get session
 	session, err := t.sessionManager.GetSession(sessionID)
 	if err != nil {
 		return fmt.Errorf("session %s not found: %v", sessionID, err)
 	}
+	teekState, _ := t.sessionManager.GetTEEKSessionState(sessionID)
+	return t.generateComprehensiveSignatureForSession(session, teekState, func(env *teeproto.Envelope) error {
+		return t.sessionManager.RouteToClient(sessionID, env)
+	})
+}
+
+func (t *TEEK) generateComprehensiveSignatureForIdentity(identity *teekSessionIdentity) error {
+	if err := identity.ensureCurrent(); err != nil {
+		return err
+	}
+	teekState, err := t.sessionManager.stateForSession(identity.session)
+	if err != nil {
+		return err
+	}
+	return t.generateComprehensiveSignatureForSession(identity.session, teekState, func(env *teeproto.Envelope) error {
+		if err := identity.ensureCurrent(); err != nil {
+			return err
+		}
+		return t.routeToClientForSession(identity.session, env)
+	})
+}
+
+func (t *TEEK) generateComprehensiveSignatureForSession(session *shared.Session, teekState *TEEKSessionState, route func(*teeproto.Envelope) error) error {
+	sessionID := session.ID
+	t.logger.WithSession(sessionID).Debug("Generating comprehensive signature")
 
 	// Snapshot the signing keypair together with its attestation. Both rotate
 	// on every refresh, so they must be read as one consistent epoch — the
@@ -127,8 +149,7 @@ func (t *TEEK) generateComprehensiveSignatureAndSendTranscript(sessionID string)
 	}
 
 	// Include OPRF outputs in signed payload
-	teekState, err := t.sessionManager.GetTEEKSessionState(sessionID)
-	if err == nil {
+	if teekState != nil {
 		oprfOutputs := t.buildOPRFOutputsForSigning(teekState)
 		if len(oprfOutputs) > 0 {
 			kPayload.OprfOutputs = oprfOutputs
@@ -171,8 +192,8 @@ func (t *TEEK) generateComprehensiveSignatureAndSendTranscript(sessionID string)
 	var cipherSuite uint32
 
 	// Get TLS state for packet metadata
-	tlsState, err := t.getSessionTLSState(sessionID)
-	if err == nil && tlsState.TLSClient != nil {
+	tlsState := teekState
+	if tlsState != nil && tlsState.TLSClient != nil {
 		tlsClient := tlsState.TLSClient
 		cipherSuite = uint32(tlsClient.GetCipherSuite())
 
@@ -243,7 +264,7 @@ func (t *TEEK) generateComprehensiveSignatureAndSendTranscript(sessionID string)
 				zap.Uint32("cipher_suite", cipherSuite))
 		}
 	} else {
-		t.logger.WithSession(sessionID).Warn("Could not retrieve TLS state for packet metadata", zap.Error(err))
+		t.logger.WithSession(sessionID).Warn("Could not retrieve TLS state for packet metadata")
 	}
 
 	// Send the signed message to client (timestamp is now inside signed body)
@@ -262,7 +283,7 @@ func (t *TEEK) generateComprehensiveSignatureAndSendTranscript(sessionID string)
 	env := &teeproto.Envelope{SessionId: sessionID, TimestampMs: timestampMs,
 		Payload: &teeproto.Envelope_SignedMessage{SignedMessage: signedMsg},
 	}
-	if err := t.sessionManager.RouteToClient(sessionID, env); err != nil {
+	if err := route(env); err != nil {
 		return fmt.Errorf("failed to send signed message to client: %v", err)
 	}
 

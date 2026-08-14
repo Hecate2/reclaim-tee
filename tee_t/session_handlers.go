@@ -17,10 +17,14 @@ import (
 )
 
 // handleRedactionStreams handles redaction streams from client
-func (t *TEET) handleRedactionStreams(sessionID string, msg *shared.Message) error {
-	if sessionID == "" {
+func (t *TEET) handleRedactionStreams(identity *teetSessionIdentity, msg *shared.Message) error {
+	if identity == nil || identity.session == nil || identity.session.ID == "" {
 		err := fmt.Errorf("redaction streams message missing session ID")
-		t.terminateSessionWithError("", shared.ReasonMissingSessionID, err, "Redaction streams missing session ID")
+		return err
+	}
+	session := identity.session
+	sessionID := session.ID
+	if err := identity.ensureCurrent(); err != nil {
 		return err
 	}
 
@@ -28,7 +32,7 @@ func (t *TEET) handleRedactionStreams(sessionID string, msg *shared.Message) err
 
 	var streamsData shared.RedactionStreamsData
 	if err := msg.UnmarshalData(&streamsData); err != nil {
-		t.terminateSessionWithError(sessionID, shared.ReasonMessageParsingFailed, err, "Failed to unmarshal redaction streams")
+		t.terminateSessionWithErrorForIdentity(identity, shared.ReasonMessageParsingFailed, err, "Failed to unmarshal redaction streams")
 		return err
 	}
 
@@ -36,9 +40,7 @@ func (t *TEET) handleRedactionStreams(sessionID string, msg *shared.Message) err
 		zap.String("session_id", sessionID),
 		zap.Int("streams_count", len(streamsData.Streams)))
 
-	session, err := t.sessionManager.GetSession(sessionID)
-	if err != nil {
-		t.terminateSessionWithError(sessionID, shared.ReasonSessionNotFound, err, "Failed to get session")
+	if err := identity.ensureCurrent(); err != nil {
 		return err
 	}
 
@@ -50,7 +52,7 @@ func (t *TEET) handleRedactionStreams(sessionID string, msg *shared.Message) err
 
 	t.logger.Debug("Redaction streams stored for session", zap.String("session_id", sessionID))
 
-	if procErr := t.processIfBothPartsArrived(sessionID); procErr != nil {
+	if procErr := t.processIfBothPartsArrived(identity); procErr != nil {
 		return procErr
 	}
 
@@ -61,8 +63,13 @@ func (t *TEET) handleRedactionStreams(sessionID string, msg *shared.Message) err
 }
 
 // Counter-at-join: caller that bumps RequestPartsArrived to 2 dispatches.
-func (t *TEET) processIfBothPartsArrived(sessionID string) error {
-	teetState, err := t.sessionManager.GetTEETSessionState(sessionID)
+func (t *TEET) processIfBothPartsArrived(identity *teetSessionIdentity) error {
+	if err := identity.ensureCurrent(); err != nil {
+		return err
+	}
+	session := identity.session
+	sessionID := session.ID
+	teetState, err := t.sessionManager.stateForSession(session)
 	if err != nil {
 		// Session might already be gone (e.g., terminated). Don't escalate.
 		t.logger.Debug("processIfBothPartsArrived: session state missing", zap.String("session_id", sessionID))
@@ -83,9 +90,7 @@ func (t *TEET) processIfBothPartsArrived(sessionID string) error {
 	// visible via the counter-at-join happens-before edge. We pull
 	// ranges from session.RedactionState — the authoritative copy
 	// TEE_K validated — rather than re-trusting the client.
-	session, err := t.sessionManager.GetSession(sessionID)
-	if err != nil {
-		t.terminateSessionWithError(sessionID, shared.ReasonSessionNotFound, err, "Failed to get session for R_SP capture")
+	if err := identity.ensureCurrent(); err != nil {
 		return err
 	}
 	if session.RedactionState != nil {
@@ -104,14 +109,14 @@ func (t *TEET) processIfBothPartsArrived(sessionID string) error {
 
 	// Prefer fragments path; fall back to legacy single-request path.
 	if len(teetState.PendingEncryptedFragments) > 0 {
-		if procErr := t.processEncryptedFragmentsWithStreams(sessionID); procErr != nil {
+		if procErr := t.processEncryptedFragmentsWithStreams(identity); procErr != nil {
 			return procErr
 		}
 		teetState.PendingEncryptedFragments = make(map[uint64]*shared.EncryptedRequestData)
 		return nil
 	}
 	if teetState.PendingEncryptedRequest != nil {
-		if procErr := t.processEncryptedRequestWithStreams(sessionID, teetState.PendingEncryptedRequest); procErr != nil {
+		if procErr := t.processEncryptedRequestWithStreams(identity, teetState.PendingEncryptedRequest); procErr != nil {
 			return procErr
 		}
 		teetState.PendingEncryptedRequest = nil
@@ -122,17 +127,22 @@ func (t *TEET) processIfBothPartsArrived(sessionID string) error {
 	err = fmt.Errorf("both parts marked arrived but no encrypted request data present")
 	t.logger.Error("processIfBothPartsArrived: invariant violated",
 		zap.String("session_id", sessionID))
-	t.terminateSessionWithError(sessionID, shared.ReasonSessionStateCorrupted, err, "Counter-join invariant violated")
+	t.terminateSessionWithErrorForIdentity(identity, shared.ReasonSessionStateCorrupted, err, "Counter-join invariant violated")
 	return err
 }
 
 // handleBatchedEncryptedResponses handles batched encrypted responses from client
-func (t *TEET) handleBatchedEncryptedResponses(sessionID string, msg *shared.Message) error {
+func (t *TEET) handleBatchedEncryptedResponses(identity *teetSessionIdentity, msg *shared.Message) error {
+	if err := identity.ensureCurrent(); err != nil {
+		return err
+	}
+	session := identity.session
+	sessionID := session.ID
 	t.logger.Debug("Handling encrypted responses for session", zap.String("session_id", sessionID))
 
 	var batchedResponses shared.BatchedEncryptedResponseData
 	if err := msg.UnmarshalData(&batchedResponses); err != nil {
-		t.terminateSessionWithError(sessionID, shared.ReasonMessageParsingFailed, err, "Failed to unmarshal batched encrypted responses")
+		t.terminateSessionWithErrorForIdentity(identity, shared.ReasonMessageParsingFailed, err, "Failed to unmarshal batched encrypted responses")
 		return err
 	}
 
@@ -140,9 +150,7 @@ func (t *TEET) handleBatchedEncryptedResponses(sessionID string, msg *shared.Mes
 		zap.String("session_id", sessionID),
 		zap.Int("total_count", batchedResponses.TotalCount))
 
-	session, err := t.sessionManager.GetSession(sessionID)
-	if err != nil {
-		t.terminateSessionWithError(sessionID, shared.ReasonSessionNotFound, err, "Failed to get session")
+	if err := identity.ensureCurrent(); err != nil {
 		return err
 	}
 
@@ -183,7 +191,7 @@ func (t *TEET) handleBatchedEncryptedResponses(sessionID string, msg *shared.Mes
 			zap.Uint8("rec_hdr0", recHdr0),
 			zap.String("fp", fmt.Sprintf("%x", fpSum[:10])))
 		session.ResponseState.PendingEncryptedResponses[encryptedResp.SeqNum] = &encryptedResp
-		if err := t.addSingleResponseToTranscript(sessionID, &encryptedResp); err != nil {
+		if err := t.addSingleResponseToTranscript(identity, &encryptedResp); err != nil {
 			session.ResponseState.ResponsesMutex.Unlock()
 			return err
 		}
@@ -228,8 +236,11 @@ func (t *TEET) handleBatchedEncryptedResponses(sessionID string, msg *shared.Mes
 		},
 	}
 
-	if err := t.sessionManager.RouteToTEEK(sessionID, env); err != nil {
-		t.terminateSessionWithError(sessionID, shared.ReasonNetworkFailure, err, "Failed to send batched lengths to TEE_K")
+	if err := identity.ensureCurrent(); err != nil {
+		return err
+	}
+	if err := t.routeToTEEKForSession(session, env); err != nil {
+		t.terminateSessionWithErrorForIdentity(identity, shared.ReasonNetworkFailure, err, "Failed to send batched lengths to TEE_K")
 		return err
 	}
 
@@ -253,44 +264,62 @@ func (t *TEET) handleSessionCreation(msg *shared.Message) error {
 		t.terminateSessionWithError("", shared.ReasonMessageParsingFailed, err, "Invalid session_id in session creation")
 		return err
 	}
-	if err := t.sessionManager.RegisterSession(sessionID); err != nil {
+	if err := t.registerSession(sessionID); err != nil {
 		t.terminateSessionWithError(sessionID, shared.ReasonSessionManagerFailure, err, "Failed to register session")
 		return err
 	}
-	t.activeSessions.Add(1)
-	teetState := &TEETSessionState{}
-	t.sessionManager.SetTEETSessionState(sessionID, teetState)
-	t.logger.Info("Session registered", zap.String("sid", shared.TruncateSessionID(sessionID)))
 	return nil
 }
 
+func (t *TEET) registerSession(sessionID string) error {
+	_, err := t.registerSessionForControl(sessionID, 0)
+	return err
+}
+
+func (t *TEET) registerSessionForControl(sessionID string, controlGeneration uint64) (*shared.Session, error) {
+	if err := t.sessionManager.RegisterSession(sessionID); err != nil {
+		return nil, err
+	}
+	session, err := t.sessionManager.GetSession(sessionID)
+	if err != nil {
+		_ = t.sessionManager.CloseSession(sessionID)
+		return nil, fmt.Errorf("get registered session: %w", err)
+	}
+	t.activeSessions.Add(1)
+	teetState := &TEETSessionState{session: session, controlGeneration: controlGeneration}
+	t.sessionManager.SetTEETSessionState(sessionID, teetState)
+	t.logger.Info("Session registered", zap.String("sid", shared.TruncateSessionID(sessionID)))
+	return session, nil
+}
+
 // handleKeyShareRequestSession handles key share request from TEE_K
-func (t *TEET) handleKeyShareRequestSession(msg *shared.Message) error {
-	sessionID := msg.SessionID
-	if sessionID == "" {
+func (t *TEET) handleKeyShareRequestSession(identity *teetSessionIdentity, msg *shared.Message) error {
+	if identity == nil || identity.session == nil || identity.session.ID == "" {
 		err := fmt.Errorf("key share request missing session ID")
-		t.terminateSessionWithError("", shared.ReasonMissingSessionID, err, "Key share request missing session ID")
+		return err
+	}
+	session := identity.session
+	sessionID := session.ID
+	if err := identity.ensureCurrent(); err != nil {
 		return err
 	}
 	t.logger.Debug("Handling key share request for session", zap.String("session_id", sessionID))
-	session, err := t.sessionManager.GetSession(sessionID)
-	if err != nil {
-		t.terminateSessionWithError(sessionID, shared.ReasonSessionNotFound, err, "Failed to get session")
-		return err
-	}
 	var keyReq shared.KeyShareRequestData
 	if err := msg.UnmarshalData(&keyReq); err != nil {
-		t.terminateSessionWithError(sessionID, shared.ReasonMessageParsingFailed, err, "Failed to unmarshal key share request")
+		t.terminateSessionWithErrorForIdentity(identity, shared.ReasonMessageParsingFailed, err, "Failed to unmarshal key share request")
 		return err
 	}
 	keyShare := make([]byte, keyReq.KeyLength)
 	if _, err := rand.Read(keyShare); err != nil {
-		t.terminateSessionWithError(sessionID, shared.ReasonCryptoKeyGenerationFailed, err, "Failed to generate key share")
+		t.terminateSessionWithErrorForIdentity(identity, shared.ReasonCryptoKeyGenerationFailed, err, "Failed to generate key share")
 		return err
 	}
-	teetState, err := t.getTEETSessionState(sessionID)
+	if err := identity.ensureCurrent(); err != nil {
+		return err
+	}
+	teetState, err := t.sessionManager.stateForSession(session)
 	if err != nil {
-		t.terminateSessionWithError(sessionID, shared.ReasonSessionStateCorrupted, err, "Failed to get TEE_T session state")
+		t.terminateSessionWithErrorForIdentity(identity, shared.ReasonSessionStateCorrupted, err, "Failed to get TEE_T session state")
 		return err
 	}
 	teetState.KeyShare = keyShare
@@ -302,24 +331,35 @@ func (t *TEET) handleKeyShareRequestSession(msg *shared.Message) error {
 	}
 	data, err := proto.Marshal(env)
 	if err != nil {
-		t.terminateSessionWithError(sessionID, shared.ReasonMessageParsingFailed, err, "Failed to marshal key share response")
+		t.terminateSessionWithErrorForIdentity(identity, shared.ReasonMessageParsingFailed, err, "Failed to marshal key share response")
 		return err
 	}
-	wsConn := session.TEEKConn.(*shared.WSConnection)
+	if err := identity.ensureCurrent(); err != nil {
+		return err
+	}
+	session.ConnMutex.RLock()
+	wsConn, ok := session.TEEKConn.(*shared.WSConnection)
+	session.ConnMutex.RUnlock()
+	if !ok {
+		return fmt.Errorf("TEE_K connection is not a WebSocket connection")
+	}
 	// Use wrapper's WriteMessage which has internal mutex for thread safety
 	if err = wsConn.WriteMessage(websocket.BinaryMessage, data); err != nil {
-		t.terminateSessionWithError(sessionID, shared.ReasonNetworkFailure, err, "Failed to send key share response")
+		t.terminateSessionWithErrorForIdentity(identity, shared.ReasonNetworkFailure, err, "Failed to send key share response")
 		return err
 	}
 	return nil
 }
 
 // handleBatchedEncryptedRequest handles batched encrypted request from TEE_K
-func (t *TEET) handleBatchedEncryptedRequest(msg *shared.Message) error {
-	sessionID := msg.SessionID
-	if sessionID == "" {
+func (t *TEET) handleBatchedEncryptedRequest(identity *teetSessionIdentity, msg *shared.Message) error {
+	if identity == nil || identity.session == nil || identity.session.ID == "" {
 		err := fmt.Errorf("batched encrypted request missing session ID")
-		t.terminateSessionWithError("", shared.ReasonMissingSessionID, err, "Batched encrypted request missing session ID")
+		return err
+	}
+	session := identity.session
+	sessionID := session.ID
+	if err := identity.ensureCurrent(); err != nil {
 		return err
 	}
 
@@ -327,7 +367,7 @@ func (t *TEET) handleBatchedEncryptedRequest(msg *shared.Message) error {
 
 	var batchedReq shared.BatchedEncryptedRequestData
 	if err := msg.UnmarshalData(&batchedReq); err != nil {
-		t.terminateSessionWithError(sessionID, shared.ReasonMessageParsingFailed, err, "Failed to unmarshal batched encrypted request")
+		t.terminateSessionWithErrorForIdentity(identity, shared.ReasonMessageParsingFailed, err, "Failed to unmarshal batched encrypted request")
 		return err
 	}
 
@@ -338,19 +378,17 @@ func (t *TEET) handleBatchedEncryptedRequest(msg *shared.Message) error {
 
 	if len(batchedReq.Fragments) > shared.MaxEncryptedFragments {
 		err := fmt.Errorf("too many fragments: %d (max %d)", len(batchedReq.Fragments), shared.MaxEncryptedFragments)
-		t.terminateSessionWithError(sessionID, shared.ReasonProtocolViolation, err, "Too many fragments")
+		t.terminateSessionWithErrorForIdentity(identity, shared.ReasonProtocolViolation, err, "Too many fragments")
 		return err
 	}
 
 	if len(batchedReq.Fragments) > 0 && len(batchedReq.Fragments[0].RedactionRanges) > shared.MaxRedactionRanges {
 		err := fmt.Errorf("too many redaction ranges: %d (max %d)", len(batchedReq.Fragments[0].RedactionRanges), shared.MaxRedactionRanges)
-		t.terminateSessionWithError(sessionID, shared.ReasonProtocolViolation, err, "Too many redaction ranges")
+		t.terminateSessionWithErrorForIdentity(identity, shared.ReasonProtocolViolation, err, "Too many redaction ranges")
 		return err
 	}
 
-	session, err := t.sessionManager.GetSession(sessionID)
-	if err != nil {
-		t.terminateSessionWithError(sessionID, shared.ReasonSessionNotFound, err, "Failed to get session")
+	if err := identity.ensureCurrent(); err != nil {
 		return err
 	}
 
@@ -372,9 +410,9 @@ func (t *TEET) handleBatchedEncryptedRequest(msg *shared.Message) error {
 			zap.Int("range_count", len(batchedReq.Fragments[0].RedactionRanges)))
 	}
 
-	teetState, err := t.getTEETSessionState(sessionID)
+	teetState, err := t.sessionManager.stateForSession(session)
 	if err != nil {
-		t.terminateSessionWithError(sessionID, shared.ReasonSessionStateCorrupted, err, "Failed to get TEE_T session state")
+		t.terminateSessionWithErrorForIdentity(identity, shared.ReasonSessionStateCorrupted, err, "Failed to get TEE_T session state")
 		return err
 	}
 
@@ -402,35 +440,33 @@ func (t *TEET) handleBatchedEncryptedRequest(msg *shared.Message) error {
 		zap.String("session_id", sessionID),
 		zap.Int("total_fragments", len(batchedReq.Fragments)))
 
-	return t.processIfBothPartsArrived(sessionID)
+	return t.processIfBothPartsArrived(identity)
 }
 
 // handleBatchedTagSecrets handles batched tag secrets from TEE_K
-func (t *TEET) handleBatchedTagSecrets(msg *shared.Message) error {
-	sessionID := msg.SessionID
-	if sessionID == "" {
+func (t *TEET) handleBatchedTagSecrets(identity *teetSessionIdentity, msg *shared.Message) error {
+	if identity == nil || identity.session == nil || identity.session.ID == "" {
 		err := fmt.Errorf("batched tag secrets missing session ID")
-		t.terminateSessionWithError("", shared.ReasonMissingSessionID, err, "Batched tag secrets missing session ID")
+		return err
+	}
+	session := identity.session
+	sessionID := session.ID
+	if err := identity.ensureCurrent(); err != nil {
 		return err
 	}
 	t.logger.Debug("Handling batched tag secrets for session",
 		zap.String("session_id", sessionID))
 	var batchedTagSecrets shared.BatchedTagSecretsData
 	if err := msg.UnmarshalData(&batchedTagSecrets); err != nil {
-		t.terminateSessionWithError(sessionID, shared.ReasonMessageParsingFailed, err, "Failed to unmarshal batched tag secrets")
+		t.terminateSessionWithErrorForIdentity(identity, shared.ReasonMessageParsingFailed, err, "Failed to unmarshal batched tag secrets")
 		return err
 	}
 	t.logger.Debug("Received batch of tag secrets",
 		zap.String("session_id", sessionID),
 		zap.Int("batch_count", batchedTagSecrets.TotalCount))
-	session, err := t.sessionManager.GetSession(sessionID)
-	if err != nil {
-		t.terminateSessionWithError(sessionID, shared.ReasonSessionNotFound, err, "Failed to get session")
-		return err
-	}
 	if session.ResponseState == nil {
 		err := fmt.Errorf("no response state for session")
-		t.terminateSessionWithError(sessionID, shared.ReasonSessionStateCorrupted, err, "No response state for session")
+		t.terminateSessionWithErrorForIdentity(identity, shared.ReasonSessionStateCorrupted, err, "No response state for session")
 		return err
 	}
 	var verifications []shared.ResponseTagVerificationData
@@ -467,7 +503,7 @@ func (t *TEET) handleBatchedTagSecrets(msg *shared.Message) error {
 		if encryptedResp == nil {
 			session.ResponseState.ResponsesMutex.Unlock()
 			err := fmt.Errorf("critical security failure: missing encrypted response for seq %d", tagSecretsData.SeqNum)
-			t.terminateSessionWithError(sessionID, shared.ReasonSessionStateCorrupted, err, "Missing encrypted response in batch")
+			t.terminateSessionWithErrorForIdentity(identity, shared.ReasonSessionStateCorrupted, err, "Missing encrypted response in batch")
 			return err
 		}
 		// Convert to the expected struct type for verifyTagForResponse
@@ -478,11 +514,11 @@ func (t *TEET) handleBatchedTagSecrets(msg *shared.Message) error {
 			TagSecrets: tagSecretsData.TagSecrets,
 			SeqNum:     tagSecretsData.SeqNum,
 		}
-		verificationResult := t.verifyTagForResponse(sessionID, encryptedResp, tagSecretStruct)
+		verificationResult := t.verifyTagForResponse(identity, encryptedResp, tagSecretStruct)
 		if !verificationResult.Success {
 			allSuccessful = false
 			verifications = append(verifications, verificationResult)
-			t.classifyTagFailure(sessionID, encryptedResp, tagSecretBySeq, session.ResponseState.PendingEncryptedResponses)
+			t.classifyTagFailure(identity, encryptedResp, tagSecretBySeq, session.ResponseState.PendingEncryptedResponses)
 			break // Exit loop to send results - this is OK
 		}
 		t.logger.Debug("Tag verification completed",
@@ -515,32 +551,35 @@ func (t *TEET) handleBatchedTagSecrets(msg *shared.Message) error {
 			},
 		},
 	}
-	if err = t.sessionManager.RouteToTEEK(sessionID, env); err != nil {
-		t.terminateSessionWithError(sessionID, shared.ReasonNetworkFailure, err, "Failed to send batch verification results to TEE_K")
+	if err := identity.ensureCurrent(); err != nil {
+		return err
+	}
+	if err := t.routeToTEEKForSession(session, env); err != nil {
+		t.terminateSessionWithErrorForIdentity(identity, shared.ReasonNetworkFailure, err, "Failed to send batch verification results to TEE_K")
 		return err
 	}
 	t.logger.Debug("Successfully sent batch verification results",
 		zap.String("session_id", sessionID))
 	if !allSuccessful {
 		err := fmt.Errorf("tag verification failed for batch")
-		t.terminateSessionWithError(sessionID, shared.ReasonCryptoTagVerificationFailed, err, "Tag verification failed")
+		t.terminateSessionWithErrorForIdentity(identity, shared.ReasonCryptoTagVerificationFailed, err, "Tag verification failed")
 		return err
 	}
 	return nil
 }
 
 // processEncryptedRequestWithStreams processes encrypted request with available redaction streams
-func (t *TEET) processEncryptedRequestWithStreams(sessionID string, encReq *shared.EncryptedRequestData) error {
-	t.logger.Debug("Processing encrypted request with available redaction streams for session",
-		zap.String("session_id", sessionID))
-	session, err := t.sessionManager.GetSession(sessionID)
-	if err != nil {
-		t.terminateSessionWithError(sessionID, shared.ReasonSessionNotFound, err, "Failed to get session")
+func (t *TEET) processEncryptedRequestWithStreams(identity *teetSessionIdentity, encReq *shared.EncryptedRequestData) error {
+	if err := identity.ensureCurrent(); err != nil {
 		return err
 	}
-	teetState, err := t.sessionManager.GetTEETSessionState(sessionID)
+	session := identity.session
+	sessionID := session.ID
+	t.logger.Debug("Processing encrypted request with available redaction streams for session",
+		zap.String("session_id", sessionID))
+	teetState, err := t.sessionManager.stateForSession(session)
 	if err != nil {
-		t.terminateSessionWithError(sessionID, shared.ReasonSessionStateCorrupted, err, "Failed to get TEE_T session state")
+		t.terminateSessionWithErrorForIdentity(identity, shared.ReasonSessionStateCorrupted, err, "Failed to get TEE_T session state")
 		return err
 	}
 	teetState.CipherSuite = encReq.CipherSuite
@@ -549,12 +588,12 @@ func (t *TEET) processEncryptedRequestWithStreams(sessionID string, encReq *shar
 		zap.Uint16("cipher_suite", encReq.CipherSuite))
 	if session.RedactionState == nil {
 		err := fmt.Errorf("no redaction state available for session")
-		t.terminateSessionWithError(sessionID, shared.ReasonSessionStateCorrupted, err, "No redaction state available")
+		t.terminateSessionWithErrorForIdentity(identity, shared.ReasonSessionStateCorrupted, err, "No redaction state available")
 		return err
 	}
 	reconstructedData, err := t.reconstructFullRequestWithStreams(encReq.EncryptedData, encReq.RedactionRanges, session.RedactionState.RedactionStreams)
 	if err != nil {
-		t.terminateSessionWithError(sessionID, shared.ReasonCryptoTagComputationFailed, err, "Failed to reconstruct full request")
+		t.terminateSessionWithErrorForIdentity(identity, shared.ReasonCryptoTagComputationFailed, err, "Failed to reconstruct full request")
 		return err
 	}
 	t.logger.Debug("Successfully reconstructed original request data",
@@ -572,7 +611,7 @@ func (t *TEET) processEncryptedRequestWithStreams(sessionID string, encReq *shar
 	}
 	authTag, err := minitls.ComputeTagFromSecrets(reconstructedData, encReq.TagSecrets, encReq.CipherSuite, additionalData)
 	if err != nil {
-		t.terminateSessionWithError(sessionID, shared.ReasonCryptoTagComputationFailed, err, "Failed to compute authentication tag")
+		t.terminateSessionWithErrorForIdentity(identity, shared.ReasonCryptoTagComputationFailed, err, "Failed to compute authentication tag")
 		return err
 	}
 	t.logger.Debug("Computed split AEAD tag",
@@ -603,24 +642,27 @@ func (t *TEET) processEncryptedRequestWithStreams(sessionID string, encReq *shar
 			Success:    true,
 		}},
 	}
-	if err := t.sessionManager.RouteToClient(sessionID, envResp); err != nil {
-		t.terminateSessionWithError(sessionID, shared.ReasonNetworkFailure, err, "Failed to send encrypted data to client")
+	if err := identity.ensureCurrent(); err != nil {
+		return err
+	}
+	if err := t.routeToClientForSession(session, envResp); err != nil {
+		t.terminateSessionWithErrorForIdentity(identity, shared.ReasonNetworkFailure, err, "Failed to send encrypted data to client")
 		return err
 	}
 	return nil
 }
 
 // processEncryptedFragmentsWithStreams processes multiple encrypted fragments with available redaction streams
-func (t *TEET) processEncryptedFragmentsWithStreams(sessionID string) error {
-	session, err := t.sessionManager.GetSession(sessionID)
-	if err != nil {
-		t.terminateSessionWithError(sessionID, shared.ReasonSessionNotFound, err, "Failed to get session")
+func (t *TEET) processEncryptedFragmentsWithStreams(identity *teetSessionIdentity) error {
+	if err := identity.ensureCurrent(); err != nil {
 		return err
 	}
+	session := identity.session
+	sessionID := session.ID
 
-	teetState, err := t.sessionManager.GetTEETSessionState(sessionID)
+	teetState, err := t.sessionManager.stateForSession(session)
 	if err != nil {
-		t.terminateSessionWithError(sessionID, shared.ReasonSessionStateCorrupted, err, "Failed to get TEE_T session state")
+		t.terminateSessionWithErrorForIdentity(identity, shared.ReasonSessionStateCorrupted, err, "Failed to get TEE_T session state")
 		return err
 	}
 
@@ -632,7 +674,7 @@ func (t *TEET) processEncryptedFragmentsWithStreams(sessionID string) error {
 	if len(teetState.PendingEncryptedFragments) == 1 {
 		// Single fragment - use existing logic
 		for _, fragment := range teetState.PendingEncryptedFragments {
-			return t.processEncryptedRequestWithStreams(sessionID, fragment)
+			return t.processEncryptedRequestWithStreams(identity, fragment)
 		}
 	}
 
@@ -658,7 +700,7 @@ func (t *TEET) processEncryptedFragmentsWithStreams(sessionID string) error {
 	for i, seqNum := range seqNums {
 		if seqNum != baseSeq+uint64(i) {
 			err := fmt.Errorf("non-consecutive fragments: expected %d, got %d", baseSeq+uint64(i), seqNum)
-			t.terminateSessionWithError(sessionID, shared.ReasonCryptoTagComputationFailed, err, "Non-consecutive fragments")
+			t.terminateSessionWithErrorForIdentity(identity, shared.ReasonCryptoTagComputationFailed, err, "Non-consecutive fragments")
 			return err
 		}
 	}
@@ -674,14 +716,14 @@ func (t *TEET) processEncryptedFragmentsWithStreams(sessionID string) error {
 		// Verify cipher suite consistency
 		if fragment.CipherSuite != cipherSuite {
 			err := fmt.Errorf("cipher suite mismatch in fragment %d: expected %d, got %d", seqNum, cipherSuite, fragment.CipherSuite)
-			t.terminateSessionWithError(sessionID, shared.ReasonCryptoTagComputationFailed, err, "Cipher suite mismatch")
+			t.terminateSessionWithErrorForIdentity(identity, shared.ReasonCryptoTagComputationFailed, err, "Cipher suite mismatch")
 			return err
 		}
 
 		// Process this fragment
 		reconstructedData, err := t.reconstructFullRequestWithStreams(fragment.EncryptedData, fragment.RedactionRanges, session.RedactionState.RedactionStreams)
 		if err != nil {
-			t.terminateSessionWithError(sessionID, shared.ReasonCryptoTagComputationFailed, err, fmt.Sprintf("Failed to reconstruct fragment %d", seqNum))
+			t.terminateSessionWithErrorForIdentity(identity, shared.ReasonCryptoTagComputationFailed, err, fmt.Sprintf("Failed to reconstruct fragment %d", seqNum))
 			return err
 		}
 
@@ -699,7 +741,7 @@ func (t *TEET) processEncryptedFragmentsWithStreams(sessionID string) error {
 
 		authTag, err := minitls.ComputeTagFromSecrets(reconstructedData, fragment.TagSecrets, cipherSuite, additionalData)
 		if err != nil {
-			t.terminateSessionWithError(sessionID, shared.ReasonCryptoTagComputationFailed, err, fmt.Sprintf("Failed to compute tag for fragment %d", seqNum))
+			t.terminateSessionWithErrorForIdentity(identity, shared.ReasonCryptoTagComputationFailed, err, fmt.Sprintf("Failed to compute tag for fragment %d", seqNum))
 			return err
 		}
 
@@ -728,7 +770,7 @@ func (t *TEET) processEncryptedFragmentsWithStreams(sessionID string) error {
 		// Process this specific fragment
 		fragmentReconstructed, err := t.reconstructFullRequestWithStreams(fragment.EncryptedData, fragment.RedactionRanges, session.RedactionState.RedactionStreams)
 		if err != nil {
-			t.terminateSessionWithError(sessionID, shared.ReasonCryptoTagComputationFailed, err, fmt.Sprintf("Failed to reconstruct fragment %d for response", seqNum))
+			t.terminateSessionWithErrorForIdentity(identity, shared.ReasonCryptoTagComputationFailed, err, fmt.Sprintf("Failed to reconstruct fragment %d for response", seqNum))
 			return err
 		}
 
@@ -746,7 +788,7 @@ func (t *TEET) processEncryptedFragmentsWithStreams(sessionID string) error {
 
 		authTag, err := minitls.ComputeTagFromSecrets(fragmentReconstructed, fragment.TagSecrets, cipherSuite, additionalData)
 		if err != nil {
-			t.terminateSessionWithError(sessionID, shared.ReasonCryptoTagComputationFailed, err, fmt.Sprintf("Failed to compute tag for fragment %d response", seqNum))
+			t.terminateSessionWithErrorForIdentity(identity, shared.ReasonCryptoTagComputationFailed, err, fmt.Sprintf("Failed to compute tag for fragment %d response", seqNum))
 			return err
 		}
 
@@ -770,8 +812,11 @@ func (t *TEET) processEncryptedFragmentsWithStreams(sessionID string) error {
 		},
 	}
 
-	if err := t.sessionManager.RouteToClient(sessionID, envResp); err != nil {
-		t.terminateSessionWithError(sessionID, shared.ReasonNetworkFailure, err, "Failed to send batched encrypted data to client")
+	if err := identity.ensureCurrent(); err != nil {
+		return err
+	}
+	if err := t.routeToClientForSession(session, envResp); err != nil {
+		t.terminateSessionWithErrorForIdentity(identity, shared.ReasonNetworkFailure, err, "Failed to send batched encrypted data to client")
 		return err
 	}
 
@@ -784,10 +829,11 @@ func (t *TEET) processEncryptedFragmentsWithStreams(sessionID string) error {
 }
 
 // addSingleResponseToTranscript adds a single response to the session transcript
-func (t *TEET) addSingleResponseToTranscript(sessionID string, encryptedResp *shared.EncryptedResponseData) error {
-	teetState, err := t.sessionManager.GetTEETSessionState(sessionID)
+func (t *TEET) addSingleResponseToTranscript(identity *teetSessionIdentity, encryptedResp *shared.EncryptedResponseData) error {
+	sessionID := identity.session.ID
+	teetState, err := t.sessionManager.stateForSession(identity.session)
 	if err != nil {
-		t.terminateSessionWithError(sessionID, shared.ReasonSessionStateCorrupted, err, "Failed to get TEE_T session state")
+		t.terminateSessionWithErrorForIdentity(identity, shared.ReasonSessionStateCorrupted, err, "Failed to get TEE_T session state")
 		return err
 	}
 	isTLS12AESGCMCipher := minitls.IsTLS12AESGCMCipherSuite(teetState.CipherSuite)
@@ -824,7 +870,7 @@ func (t *TEET) addSingleResponseToTranscript(sessionID string, encryptedResp *sh
 	record[3] = byte(recordLength >> 8)
 	record[4] = byte(recordLength & 0xFF)
 	copy(record[5:], payload)
-	if err := t.addToTranscript(sessionID, record, shared.TranscriptDataTypeTLSRecord); err != nil {
+	if err := t.addToTranscript(identity, record, shared.TranscriptDataTypeTLSRecord); err != nil {
 		return err
 	}
 	t.logger.Debug("Added response packet to session transcript",

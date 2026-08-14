@@ -19,13 +19,18 @@ import (
 // TEE_K is the authoritative, mutually-attested source of ranges: it relays the
 // client's ranges here (with TotalRanges), so TEE_T derives all OPRF state from
 // this single TCP-ordered stream rather than racing a separate client message.
-func (t *TEET) handleOPRFOnlineFull(sessionID string, msg *teeproto.OPRFOnlineFull) error {
+func (t *TEET) handleOPRFOnlineFull(identity *teetSessionIdentity, msg *teeproto.OPRFOnlineFull) error {
 	startTime := time.Now()
+	if err := identity.ensureCurrent(); err != nil {
+		return err
+	}
+	session := identity.session
+	sessionID := session.ID
 	if msg.GetSessionId() != sessionID {
 		return fmt.Errorf("OPRF round 1 session ID mismatch")
 	}
 
-	teetState, err := t.sessionManager.GetTEETSessionState(sessionID)
+	teetState, err := t.sessionManager.stateForSession(session)
 	if err != nil {
 		return fmt.Errorf("failed to get TEE_T session state: %w", err)
 	}
@@ -119,7 +124,7 @@ func (t *TEET) handleOPRFOnlineFull(sessionID string, msg *teeproto.OPRFOnlineFu
 
 	// Consume the single-use OTs only after the complete payload and its
 	// duplicated metadata pass validation.
-	otEntries, err := t.consumeOTReceiverEntries(uint64(msg.OtStartIndex), mpc.OTsPerOPRF)
+	otEntries, err := t.consumeOTReceiverEntriesForIdentity(identity, session.Context, uint64(msg.OtStartIndex), mpc.OTsPerOPRF, waitForReceiverPrecompute)
 	if err != nil {
 		return fmt.Errorf("failed to consume OT entries: %w", err)
 	}
@@ -129,6 +134,9 @@ func (t *TEET) handleOPRFOnlineFull(sessionID string, msg *teeproto.OPRFOnlineFu
 	evaluatorSession, corrections, err := mpc.EvaluatorPrepare(payload, evaluatorInput, otEntries)
 	if err != nil {
 		return fmt.Errorf("failed to prepare evaluator OT corrections: %w", err)
+	}
+	if err := identity.ensureCurrent(); err != nil {
+		return err
 	}
 	if err := teetState.SetPendingOPRF(rangeIndex, &pendingOPRFEvaluation{
 		Session:   evaluatorSession,
@@ -142,7 +150,7 @@ func (t *TEET) handleOPRFOnlineFull(sessionID string, msg *teeproto.OPRFOnlineFu
 		return fmt.Errorf("failed to serialize choice corrections: %w", err)
 	}
 
-	if err := t.sendOPRFChoiceCorrectionsToTEEK(sessionID, &teeproto.OPRFMPCRound2{
+	if err := t.sendOPRFChoiceCorrectionsToTEEK(identity, &teeproto.OPRFMPCRound2{
 		SessionId:         sessionID,
 		OprfSessionId:     msg.OprfSessionId,
 		RangeIndex:        int32(rangeIndex),
@@ -164,13 +172,17 @@ func (t *TEET) handleOPRFOnlineFull(sessionID string, msg *teeproto.OPRFOnlineFu
 }
 
 // handleOPRFMasks handles online round 3 and completes circuit evaluation.
-func (t *TEET) handleOPRFMasks(sessionID string, msg *teeproto.OPRFMPCRound3) error {
+func (t *TEET) handleOPRFMasks(identity *teetSessionIdentity, msg *teeproto.OPRFMPCRound3) error {
 	startTime := time.Now()
+	if err := identity.ensureCurrent(); err != nil {
+		return err
+	}
+	sessionID := identity.session.ID
 	if msg.GetSessionId() != sessionID {
 		return fmt.Errorf("OPRF round 3 session ID mismatch")
 	}
 
-	teetState, err := t.sessionManager.GetTEETSessionState(sessionID)
+	teetState, err := t.sessionManager.stateForSession(identity.session)
 	if err != nil {
 		return fmt.Errorf("failed to get TEE_T session state: %w", err)
 	}
@@ -200,6 +212,9 @@ func (t *TEET) handleOPRFMasks(sessionID string, msg *teeproto.OPRFMPCRound3) er
 	evalDone := time.Now()
 	hashOutput := sha256.Sum256(result.CMACOutput[:])
 
+	if err := identity.ensureCurrent(); err != nil {
+		return err
+	}
 	teetState.SetOPRFResult(rangeIndex, &shared.OPRFResult{
 		RangeIndex: rangeIndex,
 		TLSStart:   pending.TLSStart,
@@ -212,7 +227,7 @@ func (t *TEET) handleOPRFMasks(sessionID string, msg *teeproto.OPRFMPCRound3) er
 	if err != nil {
 		return fmt.Errorf("failed to serialize output labels: %w", err)
 	}
-	if err := t.sendOPRFMPCResultToTEEK(sessionID, &teeproto.OPRFMPCResult{
+	if err := t.sendOPRFMPCResultToTEEK(identity, &teeproto.OPRFMPCResult{
 		SessionId:     sessionID,
 		OprfSessionId: msg.OprfSessionId,
 		RangeIndex:    int32(rangeIndex),
@@ -235,21 +250,19 @@ func (t *TEET) handleOPRFMasks(sessionID string, msg *teeproto.OPRFMPCRound3) er
 			zap.Int("count", teetState.GetOPRFResultCount()))
 
 		// Check if we can finalize now
-		t.checkFinishedCondition(sessionID)
+		t.checkFinishedCondition(identity)
 	}
 
 	return nil
 }
 
 // sendOPRFChoiceCorrectionsToTEEK sends online round 2 to TEE_K.
-func (t *TEET) sendOPRFChoiceCorrectionsToTEEK(sessionID string, msg *teeproto.OPRFMPCRound2) error {
-	session, err := t.sessionManager.GetSession(sessionID)
-	if err != nil {
-		return fmt.Errorf("failed to get session: %w", err)
+func (t *TEET) sendOPRFChoiceCorrectionsToTEEK(identity *teetSessionIdentity, msg *teeproto.OPRFMPCRound2) error {
+	if err := identity.ensureCurrent(); err != nil {
+		return err
 	}
-	if session.TEEKConn == nil {
-		return fmt.Errorf("no TEE_K connection for session")
-	}
+	session := identity.session
+	sessionID := session.ID
 
 	env := &teeproto.Envelope{
 		SessionId:   sessionID,
@@ -263,7 +276,10 @@ func (t *TEET) sendOPRFChoiceCorrectionsToTEEK(sessionID string, msg *teeproto.O
 		return fmt.Errorf("failed to marshal OPRF choice corrections: %w", err)
 	}
 
-	wsConn, ok := session.TEEKConn.(*shared.WSConnection)
+	session.ConnMutex.RLock()
+	conn := session.TEEKConn
+	session.ConnMutex.RUnlock()
+	wsConn, ok := conn.(*shared.WSConnection)
 	if !ok {
 		return fmt.Errorf("TEE_K connection is not a WebSocket connection")
 	}
@@ -271,15 +287,12 @@ func (t *TEET) sendOPRFChoiceCorrectionsToTEEK(sessionID string, msg *teeproto.O
 }
 
 // sendOPRFMPCResultToTEEK sends the final OPRF result to TEE_K
-func (t *TEET) sendOPRFMPCResultToTEEK(sessionID string, result *teeproto.OPRFMPCResult) error {
-	session, err := t.sessionManager.GetSession(sessionID)
-	if err != nil {
-		return fmt.Errorf("failed to get session: %w", err)
+func (t *TEET) sendOPRFMPCResultToTEEK(identity *teetSessionIdentity, result *teeproto.OPRFMPCResult) error {
+	if err := identity.ensureCurrent(); err != nil {
+		return err
 	}
-
-	if session.TEEKConn == nil {
-		return fmt.Errorf("no TEE_K connection for session")
-	}
+	session := identity.session
+	sessionID := session.ID
 
 	env := &teeproto.Envelope{
 		SessionId:   sessionID,
@@ -294,7 +307,10 @@ func (t *TEET) sendOPRFMPCResultToTEEK(sessionID string, result *teeproto.OPRFMP
 		return fmt.Errorf("failed to marshal OPRF result: %w", err)
 	}
 
-	wsConn, ok := session.TEEKConn.(*shared.WSConnection)
+	session.ConnMutex.RLock()
+	conn := session.TEEKConn
+	session.ConnMutex.RUnlock()
+	wsConn, ok := conn.(*shared.WSConnection)
 	if !ok {
 		return fmt.Errorf("TEE_K connection is not a WebSocket connection")
 	}

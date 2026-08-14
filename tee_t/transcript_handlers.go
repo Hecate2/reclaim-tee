@@ -12,12 +12,12 @@ import (
 )
 
 // addToTranscript safely adds data with explicit type to the session's transcript
-func (t *TEET) addToTranscript(sessionID string, data []byte, dataType string) error {
-	session, err := t.sessionManager.GetSession(sessionID)
-	if err != nil {
-		t.terminateSessionWithError(sessionID, shared.ReasonSessionNotFound, err, "Failed to get session for transcript")
+func (t *TEET) addToTranscript(identity *teetSessionIdentity, data []byte, dataType string) error {
+	if err := identity.ensureCurrent(); err != nil {
 		return err
 	}
+	session := identity.session
+	sessionID := session.ID
 	session.TranscriptMutex.Lock()
 	defer session.TranscriptMutex.Unlock()
 	dataCopy := make([]byte, len(data))
@@ -35,40 +35,38 @@ func (t *TEET) addToTranscript(sessionID string, data []byte, dataType string) e
 // Transcript handling simplified - using structured data in SignedMessage
 
 // handleFinishedFromTEEK handles finished message from TEE_K and triggers transcript signing
-func (t *TEET) handleFinishedFromTEEK(msg *shared.Message) error {
+func (t *TEET) handleFinishedFromTEEK(identity *teetSessionIdentity, msg *shared.Message) error {
+	if err := identity.ensureCurrent(); err != nil {
+		return err
+	}
 	t.logger.Debug("Handling finished message from TEE_K",
 		zap.String("session_id", msg.SessionID))
 	var finishedMsg shared.FinishedMessage
 	if err := msg.UnmarshalData(&finishedMsg); err != nil {
-		t.terminateSessionWithError(msg.SessionID, shared.ReasonMessageParsingFailed, err, "Failed to unmarshal finished message from TEE_K")
+		t.terminateSessionWithErrorForIdentity(identity, shared.ReasonMessageParsingFailed, err, "Failed to unmarshal finished message from TEE_K")
 		return err
 	}
 	t.logger.Debug("Received finished command from TEE_K",
 		zap.String("session_id", msg.SessionID))
-	sessionID := msg.SessionID
-	session, err := t.sessionManager.GetSession(sessionID)
-	if err != nil {
-		t.terminateSessionWithError(sessionID, shared.ReasonSessionNotFound, err, "Failed to get session for TEE_K finished tracking")
-		return err
-	}
+	session := identity.session
 	session.FinishedStateMutex.Lock()
 	session.TEEKFinished = true
 	session.FinishedStateMutex.Unlock()
-	return t.checkFinishedCondition(sessionID)
+	return t.checkFinishedCondition(identity)
 }
 
 // checkFinishedCondition checks if conditions are met for transcript signing and sends signed transcript
-func (t *TEET) checkFinishedCondition(sessionID string) error {
-	session, err := t.sessionManager.GetSession(sessionID)
-	if err != nil {
-		t.terminateSessionWithError(sessionID, shared.ReasonSessionNotFound, err, "Failed to get session for finished condition check")
+func (t *TEET) checkFinishedCondition(identity *teetSessionIdentity) error {
+	if err := identity.ensureCurrent(); err != nil {
 		return err
 	}
+	session := identity.session
+	sessionID := session.ID
 
 	// Get TEE_T state for OPRF check
-	teetState, err := t.sessionManager.GetTEETSessionState(sessionID)
+	teetState, err := t.sessionManager.stateForSession(session)
 	if err != nil {
-		t.terminateSessionWithError(sessionID, shared.ReasonSessionStateCorrupted, err, "Failed to get TEE_T session state for finished condition check")
+		t.terminateSessionWithErrorForIdentity(identity, shared.ReasonSessionStateCorrupted, err, "Failed to get TEE_T session state for finished condition check")
 		return err
 	}
 
@@ -116,12 +114,12 @@ func (t *TEET) checkFinishedCondition(sessionID string) error {
 		// binds keyPair's ETH address.
 		keyPair, attestationReport, err := t.signingEpoch(sessionID)
 		if err != nil {
-			t.terminateSessionWithError(sessionID, shared.ReasonAttestationVerificationFailed, err, "Failed to snapshot signing epoch")
+			t.terminateSessionWithErrorForIdentity(identity, shared.ReasonAttestationVerificationFailed, err, "Failed to snapshot signing epoch")
 			return err
 		}
 		if keyPair == nil {
 			err = fmt.Errorf("no signing key pair available")
-			t.terminateSessionWithError(sessionID, shared.ReasonCryptoKeyGenerationFailed, err, "No signing key pair available for transcript signing")
+			t.terminateSessionWithErrorForIdentity(identity, shared.ReasonCryptoKeyGenerationFailed, err, "No signing key pair available for transcript signing")
 			return err
 		}
 		ethAddress := keyPair.GetEthAddress()
@@ -150,12 +148,12 @@ func (t *TEET) checkFinishedCondition(sessionID string) error {
 
 		body, err := proto.Marshal(tOutput)
 		if err != nil {
-			t.terminateSessionWithError(sessionID, shared.ReasonMessageParsingFailed, err, "Failed to marshal TOutputPayload")
+			t.terminateSessionWithErrorForIdentity(identity, shared.ReasonMessageParsingFailed, err, "Failed to marshal TOutputPayload")
 			return err
 		}
 		signature, err := keyPair.SignData(body)
 		if err != nil {
-			t.terminateSessionWithError(sessionID, shared.ReasonCryptoKeyGenerationFailed, err, "Failed to sign protobuf body")
+			t.terminateSessionWithErrorForIdentity(identity, shared.ReasonCryptoKeyGenerationFailed, err, "Failed to sign protobuf body")
 			return err
 		}
 		t.logger.Debug("Successfully signed protobuf body",
@@ -168,7 +166,7 @@ func (t *TEET) checkFinishedCondition(sessionID string) error {
 		if t.ratls != nil {
 			if attestationReport == nil {
 				err = fmt.Errorf("no attestation available for SignedMessage")
-				t.terminateSessionWithError(sessionID, shared.ReasonAttestationVerificationFailed, err, "No attestation available")
+				t.terminateSessionWithErrorForIdentity(identity, shared.ReasonAttestationVerificationFailed, err, "No attestation available")
 				return err
 			}
 			t.logger.Debug("Including attestation report in SignedMessage", zap.String("session_id", sessionID))
@@ -186,8 +184,11 @@ func (t *TEET) checkFinishedCondition(sessionID string) error {
 			AttestationReport: attestationReport,
 		}
 		env := &teeproto.Envelope{SessionId: sessionID, TimestampMs: timestampMs, Payload: &teeproto.Envelope_SignedMessage{SignedMessage: sm}}
-		if err := t.sessionManager.RouteToClient(sessionID, env); err != nil {
-			t.terminateSessionWithError(sessionID, shared.ReasonNetworkFailure, err, "Failed to send SignedMessage (T_OUTPUT) to client")
+		if err := identity.ensureCurrent(); err != nil {
+			return err
+		}
+		if err := t.routeToClientForSession(session, env); err != nil {
+			t.terminateSessionWithErrorForIdentity(identity, shared.ReasonNetworkFailure, err, "Failed to send SignedMessage (T_OUTPUT) to client")
 			return err
 		}
 		t.logger.Debug("Sent SignedMessage (T_OUTPUT) to client",
