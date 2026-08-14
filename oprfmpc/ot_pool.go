@@ -477,20 +477,18 @@ func DeserializeBulkOTReceiverData(data []byte) (*OTReceiverData, error) {
 	}, nil
 }
 
-// DualMask holds the masks for derandomized OT
-// M0 = L0 XOR R0, M1 = L1 XOR R1
-// Delta = R0 XOR R1 (needed when precomputed choice != actual input)
-// Where (L0, L1) are the actual input wire labels and (R0, R1) are precomputed random labels
-type DualMask struct {
-	M0    ot.Label // Mask for 0-label
-	M1    ot.Label // Mask for 1-label
-	Delta ot.Label // R0 XOR R1 for correction when precomputed choice != actual input
+// OTMask holds the two correction-aware ciphertexts for a random OT. The
+// sender swaps R0/R1 when c=d XOR b is one, so the receiver can recover L_b
+// with its one pad R_d. No relation between R0 and R1 is transmitted.
+type OTMask struct {
+	M0 ot.Label
+	M1 ot.Label
 }
 
-// SerializeDualMasks serializes dual masks for transmission
-// Each DualMask is 48 bytes (3 x 16-byte labels: M0, M1, Delta)
-func SerializeDualMasks(masks []DualMask) []byte {
-	buf := make([]byte, 4+len(masks)*48)
+// SerializeOTMasks serializes OT masks for transmission.
+// Each OTMask is 32 bytes (2 x 16-byte labels).
+func SerializeOTMasks(masks []OTMask) []byte {
+	buf := make([]byte, 4+len(masks)*32)
 	binary.BigEndian.PutUint32(buf[0:4], uint32(len(masks)))
 
 	offset := 4
@@ -499,34 +497,30 @@ func SerializeDualMasks(masks []DualMask) []byte {
 		binary.BigEndian.PutUint64(buf[offset+8:offset+16], mask.M0.D1)
 		binary.BigEndian.PutUint64(buf[offset+16:offset+24], mask.M1.D0)
 		binary.BigEndian.PutUint64(buf[offset+24:offset+32], mask.M1.D1)
-		binary.BigEndian.PutUint64(buf[offset+32:offset+40], mask.Delta.D0)
-		binary.BigEndian.PutUint64(buf[offset+40:offset+48], mask.Delta.D1)
-		offset += 48
+		offset += 32
 	}
 
 	return buf
 }
 
-// DeserializeDualMasks deserializes dual masks
-func DeserializeDualMasks(data []byte) ([]DualMask, error) {
+// DeserializeOTMasks deserializes correction-aware OT masks.
+func DeserializeOTMasks(data []byte) ([]OTMask, error) {
 	if len(data) < 4 {
 		return nil, errors.New("data too short for mask count")
 	}
 
 	count := binary.BigEndian.Uint32(data[0:4])
 
-	// Bounds check: prevent integer overflow and memory exhaustion
-	// Each mask is 48 bytes, max possible entries = (len(data) - 4) / 48
-	maxPossibleMasks := (len(data) - 4) / 48
-	if int(count) > maxPossibleMasks {
-		return nil, fmt.Errorf("invalid mask count %d: data can hold at most %d masks", count, maxPossibleMasks)
+	expectedLen := uint64(4) + uint64(count)*32
+	if uint64(len(data)) != expectedLen {
+		return nil, fmt.Errorf("invalid mask encoding length %d for count %d", len(data), count)
 	}
 
-	masks := make([]DualMask, count)
+	masks := make([]OTMask, count)
 	offset := 4
 
 	for i := range count {
-		masks[i] = DualMask{
+		masks[i] = OTMask{
 			M0: ot.Label{
 				D0: binary.BigEndian.Uint64(data[offset : offset+8]),
 				D1: binary.BigEndian.Uint64(data[offset+8 : offset+16]),
@@ -535,13 +529,27 @@ func DeserializeDualMasks(data []byte) ([]DualMask, error) {
 				D0: binary.BigEndian.Uint64(data[offset+16 : offset+24]),
 				D1: binary.BigEndian.Uint64(data[offset+24 : offset+32]),
 			},
-			Delta: ot.Label{
-				D0: binary.BigEndian.Uint64(data[offset+32 : offset+40]),
-				D1: binary.BigEndian.Uint64(data[offset+40 : offset+48]),
-			},
 		}
-		offset += 48
+		offset += 32
 	}
 
 	return masks, nil
+}
+
+// SerializeChoiceCorrections packs the fixed 640 correction bits into 80
+// bytes. The corrections are c=d XOR b, not the evaluator's input bits.
+func SerializeChoiceCorrections(corrections []bool) ([]byte, error) {
+	if len(corrections) != cmacInputBitCount {
+		return nil, fmt.Errorf("need %d choice corrections, got %d", cmacInputBitCount, len(corrections))
+	}
+	return packBits(corrections), nil
+}
+
+// DeserializeChoiceCorrections decodes the fixed-size correction vector.
+func DeserializeChoiceCorrections(data []byte) ([]bool, error) {
+	const encodedLen = cmacInputBitCount / 8
+	if len(data) != encodedLen {
+		return nil, fmt.Errorf("choice correction length mismatch: got %d, want %d", len(data), encodedLen)
+	}
+	return unpackBits(data, cmacInputBitCount), nil
 }

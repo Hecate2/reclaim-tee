@@ -1,8 +1,8 @@
 // Package oprfmpc - Cryptographic Correctness Tests for Security Audit
 //
-// These tests verify the cryptographic properties of the 2-round OPRF protocol:
+// These tests verify the cryptographic properties of the online OPRF protocol:
 // - ECDH label derivation matches between garbler and evaluator
-// - Derandomization works for all 4 combinations of precomputed/actual choices
+// - Random-OT corrections work for all precomputed and actual choices
 // - End-to-end garbled circuit produces correct CMAC output
 
 package oprfmpc
@@ -188,14 +188,9 @@ func TestECDHLabelDerivation_Deterministic(t *testing.T) {
 	}
 }
 
-// TestDerandomization_AllCases tests all 4 combinations of precomputed/actual choices.
-// This is critical because a bug in derandomization caused the original implementation to fail.
-//
-// Case 1: precomputed=0, actual=0 -> L0 = R0 XOR M0
-// Case 2: precomputed=0, actual=1 -> L1 = (R0 XOR Delta) XOR M1
-// Case 3: precomputed=1, actual=0 -> L0 = (R1 XOR Delta) XOR M0
-// Case 4: precomputed=1, actual=1 -> L1 = R1 XOR M1
-func TestDerandomization_AllCases(t *testing.T) {
+// TestRandomOTCorrections_AllCases tests all combinations of the random OT
+// choice d and actual circuit input b.
+func TestRandomOTCorrections_AllCases(t *testing.T) {
 	curve := elliptic.P256()
 
 	testCases := []struct {
@@ -232,13 +227,16 @@ func TestDerandomization_AllCases(t *testing.T) {
 			l0 = ot.Label{D0: uint64(buf[0])<<56 | uint64(buf[1])<<48, D1: uint64(buf[2]) << 56}
 			l1 = ot.Label{D0: uint64(buf[16])<<56 | uint64(buf[17])<<48, D1: uint64(buf[18]) << 56}
 
-			// Garbler side: derive random labels and compute masks
+			// Garbler receives c=d XOR b and swaps the pads when c=1.
 			r0, r1 := mustDeriveRandomLabels(t, setup, receiverPoint, 0)
-			m0 := xorLabels(l0, r0)
-			m1 := xorLabels(l1, r1)
-			delta := xorLabels(r0, r1)
-
-			mask := DualMask{M0: m0, M1: m1, Delta: delta}
+			pad0, pad1 := r0, r1
+			if tc.precomputedChoice != tc.actualChoice {
+				pad0, pad1 = pad1, pad0
+			}
+			mask := OTMask{
+				M0: xorLabels(l0, pad0),
+				M1: xorLabels(l1, pad1),
+			}
 
 			// Evaluator side: recover the label for actualChoice
 			entry := &OTReceiverEntry{
@@ -250,12 +248,6 @@ func TestDerandomization_AllCases(t *testing.T) {
 			// Get the precomputed R (based on precomputed choice)
 			receivedR := mustDeriveReceivedLabel(t, entry, 0)
 
-			// If precomputed choice differs from actual, correct using delta
-			rActual := receivedR
-			if tc.precomputedChoice != tc.actualChoice {
-				rActual = xorLabels(receivedR, mask.Delta)
-			}
-
 			// Select the mask for the actual choice bit
 			var chosenMask ot.Label
 			if tc.actualChoice {
@@ -265,7 +257,7 @@ func TestDerandomization_AllCases(t *testing.T) {
 			}
 
 			// Recover the label
-			recoveredLabel := xorLabels(rActual, chosenMask)
+			recoveredLabel := xorLabels(receivedR, chosenMask)
 
 			// Verify recovered label matches expected
 			var expectedLabel ot.Label
@@ -282,9 +274,10 @@ func TestDerandomization_AllCases(t *testing.T) {
 	}
 }
 
-// TestDerandomization_NoLeakage verifies that the evaluator cannot learn both labels.
+// TestRandomOTCorrections_NoSecondLabel verifies that the corrected transcript
+// does not let the evaluator decrypt the unselected mask with R_d.
 // Security property: evaluator only learns L_b where b is their actual choice.
-func TestDerandomization_NoLeakage(t *testing.T) {
+func TestRandomOTCorrections_NoSecondLabel(t *testing.T) {
 	curve := elliptic.P256()
 
 	for trial := range 50 {
@@ -308,9 +301,7 @@ func TestDerandomization_NoLeakage(t *testing.T) {
 		r0, r1 := mustDeriveRandomLabels(t, setup, receiverPoint, trial)
 		m0 := xorLabels(l0, r0)
 		m1 := xorLabels(l1, r1)
-		delta := xorLabels(r0, r1)
-
-		mask := DualMask{M0: m0, M1: m1, Delta: delta}
+		mask := OTMask{M0: m0, M1: m1}
 
 		entry := &OTReceiverEntry{
 			ReceiverBundle:    bundle,
@@ -333,15 +324,30 @@ func TestDerandomization_NoLeakage(t *testing.T) {
 			t.Errorf("trial %d: evaluator recovered L1 without R1 (security violation)", trial)
 		}
 
-		// Even with Delta, the evaluator cannot compute both labels without
-		// knowing the precomputed choice and actual choice relationship
-		// This test verifies the security property holds
 	}
 }
 
-// TestDerandomization_Property is a property-based test that verifies
+// TestLegacyDeltaRevealsBothLabels records the exact algebraic break in the
+// removed protocol. R_d and Delta=R0 XOR R1 reveal the other OT pad.
+func TestLegacyDeltaRevealsBothLabels(t *testing.T) {
+	r0 := ot.Label{D0: 0x0123456789abcdef, D1: 0xfedcba9876543210}
+	r1 := ot.Label{D0: 0x1111222233334444, D1: 0x5555666677778888}
+	l0 := ot.Label{D0: 0x9999aaaabbbbcccc, D1: 0xddddeeeeffff0000}
+	l1 := ot.Label{D0: 0x13579bdf2468ace0, D1: 0x0eca8642fdb97531}
+
+	m0 := xorLabels(l0, r0)
+	m1 := xorLabels(l1, r1)
+	delta := xorLabels(r0, r1)
+	recoveredR1 := xorLabels(r0, delta)
+
+	if !xorLabels(r0, m0).Equal(l0) || !xorLabels(recoveredR1, m1).Equal(l1) {
+		t.Fatal("legacy transcript did not reproduce the both-label disclosure")
+	}
+}
+
+// TestRandomOTCorrections_Property is a property-based test that verifies
 // evaluator always recovers the correct label for any random inputs.
-func TestDerandomization_Property(t *testing.T) {
+func TestRandomOTCorrections_Property(t *testing.T) {
 	curve := elliptic.P256()
 
 	for trial := range 500 {
@@ -371,11 +377,14 @@ func TestDerandomization_Property(t *testing.T) {
 			D1: uint64(buf[20])<<56 | uint64(buf[21])<<48}
 
 		r0, r1 := mustDeriveRandomLabels(t, setup, receiverPoint, trial%100)
-		m0 := xorLabels(l0, r0)
-		m1 := xorLabels(l1, r1)
-		delta := xorLabels(r0, r1)
-
-		mask := DualMask{M0: m0, M1: m1, Delta: delta}
+		pad0, pad1 := r0, r1
+		if precomputedChoice != actualChoice {
+			pad0, pad1 = pad1, pad0
+		}
+		mask := OTMask{
+			M0: xorLabels(l0, pad0),
+			M1: xorLabels(l1, pad1),
+		}
 
 		entry := &OTReceiverEntry{
 			ReceiverBundle:    bundle,
@@ -385,12 +394,6 @@ func TestDerandomization_Property(t *testing.T) {
 
 		receivedR := mustDeriveReceivedLabel(t, entry, trial%100)
 
-		// Apply derandomization correction
-		rActual := receivedR
-		if precomputedChoice != actualChoice {
-			rActual = xorLabels(receivedR, mask.Delta)
-		}
-
 		var chosenMask ot.Label
 		if actualChoice {
 			chosenMask = mask.M1
@@ -398,7 +401,7 @@ func TestDerandomization_Property(t *testing.T) {
 			chosenMask = mask.M0
 		}
 
-		recoveredLabel := xorLabels(rActual, chosenMask)
+		recoveredLabel := xorLabels(receivedR, chosenMask)
 
 		expectedLabel := l0
 		if actualChoice {
@@ -553,10 +556,24 @@ func TestGarbledCircuit_EndToEnd(t *testing.T) {
 		t.Fatalf("CMACGarblerOnline failed: %v", err)
 	}
 
-	// Evaluator evaluates the circuit
-	result, err := CMACEvaluatorOnline(curve, payload, evaluatorInput, receiverEntries)
+	// Evaluator sends corrections, receives masks, and evaluates the circuit.
+	evaluatorSession, corrections, err := CMACEvaluatorPrepare(payload, evaluatorInput, receiverEntries)
+	if err != nil {
+		t.Fatalf("CMACEvaluatorPrepare failed: %v", err)
+	}
+	masks, err := CMACGarblerApplyCorrections(session, corrections)
+	if err != nil {
+		t.Fatalf("CMACGarblerApplyCorrections failed: %v", err)
+	}
+	result, err := CMACEvaluatorOnline(curve, evaluatorSession, masks)
 	if err != nil {
 		t.Fatalf("CMACEvaluatorOnline failed: %v", err)
+	}
+	if _, err := CMACGarblerApplyCorrections(session, corrections); err == nil {
+		t.Fatal("garbler accepted replayed choice corrections")
+	}
+	if _, err := CMACEvaluatorOnline(curve, evaluatorSession, masks); err == nil {
+		t.Fatal("evaluator session accepted a second evaluation")
 	}
 
 	// Garbler verifies output labels AND derives CMAC from them
@@ -566,6 +583,9 @@ func TestGarbledCircuit_EndToEnd(t *testing.T) {
 	}
 	if derivedCmac != result.CMACOutput {
 		t.Fatalf("garbler-derived CMAC %x != evaluator CMAC %x", derivedCmac, result.CMACOutput)
+	}
+	if _, err := CMACGarblerVerifyOutput(session, result.OutputLabels); err == nil {
+		t.Fatal("garbler accepted a replayed output")
 	}
 
 	// Verify the CMAC output is correct
@@ -691,11 +711,17 @@ func TestOutputLabelVerification_ValidLabels(t *testing.T) {
 	rand.Read(garblerInput[:])
 	rand.Read(evaluatorInput[:])
 
-	payload, session, _ := CMACGarblerOnline(rand.Reader, curve, garblerInput, otEntries, 0)
-	result, _ := CMACEvaluatorOnline(curve, payload, evaluatorInput, receiverEntries)
+	payload, session, err := CMACGarblerOnline(rand.Reader, curve, garblerInput, otEntries, 0)
+	if err != nil {
+		t.Fatalf("CMACGarblerOnline failed: %v", err)
+	}
+	result, err := completeOnline(curve, payload, session, evaluatorInput, receiverEntries)
+	if err != nil {
+		t.Fatalf("CMACEvaluatorOnline failed: %v", err)
+	}
 
 	// Valid labels should pass
-	_, err := CMACGarblerVerifyOutput(session, result.OutputLabels)
+	_, err = CMACGarblerVerifyOutput(session, result.OutputLabels)
 	if err != nil {
 		t.Errorf("valid output labels rejected: %v", err)
 	}
@@ -719,7 +745,13 @@ func TestOutputLabelVerification_InvalidLabels(t *testing.T) {
 	var garblerInput [80]byte
 	rand.Read(garblerInput[:])
 
-	_, session, _ := CMACGarblerOnline(rand.Reader, curve, garblerInput, otEntries, 0)
+	_, session, err := CMACGarblerOnline(rand.Reader, curve, garblerInput, otEntries, 0)
+	if err != nil {
+		t.Fatalf("CMACGarblerOnline failed: %v", err)
+	}
+	if _, err := CMACGarblerApplyCorrections(session, make([]bool, cmacInputBitCount)); err != nil {
+		t.Fatalf("CMACGarblerApplyCorrections failed: %v", err)
+	}
 
 	// Create fabricated labels
 	fakeLabels := make([]ot.Label, 128)
@@ -728,7 +760,7 @@ func TestOutputLabelVerification_InvalidLabels(t *testing.T) {
 	}
 
 	// Fabricated labels should be rejected
-	_, err := CMACGarblerVerifyOutput(session, fakeLabels)
+	_, err = CMACGarblerVerifyOutput(session, fakeLabels)
 	if err == nil {
 		t.Error("fabricated output labels accepted (security violation)")
 	}
@@ -761,14 +793,20 @@ func TestOutputLabelVerification_ModifiedLabels(t *testing.T) {
 	rand.Read(garblerInput[:])
 	rand.Read(evaluatorInput[:])
 
-	payload, session, _ := CMACGarblerOnline(rand.Reader, curve, garblerInput, otEntries, 0)
-	result, _ := CMACEvaluatorOnline(curve, payload, evaluatorInput, receiverEntries)
+	payload, session, err := CMACGarblerOnline(rand.Reader, curve, garblerInput, otEntries, 0)
+	if err != nil {
+		t.Fatalf("CMACGarblerOnline failed: %v", err)
+	}
+	result, err := completeOnline(curve, payload, session, evaluatorInput, receiverEntries)
+	if err != nil {
+		t.Fatalf("CMACEvaluatorOnline failed: %v", err)
+	}
 
 	// Modify one label
 	result.OutputLabels[0].D0 ^= 0x1
 
 	// Modified labels should be rejected
-	_, err := CMACGarblerVerifyOutput(session, result.OutputLabels)
+	_, err = CMACGarblerVerifyOutput(session, result.OutputLabels)
 	if err == nil {
 		t.Error("modified output labels accepted (security violation)")
 	}
@@ -808,17 +846,29 @@ func runCMACTest(t *testing.T, garblerInput, evaluatorInput [80]byte) ([16]byte,
 		}
 	}
 
-	payload, _, err := CMACGarblerOnline(rand.Reader, curve, garblerInput, otEntries, 0)
+	payload, session, err := CMACGarblerOnline(rand.Reader, curve, garblerInput, otEntries, 0)
 	if err != nil {
 		return [16]byte{}, err
 	}
 
-	result, err := CMACEvaluatorOnline(curve, payload, evaluatorInput, receiverEntries)
+	result, err := completeOnline(curve, payload, session, evaluatorInput, receiverEntries)
 	if err != nil {
 		return [16]byte{}, err
 	}
 
 	return result.CMACOutput, nil
+}
+
+func completeOnline(curve elliptic.Curve, payload *CMACOnlinePayload, garblerSession *CMACGarblerOnlineSession, evaluatorInput [80]byte, receiverEntries []*OTReceiverEntry) (*CMACOnlineResult, error) {
+	evaluatorSession, corrections, err := CMACEvaluatorPrepare(payload, evaluatorInput, receiverEntries)
+	if err != nil {
+		return nil, err
+	}
+	masks, err := CMACGarblerApplyCorrections(garblerSession, corrections)
+	if err != nil {
+		return nil, err
+	}
+	return CMACEvaluatorOnline(curve, evaluatorSession, masks)
 }
 
 // computeAESCMAC computes AES-CMAC using standard library

@@ -70,26 +70,25 @@ func FuzzDeserializeBulkOTReceiverData(f *testing.F) {
 	})
 }
 
-// FuzzDeserializeDualMasks tests dual mask deserialization
-func FuzzDeserializeDualMasks(f *testing.F) {
+// FuzzDeserializeOTMasks tests OT mask deserialization.
+func FuzzDeserializeOTMasks(f *testing.F) {
 	f.Add([]byte{})
 	f.Add([]byte{0, 0, 0, 0})                                                                                  // count = 0
 	f.Add([]byte{0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}) // truncated
 
 	// Valid entry
-	masks := []DualMask{
+	masks := []OTMask{
 		{
-			M0:    ot.Label{D0: 0x1234, D1: 0x5678},
-			M1:    ot.Label{D0: 0xABCD, D1: 0xEF01},
-			Delta: ot.Label{D0: 0x1111, D1: 0x2222},
+			M0: ot.Label{D0: 0x1234, D1: 0x5678},
+			M1: ot.Label{D0: 0xABCD, D1: 0xEF01},
 		},
 	}
-	validData := SerializeDualMasks(masks)
+	validData := SerializeOTMasks(masks)
 	f.Add(validData)
 
 	f.Fuzz(func(t *testing.T, data []byte) {
 		// Should not panic
-		_, _ = DeserializeDualMasks(data)
+		_, _ = DeserializeOTMasks(data)
 	})
 }
 
@@ -187,13 +186,13 @@ func TestSerializationRoundtrip_BulkCOSenderSetup(t *testing.T) {
 	}
 }
 
-// TestSerializationRoundtrip_DualMasks verifies roundtrip for dual masks
-func TestSerializationRoundtrip_DualMasks(t *testing.T) {
-	masks := make([]DualMask, 100)
+// TestSerializationRoundtrip_OTMasks verifies roundtrip for OT masks.
+func TestSerializationRoundtrip_OTMasks(t *testing.T) {
+	masks := make([]OTMask, 100)
 	for i := range masks {
-		var buf [48]byte
+		var buf [32]byte
 		rand.Read(buf[:])
-		masks[i] = DualMask{
+		masks[i] = OTMask{
 			M0: ot.Label{
 				D0: uint64(buf[0])<<56 | uint64(buf[1])<<48 | uint64(buf[2])<<40 | uint64(buf[3])<<32,
 				D1: uint64(buf[4])<<56 | uint64(buf[5])<<48 | uint64(buf[6])<<40 | uint64(buf[7])<<32,
@@ -202,15 +201,11 @@ func TestSerializationRoundtrip_DualMasks(t *testing.T) {
 				D0: uint64(buf[16])<<56 | uint64(buf[17])<<48 | uint64(buf[18])<<40 | uint64(buf[19])<<32,
 				D1: uint64(buf[20])<<56 | uint64(buf[21])<<48 | uint64(buf[22])<<40 | uint64(buf[23])<<32,
 			},
-			Delta: ot.Label{
-				D0: uint64(buf[32])<<56 | uint64(buf[33])<<48 | uint64(buf[34])<<40 | uint64(buf[35])<<32,
-				D1: uint64(buf[36])<<56 | uint64(buf[37])<<48 | uint64(buf[38])<<40 | uint64(buf[39])<<32,
-			},
 		}
 	}
 
-	data := SerializeDualMasks(masks)
-	parsed, err := DeserializeDualMasks(data)
+	data := SerializeOTMasks(masks)
+	parsed, err := DeserializeOTMasks(data)
 	if err != nil {
 		t.Fatalf("deserialization failed: %v", err)
 	}
@@ -225,9 +220,6 @@ func TestSerializationRoundtrip_DualMasks(t *testing.T) {
 		}
 		if parsed[i].M1 != masks[i].M1 {
 			t.Errorf("mask %d: M1 mismatch", i)
-		}
-		if parsed[i].Delta != masks[i].Delta {
-			t.Errorf("mask %d: Delta mismatch", i)
 		}
 	}
 }
@@ -279,8 +271,13 @@ func TestSerializationRoundtrip_OnlinePayload(t *testing.T) {
 	if len(parsed.GarblerInputs) != len(payload.GarblerInputs) {
 		t.Error("GarblerInputs length mismatch")
 	}
-	if len(parsed.OutputHints) != len(payload.OutputHints) {
-		t.Error("OutputHints length mismatch")
+	if len(parsed.OutputTranslations) != len(payload.OutputTranslations) {
+		t.Error("OutputTranslations length mismatch")
+	}
+	for i := range payload.OutputTranslations {
+		if parsed.OutputTranslations[i] != payload.OutputTranslations[i] {
+			t.Errorf("OutputTranslations[%d] mismatch", i)
+		}
 	}
 }
 
@@ -305,8 +302,8 @@ func TestDeserialize_Malformed(t *testing.T) {
 			}
 		})
 
-		t.Run(tc.name+"_DualMasks", func(t *testing.T) {
-			_, err := DeserializeDualMasks(tc.data)
+		t.Run(tc.name+"_OTMasks", func(t *testing.T) {
+			_, err := DeserializeOTMasks(tc.data)
 			if err == nil && len(tc.data) < 4 {
 				t.Error("expected error for malformed input")
 			}
@@ -324,16 +321,16 @@ func TestDeserialize_Malformed(t *testing.T) {
 // TestDeserialize_Truncated tests handling of truncated valid data
 func TestDeserialize_Truncated(t *testing.T) {
 	// Create valid data then truncate it
-	masks := []DualMask{
-		{M0: ot.Label{D0: 1, D1: 2}, M1: ot.Label{D0: 3, D1: 4}, Delta: ot.Label{D0: 5, D1: 6}},
-		{M0: ot.Label{D0: 7, D1: 8}, M1: ot.Label{D0: 9, D1: 10}, Delta: ot.Label{D0: 11, D1: 12}},
+	masks := []OTMask{
+		{M0: ot.Label{D0: 1, D1: 2}, M1: ot.Label{D0: 3, D1: 4}},
+		{M0: ot.Label{D0: 7, D1: 8}, M1: ot.Label{D0: 9, D1: 10}},
 	}
-	validData := SerializeDualMasks(masks)
+	validData := SerializeOTMasks(masks)
 
 	// Try various truncation points
 	for i := 1; i < len(validData); i++ {
 		truncated := validData[:i]
-		_, err := DeserializeDualMasks(truncated)
+		_, err := DeserializeOTMasks(truncated)
 		if err == nil && i < len(validData)-1 {
 			// Should error on truncated data (except maybe last few bytes depending on format)
 			continue
@@ -435,9 +432,9 @@ func TestSerializationSizeLimits(t *testing.T) {
 		}
 	})
 
-	t.Run("DualMasks", func(t *testing.T) {
+	t.Run("OTMasks", func(t *testing.T) {
 		data := append(hugeCount, make([]byte, 100)...)
-		_, err := DeserializeDualMasks(data)
+		_, err := DeserializeOTMasks(data)
 		if err == nil {
 			t.Error("expected error for huge count")
 		}
@@ -468,8 +465,8 @@ func TestSerializationEmpty(t *testing.T) {
 	})
 
 	t.Run("EmptyMasks", func(t *testing.T) {
-		data := SerializeDualMasks([]DualMask{})
-		result, err := DeserializeDualMasks(data)
+		data := SerializeOTMasks([]OTMask{})
+		result, err := DeserializeOTMasks(data)
 		if err != nil {
 			t.Errorf("failed to deserialize empty: %v", err)
 		}
@@ -492,12 +489,12 @@ func TestSerializationEmpty(t *testing.T) {
 
 // TestSerializationBytesEqual tests that serialization is deterministic
 func TestSerializationBytesEqual(t *testing.T) {
-	masks := []DualMask{
-		{M0: ot.Label{D0: 1, D1: 2}, M1: ot.Label{D0: 3, D1: 4}, Delta: ot.Label{D0: 5, D1: 6}},
+	masks := []OTMask{
+		{M0: ot.Label{D0: 1, D1: 2}, M1: ot.Label{D0: 3, D1: 4}},
 	}
 
-	data1 := SerializeDualMasks(masks)
-	data2 := SerializeDualMasks(masks)
+	data1 := SerializeOTMasks(masks)
+	data2 := SerializeOTMasks(masks)
 
 	if !bytes.Equal(data1, data2) {
 		t.Error("serialization not deterministic")

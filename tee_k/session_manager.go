@@ -39,7 +39,7 @@ type TEEKSessionState struct {
 	responseTagSeq     atomic.Uint64
 	responseTagSeqInit sync.Once
 
-	// MPC OPRF state (2-round protocol with OT precomputation)
+	// MPC OPRF state with OT precomputation.
 	ConsolidatedKeystream []byte                                    // Keystream for response decryption
 	OPRFKeyShare          []byte                                    // 16-byte key share for MPC OPRF
 	GarblerOnlineSessions map[int]*oprfmpc.CMACGarblerOnlineSession // Per-range garbler sessions

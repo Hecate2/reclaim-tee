@@ -128,7 +128,7 @@ func (t *TEET) generateReceiverChoices(senderSetups []oprfmpc.SenderPublicSetup,
 	points := make([]ot.ECPoint, len(senderSetups))
 
 	// For precomputation, we generate random choice bits
-	// These will be derandomized during online phase
+	// The online correction bits bind these choices to the circuit input.
 	for i := range senderSetups {
 		setup := senderSetups[i]
 

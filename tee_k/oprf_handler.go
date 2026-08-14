@@ -101,7 +101,8 @@ func (t *TEEK) processQueuedOPRFRanges(sessionID string, teekState *TEEKSessionS
 	return nil
 }
 
-// initiateOPRFForRange starts MPC OPRF for a single range using the 2-round protocol
+// initiateOPRFForRange starts MPC OPRF for a single range using precomputed
+// random OT. The evaluator returns its choice corrections in round 2.
 func (t *TEEK) initiateOPRFForRange(sessionID string, teekState *TEEKSessionState, rangeIndex int, r *teeproto.OPRFRangeSpec) error {
 	// Reserve OT entries from the precomputed pool
 	startIdx, otEntries, err := t.reserveOTEntries(oprfmpc.OTsPerOPRF)
@@ -139,7 +140,6 @@ func (t *TEEK) initiateOPRFForRange(sessionID string, teekState *TEEKSessionStat
 	}
 
 	serializedPayload := oprfmpc.SerializeOnlinePayload(payload)
-	serializedDualMasks := oprfmpc.SerializeDualMasks(payload.DualMasks)
 	payload.Release()
 
 	t.logger.WithSession(sessionID).Debug("Sending OPRF online full",
@@ -155,17 +155,59 @@ func (t *TEEK) initiateOPRFForRange(sessionID string, teekState *TEEKSessionStat
 		TlsLength:      r.TlsLength,
 		TlsSessionHash: tlsSessionHash,
 		GarbledTables:  serializedPayload, // Contains all circuit data
-		GarblerInputs:  nil,               // Included in serialized payload
-		OutputHints:    nil,               // Included in serialized payload
 		OtStartIndex:   uint32(startIdx),
-		DualMasks:      serializedDualMasks,
 		TotalRanges:    int32(len(teekState.OPRFRanges)),
 	})
 }
 
+// handleOPRFChoiceCorrections applies c=d XOR b to the precomputed random OT
+// pads and returns masks that let TEE_T recover only its selected wire labels.
+func (t *TEEK) handleOPRFChoiceCorrections(sessionID string, msg *teeproto.OPRFMPCRound2) error {
+	if msg.GetSessionId() != sessionID {
+		return fmt.Errorf("OPRF round 2 session ID mismatch")
+	}
+
+	teekState, err := t.sessionManager.GetTEEKSessionState(sessionID)
+	if err != nil {
+		return fmt.Errorf("failed to get TEE_K session state: %w", err)
+	}
+
+	rangeIndex := int(msg.GetRangeIndex())
+	if rangeIndex < 0 || rangeIndex >= len(teekState.OPRFRanges) {
+		return fmt.Errorf("invalid range index %d", rangeIndex)
+	}
+
+	garblerSession, ok := teekState.GetGarblerOnlineSession(rangeIndex)
+	if !ok {
+		return fmt.Errorf("no garbler session found for range %d", rangeIndex)
+	}
+	if msg.GetOprfSessionId() != garblerSession.SessionID {
+		return fmt.Errorf("OPRF round 2 session mismatch for range %d", rangeIndex)
+	}
+
+	corrections, err := oprfmpc.DeserializeChoiceCorrections(msg.GetChoiceCorrections())
+	if err != nil {
+		return fmt.Errorf("failed to deserialize choice corrections: %w", err)
+	}
+	masks, err := oprfmpc.CMACGarblerApplyCorrections(garblerSession, corrections)
+	if err != nil {
+		return fmt.Errorf("failed to apply choice corrections: %w", err)
+	}
+
+	return t.sendOPRFMasksToTEET(sessionID, &teeproto.OPRFMPCRound3{
+		SessionId:     sessionID,
+		OprfSessionId: garblerSession.SessionID,
+		OtMasks:       oprfmpc.SerializeOTMasks(masks),
+		RangeIndex:    int32(rangeIndex),
+	})
+}
+
 // handleOPRFResult handles the final OPRF result from TEE_T
-// This is the only response in the 2-round protocol
 func (t *TEEK) handleOPRFResult(sessionID string, msg *teeproto.OPRFMPCResult) error {
+	if msg.GetSessionId() != sessionID {
+		return fmt.Errorf("OPRF result session ID mismatch")
+	}
+
 	teekState, err := t.sessionManager.GetTEEKSessionState(sessionID)
 	if err != nil {
 		return fmt.Errorf("failed to get TEE_K session state: %w", err)
@@ -180,6 +222,9 @@ func (t *TEEK) handleOPRFResult(sessionID string, msg *teeproto.OPRFMPCResult) e
 	garblerSession, ok := teekState.GetGarblerOnlineSession(rangeIndex)
 	if !ok {
 		return fmt.Errorf("no garbler session found for range %d", rangeIndex)
+	}
+	if msg.GetOprfSessionId() != garblerSession.SessionID {
+		return fmt.Errorf("OPRF result session mismatch for range %d", rangeIndex)
 	}
 
 	// Deserialize output labels
@@ -256,6 +301,23 @@ func (t *TEEK) sendOPRFOnlineFullToTEET(sessionID string, msg *teeproto.OPRFOnli
 		zap.String("type", "OprfOnlineFull"))
 
 	// Send on per-session connection
+	return t.connManager.SendOnSession(sessionID, env)
+}
+
+// sendOPRFMasksToTEET sends the correction-aware OT masks to TEE_T.
+func (t *TEEK) sendOPRFMasksToTEET(sessionID string, msg *teeproto.OPRFMPCRound3) error {
+	if t.connManager == nil {
+		return fmt.Errorf("connection manager not initialized")
+	}
+
+	env := &teeproto.Envelope{
+		SessionId:   sessionID,
+		TimestampMs: time.Now().UnixMilli(),
+		Payload: &teeproto.Envelope_OprfMpcRound3{
+			OprfMpcRound3: msg,
+		},
+	}
+
 	return t.connManager.SendOnSession(sessionID, env)
 }
 

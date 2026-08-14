@@ -49,11 +49,11 @@ go test -cover ./...          # with coverage
 ## Protocol Flow
 
 1. Client connects to TEE_K and TEE_T over WebSocket
-2. TEE_K and TEE_T perform mutual attestation and OT precomputation (~50,000 OTs)
+2. TEE_K and TEE_T perform mutual attestation and OT precomputation (100,000 initial OTs)
 3. TEE_K establishes TLS connection with the target website
 4. Client sends redacted request through split AEAD (TEE_K encrypts, TEE_T computes tags)
 5. Response decrypted and verified through same split process
-6. MPC OPRF (2-round garbled circuit protocol) for key derivation proofs
+6. MPC OPRF with garbled circuits and precomputed random OT for key derivation proofs
 7. Client generates ZK proofs and verification bundle
 8. Attestor validates the bundle and issues a signed claim
 

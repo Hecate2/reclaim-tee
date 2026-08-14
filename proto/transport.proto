@@ -65,15 +65,17 @@ message Envelope {
     TEETAttestationResponse teet_attestation = 61;
 
     // OPRF MPC messages
-    OPRFRangesSubmission oprf_ranges_submission = 70;   // Client -> both TEEs (DO NOT RENUMBER)
+    OPRFRangesSubmission oprf_ranges_submission = 70;   // Client -> TEE_K (DO NOT RENUMBER)
     CiphertextReady ciphertext_ready = 62;              // TEE_T -> TEE_K
     OPRFMPCResult oprf_mpc_result = 63;                 // TEE_T -> TEE_K
 
-    // OT Precomputation messages (2-round OPRF protocol, TEE_K <-> TEE_T)
+    // OT precomputation messages (TEE_K <-> TEE_T)
     OTPrecomputeRequest ot_precompute_request = 64;     // TEE_K -> TEE_T (init or extend)
     OTPrecomputeResponse ot_precompute_response = 65;   // TEE_T -> TEE_K
     OTPrecomputeComplete ot_precompute_complete = 66;   // TEE_K -> TEE_T (after initial setup only)
-    OPRFOnlineFull oprf_online_full = 67;               // TEE_K -> TEE_T (2-round online phase)
+    OPRFOnlineFull oprf_online_full = 67;               // TEE_K -> TEE_T (online round 1)
+    OPRFMPCRound2 oprf_mpc_round2 = 73;                 // TEE_T -> TEE_K (choice corrections)
+    OPRFMPCRound3 oprf_mpc_round3 = 74;                 // TEE_K -> TEE_T (corrected OT masks)
 
     // OT pool resume across a transient control reconnect (both enclaves
     // retained their pool halves). TEE_K sends epoch+counter instead of a
@@ -309,7 +311,9 @@ message OTPrecomputeComplete {
   uint32 pool_size = 1;       // Total OTs now available (sent after initial setup only)
 }
 
-// Online OPRF (2-round version with derandomized OT)
+// Online round 1: the garbler sends the circuit before it knows the receiver's
+// random-OT choice corrections. Full output-label pairs and OT pad deltas are
+// deliberately absent.
 message OPRFOnlineFull {
   string session_id = 1;
   uint64 oprf_session_id = 2;
@@ -318,16 +322,32 @@ message OPRFOnlineFull {
   int32 tls_length = 5;
   bytes tls_session_hash = 6;
 
-  // Garbled circuit components
-  bytes garbled_tables = 7;      // The garbled circuit tables
-  bytes garbler_inputs = 8;      // Garbler's encoded input labels
-  bytes output_hints = 9;        // For decoding output (MANDATORY)
+  // Serialized circuit payload: tables, garbler labels, and one output
+  // translation bit per output wire.
+  bytes garbled_tables = 7;
+  reserved 8, 9, 11;
+  reserved "garbler_inputs", "output_hints", "dual_masks";
 
-  // Derandomized OT data
   uint32 ot_start_index = 10;    // Starting index in precomputed OT pool
-  bytes dual_masks = 11;         // M0||M1 pairs for all 640 input bits
-
   int32 total_ranges = 12;       // Total OPRF ranges this session; TEE_T's authoritative expected count
+}
+
+// Online round 2: c=d XOR b for each evaluator input bit. The uniformly
+// random, single-use precomputed choice d hides the actual input bit b.
+message OPRFMPCRound2 {
+  string session_id = 1;
+  uint64 oprf_session_id = 2;
+  bytes choice_corrections = 3;  // 640 packed bits (80 bytes)
+  int32 range_index = 4;
+}
+
+// Online round 3: two correction-aware masks per evaluator input wire. The
+// message never contains R0 XOR R1.
+message OPRFMPCRound3 {
+  string session_id = 1;
+  uint64 oprf_session_id = 2;
+  bytes ot_masks = 3;            // 640 pairs of 16-byte masks
+  int32 range_index = 4;
 }
 
 // OPRF result with MANDATORY output labels for garbler verification.
@@ -377,4 +397,3 @@ message ClientAuth {
   // attributed to a specific client build (empty = pre-versioning build).
   string client_version = 2;
 }
-

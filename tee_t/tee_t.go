@@ -60,7 +60,7 @@ type TEET struct {
 	// Persistent OPRF key share (loaded from cloud storage)
 	oprfKeyShare []byte
 
-	// OT receiver state for 2-round OPRF protocol
+	// OT receiver state for the MPC OPRF protocol.
 	otReceiverState   *OTReceiverState
 	otReceiverStateMu sync.Mutex
 

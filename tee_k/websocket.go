@@ -147,10 +147,16 @@ func (t *TEEK) handleSharedTEETMessage(msgBytes []byte) {
 		t.logger.WithSession(sessionID).Info("Received error from TEE_T", zap.String("error", p.Error.GetMessage()))
 		return
 
-	// OT Precomputation messages (2-round OPRF protocol)
+	// OT precomputation messages.
 	case *teeproto.Envelope_OtPrecomputeResponse:
 		if handlerErr = t.handleOTPrecomputeResponse(p.OtPrecomputeResponse); handlerErr != nil {
 			t.logger.Error("OT precompute response failed", zap.Error(handlerErr))
+		}
+		return
+
+	case *teeproto.Envelope_OprfMpcRound2:
+		if handlerErr = t.handleOPRFChoiceCorrections(sessionID, p.OprfMpcRound2); handlerErr != nil {
+			t.terminateSessionWithError(sessionID, shared.ReasonOPRFProtocolFailed, handlerErr, "MPC OPRF correction handling failed")
 		}
 		return
 

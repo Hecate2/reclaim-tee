@@ -648,14 +648,18 @@ func (cm *TEEKConnectionManager) handleSessionMessages(sessionID string, session
 			handlerErr = cm.teet.handleBatchedTagSecrets(msg)
 
 		case *teeproto.Envelope_OprfOnlineFull:
-			// Handle 2-round MPC OPRF online message
-			cm.logger.WithSession(sessionID).Info("OPRF timing: message received from TEE_K (session conn)",
+			cm.logger.WithSession(sessionID).Info("OPRF timing: round 1 received from TEE_K (session conn)",
 				zap.Int("range_index", int(p.OprfOnlineFull.RangeIndex)),
-				zap.Int("garbled_tables_bytes", len(p.OprfOnlineFull.GarbledTables)),
-				zap.Int("dual_masks_bytes", len(p.OprfOnlineFull.DualMasks)))
+				zap.Int("garbled_tables_bytes", len(p.OprfOnlineFull.GarbledTables)))
 			if err := cm.teet.handleOPRFOnlineFull(sessionID, p.OprfOnlineFull); err != nil {
 				cm.teet.terminateSessionWithError(sessionID, shared.ReasonOPRFEvaluationFailed, err, "Failed to handle OPRF online")
 				return // ZERO TOLERANCE: terminate on OPRF failure
+			}
+
+		case *teeproto.Envelope_OprfMpcRound3:
+			if err := cm.teet.handleOPRFMasks(sessionID, p.OprfMpcRound3); err != nil {
+				cm.teet.terminateSessionWithError(sessionID, shared.ReasonOPRFEvaluationFailed, err, "Failed to handle OPRF masks")
+				return
 			}
 
 		case *teeproto.Envelope_Error:

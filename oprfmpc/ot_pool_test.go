@@ -340,19 +340,22 @@ func TestOTReceiverPool_PartialOverlapAtomic(t *testing.T) {
 	}
 }
 
-func TestDualMaskSerialization(t *testing.T) {
+func TestOTMaskSerialization(t *testing.T) {
 	// Create labels using proper Label type
-	masks := []DualMask{
-		{M0: createLabel(0x01, 0x02, 0x03), M1: createLabel(0x04, 0x05, 0x06), Delta: createLabel(0x07, 0x08, 0x09)},
-		{M0: createLabel(0x11, 0x12, 0x13), M1: createLabel(0x14, 0x15, 0x16), Delta: createLabel(0x17, 0x18, 0x19)},
+	masks := []OTMask{
+		{M0: createLabel(0x01, 0x02, 0x03), M1: createLabel(0x04, 0x05, 0x06)},
+		{M0: createLabel(0x11, 0x12, 0x13), M1: createLabel(0x14, 0x15, 0x16)},
 	}
 
-	serialized := SerializeDualMasks(masks)
+	serialized := SerializeOTMasks(masks)
 	if len(serialized) == 0 {
-		t.Fatal("serialized dual masks is empty")
+		t.Fatal("serialized OT masks is empty")
+	}
+	if got, want := len(serialized), 4+32*len(masks); got != want {
+		t.Fatalf("serialized OT mask length = %d, want %d", got, want)
 	}
 
-	deserialized, err := DeserializeDualMasks(serialized)
+	deserialized, err := DeserializeOTMasks(serialized)
 	if err != nil {
 		t.Fatalf("failed to deserialize: %v", err)
 	}
@@ -368,9 +371,40 @@ func TestDualMaskSerialization(t *testing.T) {
 		if !labelsEqual(deserialized[i].M1, masks[i].M1) {
 			t.Errorf("mask %d M1 mismatch", i)
 		}
-		if !labelsEqual(deserialized[i].Delta, masks[i].Delta) {
-			t.Errorf("mask %d Delta mismatch", i)
+	}
+}
+
+func TestChoiceCorrectionSerialization(t *testing.T) {
+	corrections := make([]bool, cmacInputBitCount)
+	for i := range corrections {
+		corrections[i] = i%3 == 0
+	}
+
+	encoded, err := SerializeChoiceCorrections(corrections)
+	if err != nil {
+		t.Fatalf("SerializeChoiceCorrections failed: %v", err)
+	}
+	if got, want := len(encoded), cmacInputBitCount/8; got != want {
+		t.Fatalf("encoded correction length = %d, want %d", got, want)
+	}
+	decoded, err := DeserializeChoiceCorrections(encoded)
+	if err != nil {
+		t.Fatalf("DeserializeChoiceCorrections failed: %v", err)
+	}
+	for i := range corrections {
+		if decoded[i] != corrections[i] {
+			t.Fatalf("correction %d changed during serialization", i)
 		}
+	}
+
+	if _, err := SerializeChoiceCorrections(corrections[:len(corrections)-1]); err == nil {
+		t.Fatal("short correction vector was accepted")
+	}
+	if _, err := DeserializeChoiceCorrections(encoded[:len(encoded)-1]); err == nil {
+		t.Fatal("short correction encoding was accepted")
+	}
+	if _, err := DeserializeChoiceCorrections(append(encoded, 0)); err == nil {
+		t.Fatal("correction encoding with trailing data was accepted")
 	}
 }
 

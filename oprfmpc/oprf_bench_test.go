@@ -37,7 +37,7 @@ func setupOTEntries(b interface{ Fatalf(string, ...any) }, curve elliptic.Curve,
 }
 
 // BenchmarkOPRF_Garbler: per-call garbler-side cost — circuit garble +
-// 640 P-256 ScalarMults for dual-mask derivation. Work TEE_K does per OPRF.
+// 640 P-256 ScalarMults for random-OT pad derivation. Work TEE_K does per OPRF.
 // Calls Release in the same iteration to model the prod flow
 // (CMACGarblerOnline → serialize → release), so the pool reuses scratch.
 func BenchmarkOPRF_Garbler(b *testing.B) {
@@ -66,15 +66,27 @@ func BenchmarkOPRF_Evaluator(b *testing.B) {
 	rand.Read(garblerInput[:])
 	rand.Read(evaluatorInput[:])
 
-	payload, _, err := CMACGarblerOnline(rand.Reader, curve, garblerInput, otEntries, 0)
+	payload, garblerSession, err := CMACGarblerOnline(rand.Reader, curve, garblerInput, otEntries, 0)
 	if err != nil {
 		b.Fatalf("setup garble failed: %v", err)
+	}
+	_, corrections, err := CMACEvaluatorPrepare(payload, evaluatorInput, rxEntries)
+	if err != nil {
+		b.Fatalf("setup prepare failed: %v", err)
+	}
+	masks, err := CMACGarblerApplyCorrections(garblerSession, corrections)
+	if err != nil {
+		b.Fatalf("setup corrections failed: %v", err)
 	}
 
 	b.ResetTimer()
 	b.ReportAllocs()
 	for b.Loop() {
-		_, err := CMACEvaluatorOnline(curve, payload, evaluatorInput, rxEntries)
+		evaluatorSession, _, err := CMACEvaluatorPrepare(payload, evaluatorInput, rxEntries)
+		if err != nil {
+			b.Fatalf("prepare failed: %v", err)
+		}
+		_, err = CMACEvaluatorOnline(curve, evaluatorSession, masks)
 		if err != nil {
 			b.Fatalf("evaluator failed: %v", err)
 		}
@@ -99,7 +111,15 @@ func BenchmarkOPRF_EndToEnd(b *testing.B) {
 		if err != nil {
 			b.Fatalf("garbler: %v", err)
 		}
-		result, err := CMACEvaluatorOnline(curve, payload, evaluatorInput, rxEntries)
+		evaluatorSession, corrections, err := CMACEvaluatorPrepare(payload, evaluatorInput, rxEntries)
+		if err != nil {
+			b.Fatalf("prepare: %v", err)
+		}
+		masks, err := CMACGarblerApplyCorrections(session, corrections)
+		if err != nil {
+			b.Fatalf("corrections: %v", err)
+		}
+		result, err := CMACEvaluatorOnline(curve, evaluatorSession, masks)
 		if err != nil {
 			b.Fatalf("evaluator: %v", err)
 		}

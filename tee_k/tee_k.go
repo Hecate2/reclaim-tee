@@ -72,7 +72,7 @@ type TEEK struct {
 	// Persistent OPRF key share (loaded from cloud storage)
 	oprfKeyShare []byte
 
-	// OT precomputation state for 2-round OPRF protocol
+	// OT precomputation state for the MPC OPRF protocol.
 	otPrecomputeState *OTPrecomputeState
 
 	// V2 router-mode wiring. Nil/zero in standalone mode; filled in by
@@ -360,6 +360,8 @@ func getEnvelopePayloadType(env *teeproto.Envelope) string {
 		return "OtPrecomputeComplete"
 	case *teeproto.Envelope_OprfOnlineFull:
 		return "OprfOnlineFull"
+	case *teeproto.Envelope_OprfMpcRound3:
+		return "OprfMpcRound3"
 	case *teeproto.Envelope_TeekAttestation:
 		return "TeekAttestation"
 	default:

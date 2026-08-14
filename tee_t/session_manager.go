@@ -6,8 +6,15 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/reclaimprotocol/reclaim-tee/oprfmpc"
 	"github.com/reclaimprotocol/reclaim-tee/shared"
 )
+
+type pendingOPRFEvaluation struct {
+	Session   *oprfmpc.CMACEvaluatorOnlineSession
+	TLSStart  int
+	TLSLength int
+}
 
 type TEETSessionState struct {
 	KeyShare                       []byte
@@ -32,11 +39,12 @@ type TEETSessionState struct {
 	// initializes these on the first message (OPRFResults == nil guards init).
 	OPRFKeyShare      []byte                     // 16-byte key share for MPC OPRF
 	OPRFResults       map[int]*shared.OPRFResult // Completed OPRF results by range index
-	OPRFState         atomic.Int32               // Current OPRF processing state (shared.OPRFSessionState values)
-	OPRFExpectedCount int                        // Number of OPRF results expected
-	TLSSessionHash    []byte                     // Cached TLS session hash for replay protection
+	PendingOPRF       map[int]*pendingOPRFEvaluation
+	OPRFState         atomic.Int32 // Current OPRF processing state (shared.OPRFSessionState values)
+	OPRFExpectedCount int          // Number of OPRF results expected
+	TLSSessionHash    []byte       // Cached TLS session hash for replay protection
 
-	// Per-session mutex for thread-safe access to OPRFResults.
+	// Per-session mutex for thread-safe access to OPRF state.
 	oprfMu sync.Mutex
 }
 
@@ -108,6 +116,38 @@ func (s *TEETSessionState) SetOPRFResult(rangeIdx int, result *shared.OPRFResult
 		s.OPRFResults = make(map[int]*shared.OPRFResult)
 	}
 	s.OPRFResults[rangeIdx] = result
+}
+
+// SetPendingOPRF stores a prepared evaluator session without overwriting an
+// existing range or a completed result.
+func (s *TEETSessionState) SetPendingOPRF(rangeIdx int, pending *pendingOPRFEvaluation) error {
+	s.oprfMu.Lock()
+	defer s.oprfMu.Unlock()
+	if pending == nil || pending.Session == nil {
+		return fmt.Errorf("nil pending OPRF evaluation")
+	}
+	if _, ok := s.OPRFResults[rangeIdx]; ok {
+		return fmt.Errorf("OPRF range %d already completed", rangeIdx)
+	}
+	if s.PendingOPRF == nil {
+		s.PendingOPRF = make(map[int]*pendingOPRFEvaluation)
+	}
+	if _, ok := s.PendingOPRF[rangeIdx]; ok {
+		return fmt.Errorf("OPRF range %d already pending", rangeIdx)
+	}
+	s.PendingOPRF[rangeIdx] = pending
+	return nil
+}
+
+// TakePendingOPRF atomically removes and returns the prepared evaluator state.
+func (s *TEETSessionState) TakePendingOPRF(rangeIdx int) (*pendingOPRFEvaluation, bool) {
+	s.oprfMu.Lock()
+	defer s.oprfMu.Unlock()
+	pending, ok := s.PendingOPRF[rangeIdx]
+	if ok {
+		delete(s.PendingOPRF, rangeIdx)
+	}
+	return pending, ok
 }
 
 // GetOPRFResult safely retrieves an OPRF result for the given range index

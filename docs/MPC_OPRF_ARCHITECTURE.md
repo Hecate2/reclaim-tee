@@ -1,328 +1,160 @@
-# MPC OPRF Architecture and Design
-
-## Overview
-
-MPC OPRF (`oprf-mpc`) is a TEE-to-TEE Multi-Party Computation protocol using Garbled Circuits to compute AES-CMAC OPRF on XOR-shared data. This runs **alongside** (not replacing) the existing client-side TOPRF (`oprf`).
+# MPC OPRF Architecture
 
 ## Purpose
 
-Enable privacy-preserving verification of redacted data where:
-- Neither TEE learns the plaintext
-- Both TEEs contribute key shares
-- The OPRF output proves data authenticity without revealing content
+The MPC OPRF computes AES-CMAC on XOR-shared data and an XOR-shared key.
 
-## Architecture
+TEE_K has a TLS keystream share and a 16-byte key share. TEE_T has a ciphertext share and another 16-byte key share.
 
-### Network Topology
+The circuit computes these values:
 
-```
-                    ┌─────────────┐
-                    │   Client    │
-                    └──────┬──────┘
-                           │
-              ┌────────────┼────────────┐
-              │ WebSocket  │  WebSocket │
-              ▼            │            ▼
-       ┌──────────┐        │     ┌──────────┐
-       │  TEE_K   │◄───────┴────►│  TEE_T   │
-       │ (Garbler)│  Persistent  │(Evaluator)│
-       │ Port 8080│  WebSocket   │ Port 8081│
-       └──────────┘              └──────────┘
+```text
+plaintext = keystream_K XOR ciphertext_T
+key       = key_share_K XOR key_share_T
+output    = AES-CMAC(key, plaintext)
 ```
 
-- **Client** has TWO WebSocket connections (to TEE_K and TEE_T)
-- **TEE_K and TEE_T** share ONE persistent connection (mutual attestation at startup)
+The plaintext and the combined key do not leave the circuit. Both TEEs learn the 16-byte CMAC output.
 
-### Data Flow
+## Roles
 
-```
-TEE_K has:  Keystream (K)     + Key Share A
-TEE_T has:  Ciphertext (C)    + Key Share B
+- TEE_K is the garbler and the random-OT sender.
+- TEE_T is the evaluator and the random-OT receiver.
+- The client sends each OPRF range to TEE_K.
+- TEE_K sends the authoritative range data to TEE_T in `OPRFOnlineFull`.
 
-XOR inside circuit: K ⊕ C = Plaintext (never revealed outside circuit)
-Combined key: A ⊕ B (combined inside circuit)
+The TEEs use a mutually attested connection. Each application session uses a separate WebSocket connection between the TEEs.
 
-OPRF Output: AES-CMAC(combined_key, plaintext)
-```
+## OT Precomputation
 
-## Protocol Flow
+TEE_K creates P-256 Chou-Orlandi sender setups. TEE_T creates one cryptographically random choice `d` for each setup.
 
-```
-Client                           TEE_K                    TEE_T
-   │                               │                        │
-   │──[OprfRangesSubmission]──────►│                        │
-   │──[OprfRangesSubmission]──────────────────────────────►│
-   │                               │                        │
-   │──[RedactionSpec]─────────────►│                        │
-   │                               │──[Finished]───────────►│
-   │                               │                        │
-   │                               │  (MPC OPRF 4 rounds)   │
-   │                               │──[Round1: OT Setup]───►│
-   │                               │◄─[Round2: OT Choices]──│
-   │                               │──[Round3: GC + Inputs]►│
-   │                               │◄─[Round4: Result]──────│
-   │                               │                        │
-   │◄─[SignedMessage K_OUTPUT]─────│                        │
-   │◄─[SignedMessage T_OUTPUT]─────────────────────────────│
-   │                               │                        │
-   │  (verify outputs match)       │                        │
+Each side stores its half of the random OT. The initial pool contains 100,000 entries. One OPRF consumes 640 entries.
+
+Both pools mark entries as used before the online computation. A second use returns an error and terminates the application session.
+
+## Online Protocol
+
+The online protocol uses four messages for each OPRF range:
+
+```text
+TEE_K                                              TEE_T
+  |                                                   |
+  |-- OPRFOnlineFull: circuit and translations ------>|
+  |                                                   |
+  |<-- OPRFMPCRound2: choice corrections -------------|
+  |                                                   |
+  |-- OPRFMPCRound3: corrected OT masks ------------->|
+  |                                                   |
+  |<-- OPRFMPCResult: evaluated output labels --------|
+  |                                                   |
 ```
 
-## Components
+### Message 1: Circuit
 
-### 1. Garbled Circuit Package (`oprfmpc/`)
+TEE_K garbles the AES-CMAC circuit. It sends the garbled tables, its input labels, and one translation bit for each output wire.
 
-Location: `/home/scratch/reclaim-tee/oprfmpc/`
+TEE_K keeps both labels for each evaluator input wire. It also keeps both labels for each output wire.
 
-Core functions:
-- `CMACGarblerRound1()` - Generate OT setup (TEE_K)
-- `CMACGarblerRound3()` - Generate garbled circuit with inputs (TEE_K)
-- `CMACEvaluatorRound2()` - Generate OT choices (TEE_T)
-- `CMACEvaluatorRound4()` - Evaluate circuit, get CMAC result (TEE_T)
-- `PadZeros64()` - Zero-pad data to 64 bytes
+TEE_K derives random-OT pads `R0` and `R1`. These pads stay in the garbler session until message 2 arrives.
 
-### 2. Protocol Messages (`proto/transport.proto`)
+### Message 2: Choice Corrections
 
-```protobuf
-// Client -> both TEEs
-message OPRFRangesSubmission {
-  string session_id = 1;
-  repeated OPRFRangeSpec ranges = 2;
-}
+TEE_T converts its 80-byte input into 640 bits. For each bit `b`, TEE_T sends this correction:
 
-message OPRFRangeSpec {
-  int32 tls_start = 1;
-  int32 tls_length = 2;  // max 64 bytes
-}
-
-// TEE_K -> TEE_T
-message MPCOPRFRound1 {
-  string session_id = 1;
-  uint64 oprf_session_id = 2;
-  bytes ot_setup = 3;
-  int32 range_index = 4;
-  int32 tls_start = 5;
-  int32 tls_length = 6;
-  bytes tls_session_hash = 7;  // Replay protection
-}
-
-// TEE_T -> TEE_K
-message MPCOPRFRound2 {
-  string session_id = 1;
-  uint64 oprf_session_id = 2;
-  bytes ot_choices = 3;
-}
-
-// TEE_K -> TEE_T
-message MPCOPRFRound3 {
-  string session_id = 1;
-  uint64 oprf_session_id = 2;
-  bytes garbled_circuit = 3;
-  bytes garbler_inputs = 4;
-  bytes ot_ciphertexts = 5;
-  bytes output_hints = 6;
-}
-
-// TEE_T -> TEE_K
-message MPCOPRFResult {
-  string session_id = 1;
-  uint64 oprf_session_id = 2;
-  int32 range_index = 3;
-  bytes cmac_output = 4;  // 16 bytes
-  bytes hash_output = 5;  // 32 bytes SHA256(cmac)
-}
+```text
+c = d XOR b
 ```
 
-### 3. TEE_K Implementation (`tee_k/`)
+The random choice `d` is uniform, private, and single-use. Thus, the correction does not disclose `b` to TEE_K.
 
-**Session State** (`session_manager.go`):
-```go
-type TEEKSessionState struct {
-    // ... existing fields ...
+### Message 3: OT Masks
 
-    // MPC OPRF state
-    ConsolidatedKeystream []byte
-    OPRFKeyShare          []byte                              // 16-byte key share
-    GarblerSessions       map[int]*oprfmpc.CMACGarblerSession
-    OPRFRanges            []*teeproto.OPRFRangeSpec
-    OPRFResults           map[int]*shared.OPRFResult
-    OPRFState             shared.OPRFSessionState
-    OPRFExpectedCount     int
-    ClientRangesReceived  bool
-}
+For `c=0`, TEE_K sends these masks:
+
+```text
+M0 = L0 XOR R0
+M1 = L1 XOR R1
 ```
 
-**Handler** (`oprf_handler.go`):
-- `handleOPRFRangesFromClient()` - Receive ranges, queue if keystream not ready
-- `processQueuedOPRFRanges()` - Process after keystream available
-- `initiateOPRFForRange()` - Start MPC for single range
-- `handleOPRFRound2()` - Process Round2 from TEE_T
-- `handleOPRFResult()` - Store result, check completion
-- `buildOPRFOutputsForSigning()` - Build outputs for signature
+For `c=1`, TEE_K swaps the pads:
 
-### 4. TEE_T Implementation (`tee_t/`)
-
-**Session State** (`session_manager.go`):
-```go
-type TEETSessionState struct {
-    // ... existing fields ...
-
-    // MPC OPRF state
-    OPRFKeyShare         []byte
-    EvaluatorSessions    map[int]*oprfmpc.CMACEvaluatorSession
-    ClientOPRFRanges     []*teeproto.OPRFRangeSpec
-    ClientRangesReceived bool
-    PendingRound1s       []*teeproto.MPCOPRFRound1  // Queue for out-of-order
-    OPRFResults          map[int]*shared.OPRFResult
-    OPRFState            shared.OPRFSessionState
-    OPRFExpectedCount    int
-    TLSSessionHash       []byte  // Cached for replay protection
-}
+```text
+M0 = L0 XOR R1
+M1 = L1 XOR R0
 ```
 
-**Evaluator** (`oprf_evaluator.go`):
-- `handleOPRFRangesFromClient()` - Receive ranges, process queued Round1s
-- `handleOPRFRound1()` - Queue if ranges not received, else process
-- `processOPRFRound1()` - Validate positions, generate Round2
-- `handleOPRFRound3()` - Evaluate circuit, send result
+TEE_T knows only `R_d`. It selects `M_b` and computes `L_b = M_b XOR R_d`.
 
-### 5. Client Implementation (`client/`)
+The message does not contain `R0 XOR R1`. Therefore, TEE_T cannot derive the other pad from the protocol transcript.
 
-**Range Building** (`redaction.go`):
-- `buildMPCOPRFRanges()` - Convert HTTP positions to TLS positions
-- Send ranges to BOTH TEEs via `sendOPRFRangesToBothTEEs()`
+### Message 4: Result
 
-**Verification** (`verification_bundle.go`):
-- `verifyMPCOPRFOutputsMatch()` - Verify TEE_K and TEE_T outputs match
+TEE_T evaluates the circuit with one label for each input wire. It decodes each output with the corresponding translation bit.
 
-## Security Model
+TEE_T returns only the evaluated output labels. It does not send a trusted CMAC value or hash value.
 
-### Zero-Error Policy
+TEE_K compares each returned label with its two local output labels. TEE_K derives the CMAC only from labels that match.
 
-Any error terminates the session immediately:
-- `ReasonOPRFProtocolFailed` termination reason
-- `OPRFStateFailed` does NOT allow signature
-- All handlers call `terminateSessionWithError()` on failure
+## Output Translation
 
-### Replay Protection
+The garbling library uses a global Free-XOR offset. A complete output-label pair discloses that offset.
 
-TEE_K computes TLS session hash from:
-```go
-h := sha256.New()
-h.Write([]byte(sessionID))
-h.Write(teekState.ClientHello)
-h.Write(teekState.ServerHello)
-return h.Sum(nil)
-```
+`OPRFOnlineFull` contains one `L0` permutation bit for each output wire. It never contains complete output-label pairs.
 
-TEE_T caches and verifies this hash from Round1 messages.
+The permutation bit lets TEE_T decode the output. It does not disclose the 128-bit Free-XOR offset.
 
-### Position Validation
+## Message Definitions
 
-TEE_T validates TEE_K positions match client-provided ranges:
-```go
-if msg.TlsStart != clientRange.TlsStart || msg.TlsLength != clientRange.TlsLength {
-    return fmt.Errorf("position mismatch")
-}
-```
+The protocol uses these messages from `proto/transport.proto`:
 
-### Input Validation
+- `OPRFOnlineFull` carries the circuit payload, range data, OT index, TLS session hash, and OPRF session ID.
+- `OPRFMPCRound2` carries 640 packed correction bits. The encoded value is exactly 80 bytes.
+- `OPRFMPCRound3` carries 640 pairs of 16-byte OT masks.
+- `OPRFMPCResult` carries 128 evaluated output labels.
 
-Both TEEs validate:
-- Range bounds: `start >= 0`, `length > 0`, `length <= 64`
-- Range doesn't exceed data length
-- Range count limits (DoS prevention)
+The protobuf keeps fields 8, 9, and 11 of `OPRFOnlineFull` reserved. These fields previously carried unsafe or obsolete values.
 
-## Signature Integration
+## Replay and State Protection
 
-OPRF outputs are included in both TEE signatures:
+TEE_K creates a random OPRF session ID for each garbled circuit. Every online message carries this ID and the range index.
 
-**TEE_K** (`transcript.go`):
-```go
-kPayload := &teeproto.KOutputPayload{
-    // ... existing fields ...
-    OprfOutputs: t.buildOPRFOutputsForSigning(teekState),
-}
-```
+Both handlers compare the envelope session ID, the OPRF session ID, and the range index. A mismatch terminates the session.
 
-**TEE_T** (`transcript_handlers.go`):
-```go
-tPayload := &teeproto.TOutputPayload{
-    // ... existing fields ...
-    OprfOutputs: t.buildOPRFOutputsForSigning(teetState),
-}
-```
+TEE_K applies choice corrections once. TEE_T evaluates each prepared session once. TEE_K accepts one output result for each session.
 
-Both TEEs wait for OPRF completion before signing:
-```go
-func isOPRFReady(state shared.OPRFSessionState) bool {
-    return state == shared.OPRFStateNone ||
-        state == shared.OPRFStateComplete
-    // Failed is NOT ready - zero error policy
-}
-```
+TEE_K also sends a TLS session hash. TEE_T stores the first hash and compares all later hashes in the same application session.
 
-## Usage
+## Implementation
 
-In provider configuration, set `hash: "oprf-mpc"` for MPC OPRF:
+The main package functions are:
 
-```go
-ResponseRedactions: []providers.ResponseRedaction{
-    {
-        XPath: "/html/body/div/span",
-        Regex: `data="(?<value>[^"]+)"`,
-        Hash:  ptrString("oprf-mpc"),  // Use MPC OPRF
-    },
-}
-```
+- `CMACGarblerOnline` creates the garbled circuit and stores random-OT pads.
+- `CMACEvaluatorPrepare` creates the correction bits and stores evaluator state.
+- `CMACGarblerApplyCorrections` creates correction-aware OT masks.
+- `CMACEvaluatorOnline` evaluates the circuit and returns output labels.
+- `CMACGarblerVerifyOutput` compares output labels and derives the CMAC.
 
-Comparison:
-- `hash: "oprf"` - Client-side TOPRF with attestor
-- `hash: "oprf-mpc"` - TEE-to-TEE MPC OPRF (this implementation)
+TEE_K routes these messages in `tee_k/oprf_handler.go`. TEE_T routes them in `tee_t/oprf_evaluator.go`.
 
-## Files Changed/Added
+## Security Scope
 
-### New Files
-- `oprfmpc/circuit.go` - Garbled circuit implementation
-- `oprfmpc/circuit_test.go` - Circuit tests
-- `oprfmpc/serialization.go` - Message serialization
-- `tee_k/oprf_handler.go` - TEE_K OPRF handlers
-- `tee_t/oprf_evaluator.go` - TEE_T OPRF evaluator
+The protocol relies on mutual attestation for the expected TEE code. It does not use cut-and-choose to protect against a malicious garbler.
 
-### Modified Files
-- `proto/transport.proto` - MPC OPRF messages
-- `proto/signing.proto` - OPRFOutput in payloads
-- `shared/types.go` - OPRFSessionState, OPRFResult
-- `shared/session_termination.go` - ReasonOPRFProtocolFailed
-- `tee_k/session_manager.go` - TEEKSessionState OPRF fields
-- `tee_k/websocket.go` - Message routing, error termination
-- `tee_k/response_handlers.go` - OPRF ready check
-- `tee_k/transcript.go` - Include OPRF in signature
-- `tee_k/crypto.go` - Copy keystream to state
-- `tee_t/session_manager.go` - TEETSessionState OPRF fields
-- `tee_t/websocket_handlers.go` - Message routing, error termination
-- `tee_t/transcript_handlers.go` - OPRF ready check, include in signature
-- `client/client.go` - MPC OPRF state fields
-- `client/redaction.go` - Build and send MPC OPRF ranges
-- `client/websocket.go` - Send to both TEEs
-- `client/verification_bundle.go` - Verify outputs match
+The random-OT conversion relies on the privacy of the Chou-Orlandi choice. It also relies on cryptographically random, single-use receiver choices.
 
-## Testing
+The garbled-circuit verification stops an evaluator from substituting arbitrary output bytes. It does not make an invalid TEE measurement trustworthy.
 
-```bash
-# Build all
-./build.sh
+Any OPRF protocol error terminates the application session. A failed OPRF state cannot produce a signed session result.
 
-# Run demo with MPC OPRF
-./demo.sh
+## Tests
 
-# Expected log messages:
-# - "Received OPRF ranges from client"
-# - "Processing queued OPRF ranges"
-# - "Sending MPC OPRF Round1 to TEE_T"
-# - "Received MPC OPRF Round2 from TEE_T"
-# - "MPC OPRF evaluation complete"
-# - "All MPC OPRF computations complete"
-# - "Included OPRF outputs in signed payload"
-# - "Verified MPC OPRF outputs match between TEE_K and TEE_T"
-```
+The `oprfmpc` tests cover these properties:
+
+- All four combinations of `d` and `b` recover the selected label.
+- The corrected transcript does not decrypt the unselected mask with `R_d`.
+- A regression test reproduces the removed `R0 XOR R1` disclosure.
+- The circuit output matches NIST AES-CMAC vectors.
+- Modified output labels fail verification.
+- Correction, evaluation, and output sessions reject reuse.
+- Serialization rejects incorrect lengths and trailing data.
