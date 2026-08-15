@@ -16,8 +16,6 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-const msgLegacyOPRFRangesSubmission shared.MessageType = "legacy_oprf_ranges_submission"
-
 // handleClientWebSocket handles WebSocket connections from clients
 func (t *TEET) handleClientWebSocket(w http.ResponseWriter, r *http.Request) {
 	defer shared.RecoverAndCrash(t.logger, "tee_t.handleClientWebSocket")
@@ -111,11 +109,6 @@ func (t *TEET) handleClientWebSocket(w http.ResponseWriter, r *http.Request) {
 				arr = append(arr, shared.EncryptedResponseData{EncryptedData: r.GetEncryptedData(), Tag: r.GetTag(), RecordHeader: r.GetRecordHeader(), SeqNum: r.GetSeqNum(), ExplicitIV: r.GetExplicitIv()})
 			}
 			msg = &shared.Message{SessionID: env.GetSessionId(), Type: shared.MsgBatchedEncryptedResponses, Data: shared.BatchedEncryptedResponseData{Responses: arr, SessionID: p.BatchedEncryptedResponses.GetSessionId(), TotalCount: int(p.BatchedEncryptedResponses.GetTotalCount())}}
-		case *teeproto.Envelope_OprfRangesSubmission:
-			// Clients predating the single-source range flow send field 70 to both
-			// TEEs. TEE_K is authoritative and relays TotalRanges in round 1, so
-			// TEE_T validates this legacy copy but must not process or acknowledge it.
-			msg = &shared.Message{SessionID: env.GetSessionId(), Type: msgLegacyOPRFRangesSubmission, Data: p.OprfRangesSubmission}
 		default:
 			// `continue` so a nil msg never reaches msg.Type below.
 			t.logger.Warn("Unknown envelope payload from client; ignoring",
@@ -179,19 +172,6 @@ func (t *TEET) handleClientWebSocket(w http.ResponseWriter, r *http.Request) {
 		case shared.MsgBatchedEncryptedResponses:
 			t.logger.WithSession(sessionID).Debug("Handling batched encrypted responses")
 			handlerErr = t.handleBatchedEncryptedResponses(sessionIdentity, msg)
-		case msgLegacyOPRFRangesSubmission:
-			submission, ok := msg.Data.(*teeproto.OPRFRangesSubmission)
-			if !ok {
-				handlerErr = fmt.Errorf("malformed legacy OPRF ranges submission")
-			} else {
-				handlerErr = validateLegacyOPRFRangesSubmission(sessionIdentity, msg.SessionID, submission)
-			}
-			if handlerErr != nil {
-				t.terminateSessionWithErrorForIdentity(sessionIdentity, shared.ReasonProtocolViolation, handlerErr, "Invalid legacy OPRF ranges submission")
-				return
-			}
-			t.logger.WithSession(sessionID).Debug("Ignored validated legacy OPRF ranges submission",
-				zap.Int("count", len(submission.GetRanges())))
 		default:
 			err := fmt.Errorf("unknown message type: %s", string(msg.Type))
 			t.terminateSessionWithErrorForIdentity(sessionIdentity, shared.ReasonUnknownMessageType, err, "Unknown message type")
@@ -208,32 +188,6 @@ func (t *TEET) handleClientWebSocket(w http.ResponseWriter, r *http.Request) {
 		t.logger.Info("Session finished", zap.String("sid", shared.TruncateSessionID(sessionID)))
 		t.cleanupSessionWithSession(sessionIdentity.session)
 	}
-}
-
-// validateLegacyOPRFRangesSubmission preserves the pre-single-source client
-// wire flow without restoring two-source range ownership. Authentication occurs
-// before this function; these checks bind the ignored copy to the exact live
-// session and apply the same public range-count ceiling as TEE_K.
-func validateLegacyOPRFRangesSubmission(identity *teetSessionIdentity, envelopeSessionID string, submission *teeproto.OPRFRangesSubmission) error {
-	if identity == nil || identity.session == nil {
-		return fmt.Errorf("session identity is nil")
-	}
-	if err := identity.ensureCurrent(); err != nil {
-		return fmt.Errorf("session is not current: %w", err)
-	}
-	if envelopeSessionID == "" || envelopeSessionID != identity.session.ID {
-		return fmt.Errorf("envelope session ID mismatch")
-	}
-	if submission == nil {
-		return fmt.Errorf("submission is nil")
-	}
-	if submission.GetSessionId() != identity.session.ID {
-		return fmt.Errorf("payload session ID mismatch")
-	}
-	if count := len(submission.GetRanges()); count > shared.MaxOPRFRangesPerSession {
-		return fmt.Errorf("too many OPRF ranges: got %d, max %d", count, shared.MaxOPRFRangesPerSession)
-	}
-	return nil
 }
 
 func (t *TEET) clientSessionIdentity(session *shared.Session, clientConn *shared.WSConnection) *teetSessionIdentity {
