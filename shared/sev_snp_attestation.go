@@ -9,18 +9,29 @@ import (
 	"os"
 
 	"github.com/google/go-sev-guest/abi"
+	"github.com/google/go-sev-guest/kds"
 	spb "github.com/google/go-sev-guest/proto/sevsnp"
+	"github.com/google/go-sev-guest/validate"
 	"github.com/google/go-sev-guest/verify"
 	"github.com/google/go-sev-guest/verify/trust"
 	"google.golang.org/protobuf/proto"
 )
 
-// assertSnpReportSafe rejects a SEV-SNP report whose guest policy permits DEBUG
-// (the host can decrypt/tamper guest memory) or that isn't from VMPL 0. The
-// go-sev-guest verify.SnpAttestation checks the cert chain + signature but NOT
-// the policy or VMPL, so without this a debug-decryptable guest still produces
-// a fully "valid" attestation. Call at every SEV report verification site.
-func assertSnpReportSafe(report *spb.Report) error {
+// minimumSNPPlatformTCB is the component-wise floor observed identically in
+// authenticated GCP and AWS production reports on 2026-08-15. Higher component
+// values remain valid, so ordinary firmware upgrades do not require a rollout.
+const minimumSNPPlatformTCB kds.TCBVersion = 0xde1d000000000004
+
+// validateSnpAttestationPolicy rejects a report whose guest policy permits
+// DEBUG, is not from VMPL 0, or falls below the production TCB floor. It also
+// checks the signed report's TCB values against its VCEK/VLEK certificate while
+// allowing provisional firmware, where current values are ahead of committed
+// values during a cloud firmware rollout.
+func validateSnpAttestationPolicy(attestation *spb.Attestation) error {
+	if attestation == nil || attestation.GetReport() == nil {
+		return fmt.Errorf("SEV-SNP attestation carries no report")
+	}
+	report := attestation.GetReport()
 	policy, err := abi.ParseSnpPolicy(report.GetPolicy())
 	if err != nil {
 		return fmt.Errorf("parse SEV-SNP guest policy: %w", err)
@@ -30,6 +41,39 @@ func assertSnpReportSafe(report *spb.Report) error {
 	}
 	if report.GetVmpl() != 0 {
 		return fmt.Errorf("SEV-SNP report VMPL=%d, require 0", report.GetVmpl())
+	}
+	if err := assertSnpReportMinimumTCB(report); err != nil {
+		return err
+	}
+	if err := validate.SnpAttestation(attestation, &validate.Options{
+		// Preserve the already accepted guest-policy capabilities. DEBUG and
+		// VMPL are enforced explicitly above; this call owns TCB/certificate
+		// consistency rather than broadening guest-policy restrictions.
+		GuestPolicy:               policy,
+		PermitProvisionalFirmware: true,
+	}); err != nil {
+		return fmt.Errorf("validate SEV-SNP report policy: %w", err)
+	}
+	return nil
+}
+
+func assertSnpReportMinimumTCB(report *spb.Report) error {
+	if report == nil {
+		return fmt.Errorf("SEV-SNP attestation carries no report")
+	}
+	minimum := kds.DecomposeTCBVersion(minimumSNPPlatformTCB)
+	checks := []struct {
+		name  string
+		value uint64
+	}{
+		{name: "reported", value: report.GetReportedTcb()},
+		{name: "launch", value: report.GetLaunchTcb()},
+	}
+	for _, check := range checks {
+		actual := kds.DecomposeTCBVersion(kds.TCBVersion(check.value))
+		if !kds.TCBPartsLE(minimum, actual) {
+			return fmt.Errorf("SEV-SNP %s TCB 0x%016x is below minimum 0x%016x", check.name, check.value, uint64(minimumSNPPlatformTCB))
+		}
 	}
 	return nil
 }
@@ -116,7 +160,7 @@ func VerifySEVSNPAttestation(raw []byte, allowOffline bool) (measurement []byte,
 	if err := verify.SnpAttestation(att, opts); err != nil {
 		return nil, rd, fmt.Errorf("SEV-SNP chain verification failed: %w", err)
 	}
-	if err := assertSnpReportSafe(att.GetReport()); err != nil {
+	if err := validateSnpAttestationPolicy(att); err != nil {
 		return nil, rd, err
 	}
 
