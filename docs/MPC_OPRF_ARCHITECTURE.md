@@ -48,32 +48,44 @@ TEE_T creates one P-256 Chou-Orlandi sender setup. It owns 128 random seed pairs
 
 TEE_K selects one seed from each pair. Its 128 selection bits form the KOS correlation value.
 
-TEE_T expands both seed sets and creates the IKNP matrix correction. It also creates the KOS consistency proof.
+TEE_T expands both seed sets, creates the IKNP matrix correction, and sends the complete matrix together with the base-OT ciphertexts. This fixes its values before it learns the consistency challenge.
 
-TEE_K expands its selected seeds and verifies the proof. It rejects the complete batch after any proof failure.
+TEE_K parses and validates the complete commitment. It then samples and sends a full vector of independent 128-bit `chi` values.
+
+TEE_T computes the corrected KOS/SoftSpoken repetition-code proof. The proof contains one `x` value and all 128 values `t_i`.
+
+TEE_K expands its selected seeds and checks every equation `q_i = t_i XOR (delta_i ? x : 0)`. It rejects the complete batch after any transcript or proof failure.
 
 TEE_K sends a commit message after successful verification. TEE_T commits its pending receiver entries after this message.
 
 The initial batch contains 100,000 entries. One OPRF consumes 640 entries.
+
+The production handlers reject counts outside 1 through 100,000 before they create a session, mutate pool state, start base OT, or allocate extension matrices. The generic `mpc` extension primitive keeps its separate internal limit. That internal limit is not accepted by the production wire handlers. At 100,000 OTs, the largest opaque frame is the 1,607,840-byte KOF2 commitment, and its protobuf envelope remains below the 30 MiB WebSocket limit.
 
 The following flow uses the existing protobuf byte fields:
 
 ```text
 TEE_K                                             TEE_T
   |                                                  |
-  |-- KOB1: batch session, start, count ------------>|
+  |-- KOB2: versioned epoch, session, start, count -->|
   |                                                  |
-  |<-- BOS1: P-256 base-OT sender point -------------|
+  |<-- KBS2: wrapped P-256 base-OT sender point -----|
   |                                                  |
-  |-- BOC1: 128 base-OT choice points -------------->|
+  |-- KBC2: wrapped 128 base-OT choice points ------>|
   |                                                  |
-  |<-- KOF1: base ciphertexts, IKNP matrix, proof ---|
+  |<-- KOF2: base ciphertexts and complete U matrix -|
+  |                                                  |
+  |-- KCH2: full independent chi vector ------------>|
+  |                                                  |
+  |<-- KPR2: x and all 128 column checks ------------|
   |                                                  |
   |-- OTPrecomputeComplete: generated total -------->|
   |                                                  |
 ```
 
-Both sides derive a new pool token from the committed extension session. A lost commit message makes resume fail closed.
+Both sides derive a version-2 pool token from the committed extension session. A lost commit message makes resume fail closed. Version-1 frames and tokens cannot resume or downgrade a version-2 pool. A pair must therefore deploy the protocol change together.
+
+The seven opaque frame sizes for a 100,000-OT batch are 91 bytes for a standard 41-byte epoch begin, 105 bytes for base setup, 4,296 bytes for base choices, 1,607,840 bytes for the commitment, 12,616 bytes for the challenge, 2,132 bytes for the proof, and the existing protobuf completion message. The opaque payload total before protobuf and WebSocket framing is 1,627,080 bytes.
 
 ## Pool rules
 
@@ -158,9 +170,9 @@ TEE_K compares each label with its local pair. It derives the CMAC only from val
 
 The protocol uses these existing messages from `proto/transport.proto`:
 
-- `OTPrecomputeRequest` carries the KOS begin message or base-OT choices.
+- `OTPrecomputeRequest` carries the KOS2 begin, base-OT choices, or full challenge.
 
-- `OTPrecomputeResponse` carries the base setup or final KOS data.
+- `OTPrecomputeResponse` carries the base setup, fixed BOT+U commitment, or repetition-code proof.
 
 - `OTPrecomputeComplete` commits one verified extension batch.
 
@@ -192,7 +204,11 @@ Any disconnect aborts an active precomputation waiter. A committed pool remains 
 
 The protocol relies on mutual attestation for the expected TEE code. It does not use cut-and-choose against a malicious garbler.
 
-The KOS proof checks receiver consistency during OT extension. Chou-Orlandi supplies the 128 base OTs.
+The corrected KOS2 proof checks receiver consistency during OT extension using the revised repetition-code construction with `kappa = s = 128`. It does not use the original compressed one-equation KOS check.
+
+The implemented order and formula follow Figure 10 in the current 2022-09-16 revision of the [KOS ePrint](https://eprint.iacr.org/2015/546.pdf) and the corresponding repetition-code check in pinned libOTe revision `d644366`.
+
+Chou-Orlandi supplies the 128 base OTs. The P-256 implementation is not claimed to provide standalone malicious-secure or composably secure base OT. Its messages stay inside the secure, mutually attested TEE-to-TEE control channel, and its implementation stays inside the measured-code trust boundary. Base-OT correctness, garbler correctness, and the choice of the intended circuit rely on that boundary. This protocol is not a substitute for malicious-secure garbling against arbitrary unattested code.
 
 The output-label check prevents the evaluator from substituting arbitrary output bytes.
 
@@ -222,7 +238,17 @@ The tests cover these properties:
 
 - Correction, evaluation, output, and base-OT states reject reuse.
 
-- KOS rejects matrix, proof, session, and index changes.
+- KOS2 rejects matrix, BOT, epoch, challenge, proof, session, index, version, order, truncation, and trailing-data changes.
+
+- A deterministic oracle checks the literal repetition-code formula, and tests prove that every one of the 128 column equations is enforced.
+
+- A failed proof commits no sender entries. Both pools commit only after proof acceptance and the existing completion exchange.
+
+- A full in-memory primitive/protobuf exchange checks all seven frame codecs, metadata, pool epochs, readiness, and matching entries.
+
+- Production-handler tests drive the real K and T control state machines over captured in-memory WebSockets. They check generation ownership, pending phases, exact frame order, zero pre-proof pool commits, completion, epochs, readiness, and matching committed entries.
+
+- Production count tests accept 100,000, reject 100,001 before state or base-OT work, inject an epoch-randomness failure, and keep the maximum protobuf frame below the WebSocket limit.
 
 - Pools reject replay and overlap while accepting out-of-order ranges.
 

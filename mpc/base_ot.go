@@ -115,7 +115,7 @@ func StartBaseOTReceiver(rng io.Reader, session [32]byte, setupMessage []byte) (
 }
 
 // FinishBaseOTSender consumes the 128 choice points and returns encrypted seed
-// pairs plus the seed pairs needed by ExtendReceiver. It is single-use.
+// pairs plus the seed pairs needed by StartExtensionReceiver. It is single-use.
 func FinishBaseOTSender(state *BaseOTSenderState, choiceMessage []byte) ([]byte, [BaseOTCount]BaseOTSeedPair, error) {
 	var zero [BaseOTCount]BaseOTSeedPair
 	if state == nil {

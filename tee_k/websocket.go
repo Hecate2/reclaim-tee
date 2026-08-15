@@ -19,7 +19,7 @@ import (
 )
 
 // MaxWebSocketMessageSize is the maximum allowed WebSocket message size (30 MB)
-// The 100,000-OT KOS initial response is 1,607,808 bytes before protobuf
+// The 100,000-OT KOS2 commitment response is 1,607,840 bytes before protobuf
 // framing, and the fixed online garbled-circuit payload is 1,034,536 bytes.
 // Preserve the existing larger policy limit for attestation and batched TLS
 // messages whose encoded sizes are not governed by those MPC constants.

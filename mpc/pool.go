@@ -11,7 +11,21 @@ const (
 	OTPoolExtendSize  = 50_000
 	OTPoolWatermark   = 50_000
 	OTsPerOPRF        = InputBits
+
+	// MaxPrecomputeOTs is the application protocol limit. The generic IKNP
+	// primitive supports larger batches, but production only creates the
+	// 100,000-entry initial pool and 50,000-entry refills.
+	MaxPrecomputeOTs = OTPoolInitialSize
 )
+
+// ValidatePrecomputeCount applies the production TEE protocol limit before a
+// caller creates a session, mutates pool state, or allocates extension data.
+func ValidatePrecomputeCount(count int) error {
+	if count <= 0 || count > MaxPrecomputeOTs {
+		return fmt.Errorf("mpc: unsupported OT precompute count %d (maximum %d)", count, MaxPrecomputeOTs)
+	}
+	return nil
+}
 
 // SenderPool is the garbler's compact, append-only random-OT pool.
 type SenderPool struct {

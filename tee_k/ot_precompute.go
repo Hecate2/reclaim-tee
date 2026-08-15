@@ -23,7 +23,8 @@ type senderPrecompute struct {
 	startIndex   uint64
 	isInitial    bool
 	baseReceiver *mpc.BaseOTReceiverState
-	finalizing   bool
+	extension    *mpc.ExtensionSenderState
+	phase        senderPrecomputePhase
 	done         chan error
 
 	controlConn       *shared.WSConnection
@@ -35,6 +36,16 @@ type senderPrecompute struct {
 	sendComplete          func(uint32) error
 	beforeStateValidation func()
 }
+
+type senderPrecomputePhase uint8
+
+const (
+	senderPrecomputeAwaitBaseSetup senderPrecomputePhase = iota
+	senderPrecomputeAwaitCommitment
+	senderPrecomputeProcessingCommitment
+	senderPrecomputeAwaitProof
+	senderPrecomputeProcessingProof
+)
 
 type senderResumeResult struct {
 	controlConn       *shared.WSConnection
@@ -73,6 +84,9 @@ func (t *TEEK) performClaimedOTExtension(count int, claim *mpc.SenderExtendClaim
 }
 
 func (t *TEEK) performOTPrecomputationWithClaim(count int, isInitial bool, claim *mpc.SenderExtendClaim, expectedOrigin *controlConnectionToken) error {
+	if err := mpc.ValidatePrecomputeCount(count); err != nil {
+		return err
+	}
 	if !isInitial {
 		if claim == nil {
 			return fmt.Errorf("OT extension has no ownership claim")
@@ -84,9 +98,6 @@ func (t *TEEK) performOTPrecomputationWithClaim(count int, isInitial bool, claim
 		return fmt.Errorf("initial OT precomputation cannot use an extension claim")
 	}
 	t.logger.Info("Starting KOS OT precomputation", zap.Int("count", count), zap.Bool("is_initial", isInitial))
-	if count <= 0 || uint64(count) > math.MaxUint32 {
-		return fmt.Errorf("invalid OT precomputation count %d", count)
-	}
 	if err := mpc.Initialize(); err != nil {
 		return fmt.Errorf("initialize MPC circuit: %w", err)
 	}
@@ -101,22 +112,34 @@ func (t *TEEK) performOTPrecomputationWithClaim(count int, isInitial bool, claim
 			return err
 		}
 	}
-	if t.otPrecomputeState == nil {
-		t.otPrecomputeState = NewOTPrecomputeState()
-	}
 	state := t.otPrecomputeState
-	session, err := mpc.NewExtensionSession(rand.Reader)
+	rng := t.otPrecomputeRandom
+	if rng == nil {
+		rng = rand.Reader
+	}
+	session, err := mpc.NewExtensionSession(rng)
 	if err != nil {
 		return err
 	}
 	initialEpoch := ""
 	if isInitial {
-		initialEpoch = uuid.NewString()
+		epochNonce, randomErr := uuid.NewRandomFromReader(rng)
+		if randomErr != nil {
+			return fmt.Errorf("sample initial OT extension epoch: %w", randomErr)
+		}
+		initialEpoch, err = mpc.InitialExtensionEpoch(epochNonce.String())
+		if err != nil {
+			return err
+		}
 	}
 	pending := &senderPrecompute{
 		session: session, count: count, isInitial: isInitial,
 		done: make(chan error, 1), controlConn: origin.conn, controlGeneration: origin.generation,
 		extendClaim: claim,
+	}
+	if state == nil {
+		state = NewOTPrecomputeState()
+		t.otPrecomputeState = state
 	}
 
 	// Make control validation and all initial pool mutations one short atomic
@@ -157,7 +180,7 @@ func (t *TEEK) performOTPrecomputationWithClaim(count int, isInitial bool, claim
 		return fmt.Errorf("OT pool index exceeds protobuf uint32 range")
 	}
 	pending.startIndex = startIndex
-	begin := mpc.PrecomputeBegin{SessionID: session, StartIndex: startIndex, Count: uint32(count)}
+	begin := mpc.PrecomputeBegin{SessionID: session, StartIndex: startIndex, Count: uint32(count), Epoch: state.epoch}
 	beginData, err := mpc.MarshalPrecomputeBegin(begin)
 	if err != nil {
 		state.mu.Unlock()
@@ -212,9 +235,8 @@ func (t *TEEK) sendOTPrecomputeRequest(conn interface {
 	return nil
 }
 
-// handleOTPrecomputeResponse advances the two-response base-OT/KOS state
-// machine. The first response contains A; the second contains base ciphertexts
-// and the extension proof.
+// handleOTPrecomputeResponse advances the three-response KOS2 state machine:
+// base setup, fixed BOT+U commitment, then the repetition-code proof.
 func (t *TEEK) handleOTPrecomputeResponse(conn *shared.WSConnection, generation uint64, msg *teeproto.OTPrecomputeResponse) error {
 	state := t.otPrecomputeState
 	if state == nil {
@@ -251,12 +273,24 @@ func (t *TEEK) handleOTPrecomputeResponse(conn *shared.WSConnection, generation 
 		return err
 	}
 
-	if pending.baseReceiver == nil {
+	switch pending.phase {
+	case senderPrecomputeAwaitBaseSetup:
+		pending.phase = senderPrecomputeAwaitCommitment
 		session := pending.session
 		state.mu.Unlock()
 		t.connManager.mu.RUnlock()
 
-		baseReceiver, choices, err := mpc.StartBaseOTReceiver(rand.Reader, session, msg.GetOtReceiverData())
+		setup, err := mpc.UnmarshalPrecomputeBaseSetup(msg.GetOtReceiverData(), session)
+		if err != nil {
+			t.failPendingPrecompute(state, pending, err)
+			return err
+		}
+		baseReceiver, choices, err := mpc.StartBaseOTReceiver(rand.Reader, session, setup)
+		if err != nil {
+			t.failPendingPrecompute(state, pending, err)
+			return err
+		}
+		choiceFrame, err := mpc.MarshalPrecomputeBaseChoices(session, choices)
 		if err != nil {
 			t.failPendingPrecompute(state, pending, err)
 			return err
@@ -267,7 +301,7 @@ func (t *TEEK) handleOTPrecomputeResponse(conn *shared.WSConnection, generation 
 		t.connManager.mu.RLock()
 		controlCurrent := t.connManager.controlConn == conn && t.connManager.controlGeneration == generation
 		state.mu.Lock()
-		if !controlCurrent || state.pending != pending || pending.controlConn != conn || pending.controlGeneration != generation || pending.baseReceiver != nil {
+		if !controlCurrent || state.pending != pending || pending.controlConn != conn || pending.controlGeneration != generation || pending.baseReceiver != nil || pending.phase != senderPrecomputeAwaitCommitment {
 			state.mu.Unlock()
 			t.connManager.mu.RUnlock()
 			return fmt.Errorf("OT sender state changed during base OT")
@@ -282,48 +316,88 @@ func (t *TEEK) handleOTPrecomputeResponse(conn *shared.WSConnection, generation 
 			t.failPendingPrecompute(state, pending, err)
 			return err
 		}
-		if err := t.sendOTPrecomputeRequest(conn, count, initial, epoch, choices); err != nil {
+		if err := t.sendOTPrecomputeRequest(conn, count, initial, epoch, choiceFrame); err != nil {
 			t.failPendingPrecompute(state, pending, err)
 			return err
 		}
 		return nil
-	}
-	if pending.finalizing {
+
+	case senderPrecomputeAwaitCommitment:
+		pending.phase = senderPrecomputeProcessingCommitment
+		baseReceiver := pending.baseReceiver
+		session := pending.session
+		startIndex := pending.startIndex
+		count := pending.count
+		epoch := state.epoch
 		state.mu.Unlock()
 		t.connManager.mu.RUnlock()
-		return fmt.Errorf("duplicate OT precompute final response")
-	}
-	pending.finalizing = true
-	baseReceiver := pending.baseReceiver
-	session := pending.session
-	startIndex := pending.startIndex
-	count := pending.count
-	state.mu.Unlock()
-	t.connManager.mu.RUnlock()
 
-	ciphertexts, request, err := mpc.UnmarshalPrecomputeFinal(msg.GetOtReceiverData())
-	if err != nil {
-		t.failPendingPrecompute(state, pending, err)
-		return err
+		expected := mpc.PrecomputeBegin{SessionID: session, StartIndex: startIndex, Count: uint32(count), Epoch: epoch}
+		ciphertexts, commitment, err := mpc.UnmarshalPrecomputeCommitmentFor(msg.GetOtReceiverData(), expected)
+		if err != nil {
+			t.failPendingPrecompute(state, pending, err)
+			return err
+		}
+		selected, delta, err := mpc.FinishBaseOTReceiver(baseReceiver, ciphertexts)
+		if err != nil {
+			t.failPendingPrecompute(state, pending, err)
+			return err
+		}
+		extension, challenge, err := mpc.StartExtensionSender(rand.Reader, selected, delta, epoch, ciphertexts, commitment)
+		clear(selected[:])
+		delta = mpc.Label{}
+		if err != nil {
+			t.failPendingPrecompute(state, pending, err)
+			return err
+		}
+		challengeFrame, err := mpc.MarshalExtensionChallenge(challenge)
+		if err != nil {
+			t.failPendingPrecompute(state, pending, err)
+			return err
+		}
+
+		t.connManager.mu.RLock()
+		controlCurrent := t.connManager.controlConn == conn && t.connManager.controlGeneration == generation
+		state.mu.Lock()
+		if !controlCurrent || state.pending != pending || pending.controlConn != conn || pending.controlGeneration != generation || pending.phase != senderPrecomputeProcessingCommitment {
+			state.mu.Unlock()
+			t.connManager.mu.RUnlock()
+			return fmt.Errorf("OT sender state changed while preparing KOS2 challenge")
+		}
+		pending.extension = extension
+		pending.phase = senderPrecomputeAwaitProof
+		initial := pending.isInitial
+		state.mu.Unlock()
+		t.connManager.mu.RUnlock()
+
+		if err := t.sendOTPrecomputeRequest(conn, count, initial, epoch, challengeFrame); err != nil {
+			t.failPendingPrecompute(state, pending, err)
+			return err
+		}
+		return nil
+
+	case senderPrecomputeAwaitProof:
+		pending.phase = senderPrecomputeProcessingProof
+		extension := pending.extension
+		state.mu.Unlock()
+		t.connManager.mu.RUnlock()
+		proof, err := mpc.UnmarshalExtensionProofFor(msg.GetOtReceiverData(), pending.session)
+		if err != nil {
+			t.failPendingPrecompute(state, pending, err)
+			return err
+		}
+		entries, err := mpc.FinishExtensionSender(extension, proof)
+		if err != nil {
+			t.failPendingPrecompute(state, pending, err)
+			return err
+		}
+		return t.completeSenderPrecompute(state, pending, entries)
+
+	default:
+		state.mu.Unlock()
+		t.connManager.mu.RUnlock()
+		return fmt.Errorf("unexpected OT precompute response phase %d", pending.phase)
 	}
-	if request.SessionID != session || request.StartIndex != startIndex || int(request.Count) != count {
-		err := fmt.Errorf("OT extension response metadata mismatch")
-		t.failPendingPrecompute(state, pending, err)
-		return err
-	}
-	selected, delta, err := mpc.FinishBaseOTReceiver(baseReceiver, ciphertexts)
-	if err != nil {
-		t.failPendingPrecompute(state, pending, err)
-		return err
-	}
-	entries, err := mpc.ExtendSender(selected, delta, request)
-	clear(selected[:])
-	delta = mpc.Label{}
-	if err != nil {
-		t.failPendingPrecompute(state, pending, err)
-		return err
-	}
-	return t.completeSenderPrecompute(state, pending, entries)
 }
 
 func signalSenderPrecompute(pending *senderPrecompute, err error) {
@@ -702,7 +776,7 @@ func (t *TEEK) hasResumablePool() bool {
 	}
 	t.otPrecomputeState.mu.Lock()
 	defer t.otPrecomputeState.mu.Unlock()
-	return t.otPrecomputeState.ready && t.otPrecomputeState.epoch != "" && t.otPrecomputeState.pool.Available() > 0
+	return t.otPrecomputeState.ready && mpc.IsCurrentExtensionEpoch(t.otPrecomputeState.epoch) && t.otPrecomputeState.pool.Available() > 0
 }
 
 // ensureResumedOTPoolUsable repairs a retained pool before readiness is
@@ -780,6 +854,10 @@ func (t *TEEK) tryResumeOTPool() (bool, error) {
 	state.mu.Lock()
 	epoch := state.epoch
 	nextIndex := state.pool.NextIndex()
+	if !mpc.IsCurrentExtensionEpoch(epoch) {
+		state.mu.Unlock()
+		return false, fmt.Errorf("OT pool uses an unsupported protocol epoch")
+	}
 	if state.resumePending != nil {
 		state.mu.Unlock()
 		return false, fmt.Errorf("OT resume already pending")

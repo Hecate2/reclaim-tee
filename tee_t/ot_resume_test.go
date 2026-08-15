@@ -20,7 +20,8 @@ func poolWith(n int) *mpc.ReceiverPool {
 }
 
 func TestResumeOTPool(t *testing.T) {
-	const epoch = "epoch-abc"
+	epoch := mpc.ExtensionEpoch([32]byte{1})
+	otherEpoch := mpc.ExtensionEpoch([32]byte{2})
 
 	cases := []struct {
 		name      string
@@ -73,7 +74,14 @@ func TestResumeOTPool(t *testing.T) {
 		{
 			name:      "deny: epoch mismatch (different pool instance)",
 			state:     &OTReceiverState{pool: poolWith(100), ready: true, epoch: epoch},
-			reqEpoch:  "epoch-other",
+			reqEpoch:  otherEpoch,
+			nextIndex: 10,
+			want:      false,
+		},
+		{
+			name:      "deny: legacy epoch version",
+			state:     &OTReceiverState{pool: poolWith(100), ready: true, epoch: "epoch-abc"},
+			reqEpoch:  "epoch-abc",
 			nextIndex: 10,
 			want:      false,
 		},

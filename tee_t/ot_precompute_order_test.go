@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
 	"crypto/sha1"
 	"encoding/base64"
 	"encoding/binary"
@@ -26,6 +27,76 @@ import (
 type receiverConsumeResult struct {
 	entries []mpc.ReceiverOT
 	err     error
+}
+
+func TestKOS2ReceiverCannotCommitBeforeProof(t *testing.T) {
+	state := &OTReceiverState{pool: receiverPoolWith(t, 3), ready: true}
+	pending := &receiverPrecompute{
+		begin: mpc.PrecomputeBegin{StartIndex: 3, Count: 2}, entries: receiverEntries(3, 2),
+		phase: receiverPrecomputeAwaitChallenge, done: make(chan struct{}),
+	}
+	state.pending = pending
+	teet := &TEET{otReceiverState: state, logger: shared.NewNopLogger()}
+	err := teet.handleOTPrecomputeComplete(0, directControlStateLease, &teeproto.OTPrecomputeComplete{PoolSize: 5})
+	if err == nil {
+		t.Fatal("committed receiver entries before KOS2 proof")
+	}
+	if state.pool.TotalCount() != 3 || state.pool.Available() != 3 || state.pending != pending {
+		t.Fatal("early completion changed receiver pool or pending ownership")
+	}
+}
+
+func TestKOS2ChallengeOversizeCountFailsBeforeReceiverPoolMutation(t *testing.T) {
+	const count = 1
+	session, err := mpc.NewExtensionSession(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	epoch := mpc.ExtensionEpoch([32]byte{8})
+	baseSender, setup, err := mpc.StartBaseOTSender(rand.Reader, session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, choices, err := mpc.StartBaseOTReceiver(rand.Reader, session, setup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ciphertext, pairs, err := mpc.FinishBaseOTSender(baseSender, choices)
+	if err != nil {
+		t.Fatal(err)
+	}
+	extension, _, entries, err := mpc.StartExtensionReceiver(rand.Reader, pairs, epoch, ciphertext, session, 0, count)
+	if err != nil {
+		t.Fatal(err)
+	}
+	challengeSize, err := mpc.PrecomputeChallengeWireSize(count)
+	if err != nil {
+		t.Fatal(err)
+	}
+	challenge := make([]byte, challengeSize)
+	copy(challenge[:4], "KCH2")
+	copy(challenge[4:36], session[:])
+	binary.BigEndian.PutUint32(challenge[100:104], math.MaxUint32)
+
+	pending := &receiverPrecompute{
+		begin:     mpc.PrecomputeBegin{SessionID: session, Count: count, Epoch: epoch},
+		isInitial: true, controlGeneration: 11, extension: extension, entries: entries,
+		phase: receiverPrecomputeAwaitChallenge, done: make(chan struct{}),
+	}
+	state := &OTReceiverState{pool: mpc.NewReceiverPool(count), epoch: epoch, pending: pending}
+	teet := &TEET{logger: shared.NewNopLogger(), otReceiverState: state}
+	err = teet.handleOTPrecomputeChallenge(newReceiverTestWebSocket(t), 11, directControlStateLease, &teeproto.OTPrecomputeRequest{
+		Count: count, OtSenderSetup: challenge, IsInitial: true, Epoch: epoch,
+	})
+	if err == nil {
+		t.Fatal("accepted challenge with attacker-controlled oversize coefficient count")
+	}
+	if state.pool.TotalCount() != 0 || state.pool.Available() != 0 || state.ready {
+		t.Fatalf("malformed challenge changed receiver pool total=%d available=%d ready=%t", state.pool.TotalCount(), state.pool.Available(), state.ready)
+	}
+	if state.pending != nil || pending.outcome != receiverPrecomputeAborted {
+		t.Fatal("malformed challenge did not abort only its pending receiver batch")
+	}
 }
 
 func TestConsumeOTReceiverEntriesWaitsForReorderedCompletion(t *testing.T) {
@@ -190,7 +261,8 @@ func TestInitialPrecomputeResetWakesPendingWaiter(t *testing.T) {
 	}()
 	awaitReceiverWait(t, waiting)
 
-	begin := mpc.PrecomputeBegin{Count: 1}
+	epoch := mpc.ExtensionEpoch([32]byte{9})
+	begin := mpc.PrecomputeBegin{Count: 1, Epoch: epoch}
 	begin.SessionID[0] = 1
 	payload, err := mpc.MarshalPrecomputeBegin(begin)
 	if err != nil {
@@ -198,7 +270,7 @@ func TestInitialPrecomputeResetWakesPendingWaiter(t *testing.T) {
 	}
 	conn := newReceiverTestWebSocket(t)
 	err = teet.handleOTPrecomputeBegin(conn, 1, directControlStateLease, &teeproto.OTPrecomputeRequest{
-		Count: 1, OtSenderSetup: payload, IsInitial: true, Epoch: "replacement-epoch",
+		Count: 1, OtSenderSetup: payload, IsInitial: true, Epoch: epoch,
 	})
 	if err != nil {
 		t.Fatalf("handle replacement initial begin: %v", err)
@@ -418,6 +490,7 @@ func teetWithPendingReceiverBatch(t *testing.T, committed, pendingCount int) (*T
 	pending := &receiverPrecompute{
 		begin:   mpc.PrecomputeBegin{StartIndex: uint64(committed), Count: uint32(pendingCount)},
 		entries: receiverEntries(uint64(committed), pendingCount),
+		phase:   receiverPrecomputeAwaitComplete,
 		done:    make(chan struct{}),
 	}
 	state := &OTReceiverState{

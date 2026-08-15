@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"fmt"
+	"io"
 	"log"
 	"sync"
 	"sync/atomic"
@@ -76,6 +77,9 @@ type TEEK struct {
 
 	// OT precomputation state for the MPC OPRF protocol.
 	otPrecomputeState *OTPrecomputeState
+	// otPrecomputeRandom overrides session and initial-epoch randomness in
+	// deterministic failure tests. Production leaves it nil.
+	otPrecomputeRandom io.Reader
 
 	// V2 router-mode wiring. Nil/zero in standalone mode; filled in by
 	// NewTEEKForRouter when ROUTER_URL is set. The connection manager,

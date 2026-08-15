@@ -16,8 +16,8 @@ const (
 	// extension and the number of public-key base OTs required per batch.
 	BaseOTCount = 128
 
-	// KOSCheckOTs is the number of sacrificial random OTs included in the
-	// receiver-consistency check.
+	// KOSCheckOTs is the statistical security parameter and the number of
+	// repetition-code check rows appended to every extension batch.
 	KOSCheckOTs = 128
 
 	maxExtensionOTs = 1 << 24
@@ -44,17 +44,56 @@ type BaseOTSeedPair struct {
 	One  Label
 }
 
-// ExtensionRequest is the receiver-to-sender IKNP matrix correction and KOS
-// proof. SessionID must have been sampled by the extension sender before this
-// request is constructed.
-type ExtensionRequest struct {
+// ExtensionCommitment fixes the base-OT ciphertexts and IKNP matrix before
+// the extension sender samples the interactive repetition-code challenge.
+type ExtensionCommitment struct {
 	SessionID   [32]byte
 	StartIndex  uint64
 	Count       uint32
 	PaddedCount uint32
+	EpochHash   [32]byte
+	Transcript  [32]byte
 	U           []byte
-	ProofX      Label
-	ProofT      Label
+}
+
+// ExtensionChallenge is the extension sender's full vector of independently
+// sampled GF(2^128) coefficients. One coefficient covers each 128-row block
+// preceding the final 128 repetition-code check rows.
+type ExtensionChallenge struct {
+	SessionID  [32]byte
+	Commitment [32]byte
+	Transcript [32]byte
+	Chi        []Label
+}
+
+// ExtensionProof contains x and all 128 column checks from Figure 10 of the
+// corrected KOS protocol. Compressing the column checks into one field element
+// recreates the unsound original check and is deliberately unsupported.
+type ExtensionProof struct {
+	SessionID  [32]byte
+	Transcript [32]byte
+	X          Label
+	T          [BaseOTCount]Label
+}
+
+// ExtensionReceiverState holds TEE_T's private IKNP matrix and choices between
+// its commitment and the sender's unpredictable challenge. It is single-use.
+type ExtensionReceiverState struct {
+	commitment ExtensionCommitment
+	choices    []byte
+	tMatrix    []byte
+	used       bool
+}
+
+// ExtensionSenderState holds TEE_K's private IKNP matrix and correlation until
+// all 128 proof equations have been checked. It is single-use.
+type ExtensionSenderState struct {
+	commitment          ExtensionCommitment
+	challengeTranscript [32]byte
+	delta               Label
+	qChecks             [BaseOTCount]Label
+	rows                []Label
+	used                bool
 }
 
 // NewExtensionSession samples a sender-chosen session identifier for one OT
@@ -70,38 +109,56 @@ func NewExtensionSession(rng io.Reader) ([32]byte, error) {
 	return session, nil
 }
 
-// ExtendReceiver creates count random OTs from 128 base seed pairs. It returns
-// the matrix/proof sent to the extension sender and the receiver's compact pool
-// entries. The caller must not commit the entries until the sender accepts the
-// proof.
-func ExtendReceiver(rng io.Reader, base [BaseOTCount]BaseOTSeedPair, sessionID [32]byte, startIndex uint64, count int) (*ExtensionRequest, []ReceiverOT, error) {
+// StartExtensionReceiver creates the IKNP commitment and receiver OTs. The
+// returned entries remain provisional until TEE_K accepts FinishExtensionSender
+// and sends OTPrecomputeComplete.
+func StartExtensionReceiver(
+	rng io.Reader,
+	base [BaseOTCount]BaseOTSeedPair,
+	epoch string,
+	cipherMessage []byte,
+	sessionID [32]byte,
+	startIndex uint64,
+	count int,
+) (*ExtensionReceiverState, *ExtensionCommitment, []ReceiverOT, error) {
 	defer clear(base[:])
 	if rng == nil {
-		return nil, nil, errors.New("mpc: nil randomness source")
+		return nil, nil, nil, errors.New("mpc: nil randomness source")
+	}
+	if err := validateExtensionEpoch(epoch); err != nil {
+		return nil, nil, nil, err
+	}
+	if err := validateBaseCipherForTranscript(cipherMessage, sessionID); err != nil {
+		return nil, nil, nil, err
 	}
 	padded, err := extensionPaddedCount(count)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	byteRows := padded / 8
 
 	choices := make([]byte, byteRows)
-	defer clear(choices)
 	if _, err := io.ReadFull(rng, choices); err != nil {
-		return nil, nil, fmt.Errorf("mpc: read OT choices: %w", err)
+		clear(choices)
+		return nil, nil, nil, fmt.Errorf("mpc: read OT choices: %w", err)
 	}
 	tMatrix := make([]byte, BaseOTCount*byteRows)
-	defer clear(tMatrix)
 	u := make([]byte, BaseOTCount*byteRows)
 	tmp := make([]byte, byteRows)
 	defer clear(tmp)
 	for col := 0; col < BaseOTCount; col++ {
 		t0 := tMatrix[col*byteRows : (col+1)*byteRows]
 		if err := expandSeed(base[col].Zero, sessionID, col, t0); err != nil {
-			return nil, nil, fmt.Errorf("mpc: expand base seed %d/0: %w", col, err)
+			clear(choices)
+			clear(tMatrix)
+			clear(u)
+			return nil, nil, nil, fmt.Errorf("mpc: expand base seed %d/0: %w", col, err)
 		}
 		if err := expandSeed(base[col].One, sessionID, col, tmp); err != nil {
-			return nil, nil, fmt.Errorf("mpc: expand base seed %d/1: %w", col, err)
+			clear(choices)
+			clear(tMatrix)
+			clear(u)
+			return nil, nil, nil, fmt.Errorf("mpc: expand base seed %d/1: %w", col, err)
 		}
 		ucol := u[col*byteRows : (col+1)*byteRows]
 		for i := range ucol {
@@ -109,93 +166,307 @@ func ExtendReceiver(rng io.Reader, base [BaseOTCount]BaseOTSeedPair, sessionID [
 		}
 	}
 
+	commitment := ExtensionCommitment{
+		SessionID: sessionID, StartIndex: startIndex, Count: uint32(count),
+		PaddedCount: uint32(padded), U: u, EpochHash: extensionEpochHash(epoch),
+	}
+	commitment.Transcript = extensionTranscript(cipherMessage, &commitment)
+
 	raw := make([]Label, padded)
 	defer clear(raw)
 	transposeColumns(tMatrix, byteRows, raw)
-	request := &ExtensionRequest{
-		SessionID: sessionID, StartIndex: startIndex, Count: uint32(count),
-		PaddedCount: uint32(padded), U: u,
-	}
-	challenge, err := extensionChallenge(request)
+	receiver, err := hashReceiverOTs(raw, choices, startIndex, count)
 	if err != nil {
-		return nil, nil, err
+		clear(choices)
+		clear(tMatrix)
+		clear(u)
+		return nil, nil, nil, err
 	}
-	request.ProofX, request.ProofT = receiverProof(challenge, choices, raw)
-
-	receiver := make([]ReceiverOT, count)
-	hasher, err := aes.NewCipher(tmmoKey[:])
-	if err != nil {
-		return nil, nil, err
-	}
-	var hashInput, hashOutput [16]byte
-	for i := range receiver {
-		choice := choices[i/8]&(1<<uint(i&7)) != 0
-		receiver[i] = ReceiverOT{
-			R: tmmoHash(hasher, raw[i], uint64(i), &hashInput, &hashOutput), Choice: choice,
-			Index: startIndex + uint64(i),
-		}
-	}
-	return request, receiver, nil
+	state := &ExtensionReceiverState{commitment: extensionStateCommitment(commitment), choices: choices, tMatrix: tMatrix}
+	return state, &commitment, receiver, nil
 }
 
-// ExtendSender verifies a KOS extension request and returns the sender's two
-// independent random-OT labels. selected[i] is the base seed chosen by bit i
-// of delta. No output is returned if the consistency proof fails.
-func ExtendSender(selected [BaseOTCount]Label, delta Label, request *ExtensionRequest) ([]SenderOT, error) {
+// StartExtensionSender validates the fixed BOT+U transcript, expands q, and
+// only then samples the complete independent challenge vector.
+func StartExtensionSender(
+	rng io.Reader,
+	selected [BaseOTCount]Label,
+	delta Label,
+	epoch string,
+	cipherMessage []byte,
+	commitment *ExtensionCommitment,
+) (*ExtensionSenderState, *ExtensionChallenge, error) {
 	defer func() {
 		clear(selected[:])
 		delta = Label{}
 	}()
-	if delta.D0 == 0 && delta.D1 == 0 {
-		return nil, errors.New("mpc: zero OT correlation delta")
+	if rng == nil {
+		return nil, nil, errors.New("mpc: nil randomness source")
 	}
-	if request == nil {
-		return nil, errors.New("mpc: nil OT extension request")
+	if delta == (Label{}) {
+		return nil, nil, errors.New("mpc: zero OT correlation delta")
 	}
-	count := int(request.Count)
-	padded, err := extensionPaddedCount(count)
-	if err != nil {
-		return nil, err
+	if err := validateExtensionCommitment(epoch, cipherMessage, commitment); err != nil {
+		return nil, nil, err
 	}
-	if int(request.PaddedCount) != padded {
-		return nil, fmt.Errorf("mpc: padded OT count %d, want %d", request.PaddedCount, padded)
-	}
-	byteRows := padded / 8
-	if len(request.U) != BaseOTCount*byteRows {
-		return nil, fmt.Errorf("mpc: OT extension matrix length %d, want %d", len(request.U), BaseOTCount*byteRows)
-	}
-
+	byteRows := int(commitment.PaddedCount) / 8
 	qMatrix := make([]byte, BaseOTCount*byteRows)
-	defer clear(qMatrix)
 	for col := 0; col < BaseOTCount; col++ {
 		qcol := qMatrix[col*byteRows : (col+1)*byteRows]
-		if err := expandSeed(selected[col], request.SessionID, col, qcol); err != nil {
-			return nil, fmt.Errorf("mpc: expand selected base seed %d: %w", col, err)
+		if err := expandSeed(selected[col], commitment.SessionID, col, qcol); err != nil {
+			clear(qMatrix)
+			return nil, nil, fmt.Errorf("mpc: expand selected base seed %d: %w", col, err)
 		}
 		if deltaBit(delta, col) {
-			ucol := request.U[col*byteRows : (col+1)*byteRows]
+			ucol := commitment.U[col*byteRows : (col+1)*byteRows]
 			for i := range qcol {
 				qcol[i] ^= ucol[i]
 			}
 		}
 	}
 
-	raw := make([]Label, padded)
-	defer clear(raw)
-	transposeColumns(qMatrix, byteRows, raw)
-	challenge, err := extensionChallenge(request)
+	chiCount := extensionChallengeCount(int(commitment.PaddedCount))
+	random := make([]byte, chiCount*16)
+	defer clear(random)
+	if _, err := io.ReadFull(rng, random); err != nil {
+		clear(qMatrix)
+		return nil, nil, fmt.Errorf("mpc: read OT extension challenge: %w", err)
+	}
+	chi := make([]Label, chiCount)
+	for i := range chi {
+		chi[i] = labelFromBytes(random[i*16 : (i+1)*16])
+	}
+	challenge := &ExtensionChallenge{
+		SessionID: commitment.SessionID, Commitment: commitment.Transcript, Chi: chi,
+	}
+	challenge.Transcript = extensionChallengeTranscript(challenge)
+	checks := repetitionColumnChecks(qMatrix, int(commitment.PaddedCount), chi)
+	rows := make([]Label, int(commitment.PaddedCount))
+	transposeColumns(qMatrix, byteRows, rows)
+	clear(qMatrix)
+	state := &ExtensionSenderState{
+		commitment: extensionStateCommitment(*commitment), challengeTranscript: challenge.Transcript,
+		delta: delta, qChecks: checks, rows: rows,
+	}
+	return state, challenge, nil
+}
+
+// FinishExtensionReceiver consumes the fresh sender challenge and returns the
+// literal repetition-code proof x,t_0,...,t_127.
+func FinishExtensionReceiver(state *ExtensionReceiverState, challenge *ExtensionChallenge) (*ExtensionProof, error) {
+	if state == nil {
+		return nil, errors.New("mpc: nil OT extension receiver state")
+	}
+	if state.used {
+		return nil, errors.New("mpc: OT extension receiver state already used")
+	}
+	state.used = true
+	defer clearExtensionReceiverState(state)
+	if err := validateExtensionChallenge(&state.commitment, challenge); err != nil {
+		return nil, err
+	}
+	proof := repetitionReceiverProof(state.choices, state.tMatrix, int(state.commitment.PaddedCount), challenge.Chi)
+	proof.SessionID = state.commitment.SessionID
+	proof.Transcript = challenge.Transcript
+	return &proof, nil
+}
+
+// FinishExtensionSender checks every repetition-code column equation before it
+// derives any sender OT output. A failed proof returns no entries.
+func FinishExtensionSender(state *ExtensionSenderState, proof *ExtensionProof) ([]SenderOT, error) {
+	if state == nil {
+		return nil, errors.New("mpc: nil OT extension sender state")
+	}
+	if state.used {
+		return nil, errors.New("mpc: OT extension sender state already used")
+	}
+	state.used = true
+	defer clearExtensionSenderState(state)
+	if proof == nil {
+		return nil, errors.New("mpc: nil OT extension proof")
+	}
+	if proof.SessionID != state.commitment.SessionID ||
+		subtle.ConstantTimeCompare(proof.Transcript[:], state.challengeTranscript[:]) != 1 {
+		return nil, errors.New("mpc: OT extension proof transcript mismatch")
+	}
+	if len(state.rows) != int(state.commitment.PaddedCount) {
+		return nil, errors.New("mpc: OT extension sender proof state is incomplete")
+	}
+	for col := 0; col < BaseOTCount; col++ {
+		q := state.qChecks[col]
+		want := proof.T[col]
+		if deltaBit(state.delta, col) {
+			want = want.xor(proof.X)
+		}
+		var qBytes, wantBytes [16]byte
+		q.put(qBytes[:])
+		want.put(wantBytes[:])
+		if subtle.ConstantTimeCompare(qBytes[:], wantBytes[:]) != 1 {
+			return nil, errKOSCheck
+		}
+	}
+
+	return hashSenderOTs(state)
+}
+
+func validateExtensionCommitment(epoch string, cipherMessage []byte, commitment *ExtensionCommitment) error {
+	if commitment == nil {
+		return errors.New("mpc: nil OT extension commitment")
+	}
+	if err := validateExtensionEpoch(epoch); err != nil {
+		return err
+	}
+	if err := validateBaseCipherForTranscript(cipherMessage, commitment.SessionID); err != nil {
+		return err
+	}
+	padded, err := extensionPaddedCount(int(commitment.Count))
+	if err != nil {
+		return err
+	}
+	if int(commitment.PaddedCount) != padded {
+		return fmt.Errorf("mpc: padded OT count %d, want %d", commitment.PaddedCount, padded)
+	}
+	wantU := BaseOTCount * padded / 8
+	if len(commitment.U) != wantU {
+		return fmt.Errorf("mpc: OT extension matrix length %d, want %d", len(commitment.U), wantU)
+	}
+	wantEpoch := extensionEpochHash(epoch)
+	if subtle.ConstantTimeCompare(commitment.EpochHash[:], wantEpoch[:]) != 1 {
+		return errors.New("mpc: OT extension epoch mismatch")
+	}
+	wantTranscript := extensionTranscript(cipherMessage, commitment)
+	if subtle.ConstantTimeCompare(commitment.Transcript[:], wantTranscript[:]) != 1 {
+		return errors.New("mpc: OT extension commitment transcript mismatch")
+	}
+	return nil
+}
+
+func validateBaseCipherForTranscript(cipherMessage []byte, sessionID [32]byte) error {
+	if len(cipherMessage) != baseCipherMessageSize || string(cipherMessage[:4]) != "BOT1" {
+		return errors.New("mpc: invalid base OT ciphertext message")
+	}
+	if subtle.ConstantTimeCompare(cipherMessage[4:36], sessionID[:]) != 1 {
+		return errors.New("mpc: base OT ciphertext session mismatch")
+	}
+	return nil
+}
+
+func extensionTranscript(cipherMessage []byte, commitment *ExtensionCommitment) [32]byte {
+	h := sha256.New()
+	h.Write([]byte("reclaim-tee/mpc/kos/repetition/v2/transcript"))
+	h.Write([]byte("KOC2"))
+	h.Write(commitment.SessionID[:])
+	var metadata [16]byte
+	binary.BigEndian.PutUint64(metadata[:8], commitment.StartIndex)
+	binary.BigEndian.PutUint32(metadata[8:12], commitment.Count)
+	binary.BigEndian.PutUint32(metadata[12:16], commitment.PaddedCount)
+	h.Write(metadata[:])
+	h.Write(commitment.EpochHash[:])
+	h.Write(cipherMessage)
+	h.Write(commitment.U)
+	var out [32]byte
+	copy(out[:], h.Sum(nil))
+	return out
+}
+
+func extensionEpochHash(epoch string) [32]byte {
+	h := sha256.New()
+	h.Write([]byte("reclaim-tee/mpc/kos/repetition/v2/epoch"))
+	var length [4]byte
+	binary.BigEndian.PutUint32(length[:], uint32(len(epoch)))
+	h.Write(length[:])
+	h.Write([]byte(epoch))
+	var out [32]byte
+	copy(out[:], h.Sum(nil))
+	return out
+}
+
+func validateExtensionChallenge(commitment *ExtensionCommitment, challenge *ExtensionChallenge) error {
+	if challenge == nil {
+		return errors.New("mpc: nil OT extension challenge")
+	}
+	if challenge.SessionID != commitment.SessionID ||
+		subtle.ConstantTimeCompare(challenge.Commitment[:], commitment.Transcript[:]) != 1 {
+		return errors.New("mpc: OT extension challenge transcript mismatch")
+	}
+	want := extensionChallengeCount(int(commitment.PaddedCount))
+	if len(challenge.Chi) != want {
+		return fmt.Errorf("mpc: OT extension challenge length %d, want %d", len(challenge.Chi), want)
+	}
+	wantTranscript := extensionChallengeTranscript(challenge)
+	if subtle.ConstantTimeCompare(challenge.Transcript[:], wantTranscript[:]) != 1 {
+		return errors.New("mpc: OT extension challenge hash mismatch")
+	}
+	return nil
+}
+
+func extensionChallengeTranscript(challenge *ExtensionChallenge) [32]byte {
+	h := sha256.New()
+	h.Write([]byte("reclaim-tee/mpc/kos/repetition/v2/challenge"))
+	h.Write(challenge.SessionID[:])
+	h.Write(challenge.Commitment[:])
+	var count [4]byte
+	binary.BigEndian.PutUint32(count[:], uint32(len(challenge.Chi)))
+	h.Write(count[:])
+	var encoded [16]byte
+	for _, coefficient := range challenge.Chi {
+		coefficient.put(encoded[:])
+		h.Write(encoded[:])
+	}
+	var out [32]byte
+	copy(out[:], h.Sum(nil))
+	return out
+}
+
+func extensionChallengeCount(padded int) int {
+	return (padded - KOSCheckOTs) / 128
+}
+
+func repetitionReceiverProof(choices, matrix []byte, padded int, chi []Label) (proof ExtensionProof) {
+	mainBytes := (padded - KOSCheckOTs) / 8
+	proof.X = labelFromBytes(choices[mainBytes : mainBytes+16])
+	for block, coefficient := range chi {
+		off := block * 16
+		proof.X = proof.X.xor(gf128Mul(labelFromBytes(choices[off:off+16]), coefficient))
+	}
+	proof.T = repetitionColumnChecks(matrix, padded, chi)
+	return proof
+}
+
+func repetitionColumnChecks(matrix []byte, padded int, chi []Label) (checks [BaseOTCount]Label) {
+	mainBytes := (padded - KOSCheckOTs) / 8
+	byteRows := padded / 8
+	for col := 0; col < BaseOTCount; col++ {
+		column := matrix[col*byteRows : (col+1)*byteRows]
+		check := labelFromBytes(column[mainBytes : mainBytes+16])
+		for block, coefficient := range chi {
+			off := block * 16
+			check = check.xor(gf128Mul(labelFromBytes(column[off:off+16]), coefficient))
+		}
+		checks[col] = check
+	}
+	return checks
+}
+
+func hashReceiverOTs(raw []Label, choices []byte, startIndex uint64, count int) ([]ReceiverOT, error) {
+	receiver := make([]ReceiverOT, count)
+	hasher, err := aes.NewCipher(tmmoKey[:])
 	if err != nil {
 		return nil, err
 	}
-	q := senderProof(challenge, raw)
-	wantT := q.xor(gf128Mul(request.ProofX, delta))
-	var wantBytes, proofBytes [16]byte
-	wantT.put(wantBytes[:])
-	request.ProofT.put(proofBytes[:])
-	if subtle.ConstantTimeCompare(wantBytes[:], proofBytes[:]) != 1 {
-		return nil, errKOSCheck
+	var hashInput, hashOutput [16]byte
+	for i := range receiver {
+		receiver[i] = ReceiverOT{
+			R:      tmmoHash(hasher, raw[i], uint64(i), &hashInput, &hashOutput),
+			Choice: choices[i/8]&(1<<uint(i&7)) != 0,
+			Index:  startIndex + uint64(i),
+		}
 	}
+	return receiver, nil
+}
 
+func hashSenderOTs(state *ExtensionSenderState) ([]SenderOT, error) {
+	count := int(state.commitment.Count)
 	sender := make([]SenderOT, count)
 	hasher, err := aes.NewCipher(tmmoKey[:])
 	if err != nil {
@@ -203,15 +474,39 @@ func ExtendSender(selected [BaseOTCount]Label, delta Label, request *ExtensionRe
 	}
 	var hashInput, hashOutput [16]byte
 	for i := range sender {
-		q0 := raw[i]
-		q1 := q0.xor(delta)
+		q0 := state.rows[i]
+		q1 := q0.xor(state.delta)
 		sender[i] = SenderOT{
 			R0:    tmmoHash(hasher, q0, uint64(i), &hashInput, &hashOutput),
 			R1:    tmmoHash(hasher, q1, uint64(i), &hashInput, &hashOutput),
-			Index: request.StartIndex + uint64(i),
+			Index: state.commitment.StartIndex + uint64(i),
 		}
 	}
 	return sender, nil
+}
+
+func extensionStateCommitment(in ExtensionCommitment) ExtensionCommitment {
+	in.U = nil
+	return in
+}
+
+func clearExtensionReceiverState(state *ExtensionReceiverState) {
+	clear(state.choices)
+	clear(state.tMatrix)
+	clear(state.commitment.U)
+	state.choices = nil
+	state.tMatrix = nil
+	state.commitment = ExtensionCommitment{}
+}
+
+func clearExtensionSenderState(state *ExtensionSenderState) {
+	clear(state.qChecks[:])
+	clear(state.rows)
+	clear(state.commitment.U)
+	state.rows = nil
+	state.delta = Label{}
+	state.challengeTranscript = [32]byte{}
+	state.commitment = ExtensionCommitment{}
 }
 
 func extensionPaddedCount(count int) (int, error) {
@@ -243,64 +538,6 @@ func expandSeed(seed Label, sessionID [32]byte, column int, dst []byte) error {
 		clear(counter[:])
 	}
 	return nil
-}
-
-func extensionChallenge(request *ExtensionRequest) (Label, error) {
-	if request == nil {
-		return Label{}, errors.New("mpc: nil OT extension request")
-	}
-	h := sha256.New()
-	h.Write([]byte("reclaim-tee/mpc/kos/challenge/v1"))
-	h.Write(request.SessionID[:])
-	var metadata [16]byte
-	binary.BigEndian.PutUint64(metadata[:8], request.StartIndex)
-	binary.BigEndian.PutUint32(metadata[8:12], request.Count)
-	binary.BigEndian.PutUint32(metadata[12:16], request.PaddedCount)
-	h.Write(metadata[:])
-	h.Write(request.U)
-	sum := h.Sum(nil)
-	return labelFromBytes(sum[:16]), nil
-}
-
-func receiverProof(seed Label, choices []byte, rows []Label) (x, t Label) {
-	block := challengeCipher(seed)
-	var counter [16]byte
-	for i := range rows {
-		chi := nextChallenge(block, uint64(i), &counter)
-		t = t.xor(gf128Mul(chi, rows[i]))
-		if choices[i/8]&(1<<uint(i&7)) != 0 {
-			x = x.xor(chi)
-		}
-	}
-	return x, t
-}
-
-func senderProof(seed Label, rows []Label) (q Label) {
-	block := challengeCipher(seed)
-	var counter [16]byte
-	for i := range rows {
-		chi := nextChallenge(block, uint64(i), &counter)
-		q = q.xor(gf128Mul(chi, rows[i]))
-	}
-	return q
-}
-
-func challengeCipher(seed Label) cipher.Block {
-	var key [16]byte
-	seed.put(key[:])
-	block, err := aes.NewCipher(key[:])
-	if err != nil {
-		panic(err)
-	}
-	return block
-}
-
-func nextChallenge(block cipher.Block, index uint64, counter *[16]byte) Label {
-	binary.BigEndian.PutUint64(counter[8:], index)
-	block.Encrypt(counter[:], counter[:])
-	result := labelFromBytes(counter[:])
-	clear(counter[:])
-	return result
 }
 
 // gf128MulGeneric multiplies in GF(2^128) with the polynomial

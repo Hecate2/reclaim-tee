@@ -55,21 +55,29 @@ The serializer omits one length word for every gate. The fixed circuit defines a
 
 ## OT precomputation
 
-Each KOS batch uses 128 P-256 Chou-Orlandi base OTs. It expands them into 100,000 malicious-receiver-checked random OTs.
+Each corrected KOS2 batch uses 128 P-256 Chou-Orlandi base OTs and applies the revised KOS/SoftSpoken repetition-code consistency check with `kappa = s = 128`. The initial batch expands 100,000 random OTs; refills expand 50,000.
 
 One OPRF consumes 640 random OTs. A 100,000-entry batch supports 156 complete OPRFs.
+
+The production TEE handlers accept at most 100,000 OTs in one batch. They reject zero, negative, or larger counts before they create a session, mutate pool state, start base OT, or allocate extension matrices. The generic `mpc` extension primitive has a separate internal limit; that limit is not the production wire limit. At the production maximum, the KOF2 opaque payload is 1,607,840 bytes, and its protobuf control envelope remains below the 30 MiB WebSocket limit.
 
 The local median costs are:
 
 | Precomputation operation | Median |
 | --- | ---: |
-| KOS receiver, 100,000 OTs | 11.33 ms |
-| KOS sender, 100,000 OTs | 12.70 ms |
-| 128 P-256 base OTs | 12.33 ms |
-| Combined sequential CPU per batch | 36.35 ms |
-| Amortized CPU per OPRF | 0.233 ms |
+| Corrected repetition-code proof, 100,000 OTs | 1.066 ms |
+| Full KOS2 symmetric extension, both parties, 100,000 OTs | 20.73 ms |
+| 128 P-256 base OTs | 11.90 ms |
+| Combined sequential CPU per batch | 32.63 ms |
+| Amortized CPU per OPRF | 0.209 ms |
 
-The protocol reuses the existing precomputation protobuf byte fields. Phase tags distinguish the new messages.
+These medians use the benchmark host described above. The full symmetric benchmark excludes P-256 base OT, protobuf/WebSocket framing, and network time.
+
+The protocol reuses the existing precomputation protobuf byte fields. Version-2 phase tags distinguish seven internal frames. No protobuf schema or client message changes are required.
+
+TEE_T first fixes the base-OT ciphertexts and complete IKNP `U` matrix. TEE_K parses and validates that commitment before it samples and sends every independent `chi` coefficient. TEE_T returns `x` and all 128 column values `t_i`; TEE_K verifies every equation `q_i = t_i XOR (delta_i ? x : 0)` before either pool can commit.
+
+For a 100,000-OT batch, the KOS2 opaque payloads total 1,627,080 bytes, compared with 1,612,185 bytes for KOS1. This is 14,895 bytes, or about 0.924 percent, more. Protobuf and WebSocket overhead is additional. Precomputation grows from five to seven frames; the four-message online OPRF protocol is unchanged.
 
 Both sides commit a batch only after the KOS proof passes. The pool token rotates after each committed batch.
 
@@ -110,7 +118,7 @@ The 2025 active-security construction also uses half-gates as its practical base
 
 That construction targets mutually distrustful software parties. This deployment instead binds both parties to measured TEE code.
 
-Relevant primary sources include [RFC 9497](https://www.rfc-editor.org/rfc/rfc9497.html), [Half-Gates](https://www.cs.virginia.edu/~evans/pubs/ec2015/halfgates.pdf), and [Three-Halves](https://eprint.iacr.org/2021/749.pdf).
+Relevant primary sources include the current 2022-09-16 revision of the [KOS ePrint](https://eprint.iacr.org/2015/546.pdf), [SoftSpokenOT](https://eprint.iacr.org/2022/192.pdf), [RFC 9497](https://www.rfc-editor.org/rfc/rfc9497.html), [Half-Gates](https://www.cs.virginia.edu/~evans/pubs/ec2015/halfgates.pdf), and [Three-Halves](https://eprint.iacr.org/2021/749.pdf).
 
 Also see [TinyTable](https://eprint.iacr.org/2016/695.pdf), [projective S-box garbling](https://arxiv.org/abs/2405.20713), and [active two-party computation](https://eprint.iacr.org/2025/614.pdf).
 
@@ -137,7 +145,9 @@ For the 100,000-entry refill, local libOTe KOS was faster than its silent malici
 
 Mutual SEV-SNP attestation binds each peer to the expected TEE image and TLS key.
 
-KOS checks a malicious OT receiver. Session identifiers bind the base OT, extension matrix, proof, pool index, and pool token.
+The corrected repetition-code check detects inconsistent IKNP matrices from the OT receiver under the revised KOS analysis. Session identifiers, a versioned pool epoch, and transcript hashes bind the base-OT ciphertexts, extension matrix, full challenge, proof, and pool index. KOS1 frames and epochs are rejected; there is no downgrade or cross-version resume path.
+
+This check does not turn the complete system into generic malicious-secure two-party computation. The P-256 Chou-Orlandi implementation is not claimed to provide standalone malicious-secure or composably secure base OT. Its messages remain inside the secure, mutually attested TEE-to-TEE control channel, and its implementation remains inside the measured-code trust boundary. The deployment relies on both TEEs running the expected attested code. The commit protocol provides fail-closed consistency and single-use accounting; it does not make an unattested peer trustworthy.
 
 The online path uses single-use OTs and single-use session state. TEE_K verifies every returned output label before trusting the CMAC.
 
@@ -184,6 +194,18 @@ Run the stable online benchmarks on one core:
 GOMAXPROCS=1 go test ./mpc -run '^$' \
   -bench 'Benchmark(OPRFNewEndToEnd|OPRFNewGarbler|OPRFNewSerialize)$' \
   -benchmem -benchtime=1s -count=5 -cpu=1
+```
+
+The reported KOS2 medians used these exact benchmark commands:
+
+```sh
+GOCACHE=/tmp/reclaim-tee-go-cache GOMAXPROCS=1 go test ./mpc -run '^$' \
+  -bench 'BenchmarkKOS2(Proof|Full)100K$' \
+  -benchmem -benchtime=5x -count=5 -cpu=1
+
+GOCACHE=/tmp/reclaim-tee-go-cache GOMAXPROCS=1 go test ./mpc -run '^$' \
+  -bench '^BenchmarkBaseOTBatch128$' \
+  -benchmem -benchtime=20x -count=5 -cpu=1
 ```
 
 Repeat the benchmarks on the exact Milan SEV-SNP machine type before rollout.

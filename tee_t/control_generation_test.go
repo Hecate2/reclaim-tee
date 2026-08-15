@@ -1058,12 +1058,14 @@ func TestControlReplacementAbortsPendingExtensionThenResumesAndExtends(t *testin
 	teet, oldPending := teetWithPendingReceiverBatch(t, 10, 10)
 	oldPending.controlGeneration = 1
 	state := teet.otReceiverState
+	epoch := mpc.ExtensionEpoch([32]byte{7})
+	state.epoch = epoch
 	cm := NewTEEKConnectionManager(teet, shared.NewNopLogger())
 	oldControl := shared.NewWSConnection(nil)
 	replacementControl := newReceiverTestWebSocket(t)
 	cm.controlConn = oldControl
 	cm.controlGeneration = 1
-	if teet.resumeOTPool("old-epoch", 0) {
+	if teet.resumeOTPool(epoch, 0) {
 		t.Fatal("resume accepted pool with unmatched pending extension")
 	}
 
@@ -1077,18 +1079,18 @@ func TestControlReplacementAbortsPendingExtensionThenResumesAndExtends(t *testin
 	if !state.ready || state.pool.TotalCount() != 10 {
 		t.Fatal("replacement did not retain committed ready pool")
 	}
-	if !teet.resumeOTPool("old-epoch", 0) {
+	if !teet.resumeOTPool(epoch, 0) {
 		t.Fatal("replacement could not resume retained committed pool")
 	}
 
-	begin := mpc.PrecomputeBegin{StartIndex: 10, Count: 1}
+	begin := mpc.PrecomputeBegin{StartIndex: 10, Count: 1, Epoch: epoch}
 	begin.SessionID[0] = 2
 	payload, err := mpc.MarshalPrecomputeBegin(begin)
 	if err != nil {
 		t.Fatalf("marshal extension begin: %v", err)
 	}
 	if err := teet.handleOTPrecomputeBegin(replacementControl, generation, directControlStateLease, &teeproto.OTPrecomputeRequest{
-		Count: 1, OtSenderSetup: payload, Epoch: "old-epoch",
+		Count: 1, OtSenderSetup: payload, Epoch: epoch,
 	}); err != nil {
 		t.Fatalf("start extension on replacement: %v", err)
 	}
