@@ -112,11 +112,21 @@ func (g *garbled) release() {
 	if g == nil || g.owner == nil {
 		return
 	}
+	clearGarbleScratch(g.scratch)
 	g.owner.pool.Put(g.scratch)
 	g.owner = nil
 	g.scratch = nil
 	g.wires = nil
 	g.tables = nil
+}
+
+func clearGarbleScratch(scratch *garbleScratch) {
+	if scratch == nil {
+		return
+	}
+	clear(scratch.wires)
+	clear(scratch.tables)
+	clear(scratch.random)
 }
 
 var (
@@ -205,6 +215,7 @@ func (e *engine) garble(rng io.Reader, key *[16]byte) (*garbled, error) {
 
 	scratch := e.pool.Get().(*garbleScratch)
 	if _, err := io.ReadFull(rng, scratch.random); err != nil {
+		clearGarbleScratch(scratch)
 		e.pool.Put(scratch)
 		return nil, fmt.Errorf("read garbling randomness: %w", err)
 	}

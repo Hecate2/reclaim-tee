@@ -46,7 +46,14 @@ func StartBaseOTSender(rng io.Reader, session [32]byte) (*BaseOTSenderState, []b
 		return nil, nil, fmt.Errorf("mpc: generate base OT sender setup: %w", err)
 	}
 	state := &BaseOTSenderState{session: session, setup: setup}
+	complete := false
+	defer func() {
+		if !complete {
+			state.Destroy()
+		}
+	}()
 	var seedBytes [32]byte
+	defer clear(seedBytes[:])
 	for i := range state.seeds {
 		if _, err := io.ReadFull(rng, seedBytes[:]); err != nil {
 			return nil, nil, fmt.Errorf("mpc: read base OT seeds: %w", err)
@@ -63,6 +70,7 @@ func StartBaseOTSender(rng io.Reader, session [32]byte) (*BaseOTSenderState, []b
 	copy(message[4:36], session[:])
 	point := elliptic.MarshalCompressed(curve, setup.Ax, setup.Ay)
 	copy(message[36:], point)
+	complete = true
 	return state, message, nil
 }
 
@@ -86,6 +94,7 @@ func StartBaseOTReceiver(rng io.Reader, session [32]byte, setupMessage []byte) (
 	}
 
 	var deltaBytes [16]byte
+	defer clear(deltaBytes[:])
 	if _, err := io.ReadFull(rng, deltaBytes[:]); err != nil {
 		return nil, nil, fmt.Errorf("mpc: read OT correlation delta: %w", err)
 	}
@@ -94,6 +103,7 @@ func StartBaseOTReceiver(rng io.Reader, session [32]byte, setupMessage []byte) (
 		return nil, nil, errors.New("mpc: zero OT correlation delta")
 	}
 	choices := make([]bool, BaseOTCount)
+	defer clear(choices)
 	for i := range choices {
 		choices[i] = deltaBit(delta, i)
 	}
@@ -215,6 +225,7 @@ func clearBaseOTSenderState(state *BaseOTSenderState) {
 	clear(state.session[:])
 	clear(state.seeds[:])
 	if state.setup.Scalar != nil {
+		clear(state.setup.Scalar.Bits())
 		state.setup.Scalar.SetInt64(0)
 	}
 	state.setup = markot.COSenderSetup{}
@@ -228,10 +239,31 @@ func clearBaseOTReceiverState(state *BaseOTReceiverState) {
 	state.delta = Label{}
 	for _, scalar := range state.bundle.Scalars {
 		if scalar != nil {
+			clear(scalar.Bits())
 			scalar.SetInt64(0)
 		}
 	}
 	clear(state.bundle.Bits)
 	clear(state.bundle.Scalars)
 	state.bundle = markot.COChoiceBundle{}
+}
+
+// Destroy clears an abandoned base-OT sender state. It is idempotent and
+// makes the state unusable.
+func (state *BaseOTSenderState) Destroy() {
+	if state == nil {
+		return
+	}
+	state.used = true
+	clearBaseOTSenderState(state)
+}
+
+// Destroy clears an abandoned base-OT receiver state. It is idempotent and
+// makes the state unusable.
+func (state *BaseOTReceiverState) Destroy() {
+	if state == nil {
+		return
+	}
+	state.used = true
+	clearBaseOTReceiverState(state)
 }

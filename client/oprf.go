@@ -200,7 +200,7 @@ func (c *Client) ProcessOPRFForHashedRanges(attestorClient *AttestorClient) erro
 		c.logger.Info("OPRF completed for range",
 			zap.Int("start", rangeStart),
 			zap.Int("length", rangeLength),
-			zap.String("output", fmt.Sprintf("%x", finalOutput[:min(32, len(finalOutput))])))
+			zap.Int("output_bytes", len(finalOutput)))
 
 		// Prepare ZK proof parameters
 		zkParams, err := c.prepareZKProofForRange(oprfData)
@@ -334,7 +334,7 @@ func (c *Client) prepareZKProofForRange(oprfData *OPRFRangeData) (*prover.InputP
 		zap.Int("http_end", httpRangeEnd),
 		zap.Int("tls_start", tlsStart),
 		zap.Int("tls_end", tlsEnd),
-		zap.String("data", string(oprfData.Data)))
+		zap.Int("data_bytes", len(oprfData.Data)))
 
 	// Get the ideal blocks for TOPRF using the existing function
 	inputParams, err := c.getIdealBlocksForTOPRF(tlsStart, tlsEnd, packetMetadata, cipherSuite, serverKey)
@@ -377,7 +377,7 @@ func (c *Client) generateZKProof(inputParams *prover.InputParams) ([]byte, error
 		return nil, fmt.Errorf("failed to marshal ZK parameters: %v", err)
 	}
 
-	c.logger.Debug("Generating ZK proof", zap.String("params", string(zkJSON)))
+	c.logger.Debug("Generating ZK proof", zap.Int("params_bytes", len(zkJSON)))
 
 	// Generate the proof
 	proof := prover.Prove(zkJSON)

@@ -137,8 +137,10 @@ func (t *TEEKSessionManager) SetTEEKSessionState(sessionID string, state *TEEKSe
 
 func (t *TEEKSessionManager) RemoveTEEKSessionState(sessionID string) {
 	t.stateMutex.Lock()
+	state := t.teekStates[sessionID]
 	delete(t.teekStates, sessionID)
 	t.stateMutex.Unlock()
+	state.DestroyOPRFSessions()
 }
 
 func (t *TEEKSessionManager) CloseSession(sessionID string) error {
@@ -151,10 +153,13 @@ func (t *TEEKSessionManager) CloseSessionIfCurrent(session *shared.Session) erro
 		return fmt.Errorf("session is nil")
 	}
 	t.stateMutex.Lock()
+	var removed *TEEKSessionState
 	if state := t.teekStates[session.ID]; state != nil && state.session == session {
+		removed = state
 		delete(t.teekStates, session.ID)
 	}
 	t.stateMutex.Unlock()
+	removed.DestroyOPRFSessions()
 	return t.SessionManager.CloseSessionIfCurrent(session)
 }
 
@@ -275,6 +280,50 @@ func (s *TEEKSessionState) GetGarblerOnlineSession(rangeIdx int) (*mpc.GarblerSe
 	defer s.oprfMu.Unlock()
 	session, ok := s.GarblerOnlineSessions[rangeIdx]
 	return session, ok
+}
+
+// RemoveGarblerOnlineSession removes only the exact session supplied by its
+// owner. A delayed failure cannot remove a replacement for the same range.
+func (s *TEEKSessionState) RemoveGarblerOnlineSession(rangeIdx int, expected *mpc.GarblerSession) bool {
+	s.oprfMu.Lock()
+	defer s.oprfMu.Unlock()
+	if expected == nil || s.GarblerOnlineSessions[rangeIdx] != expected {
+		return false
+	}
+	delete(s.GarblerOnlineSessions, rangeIdx)
+	return true
+}
+
+// TakeGarblerOnlineSession transfers exclusive ownership of one final-output
+// session to the caller.
+func (s *TEEKSessionState) TakeGarblerOnlineSession(rangeIdx int) (*mpc.GarblerSession, bool) {
+	s.oprfMu.Lock()
+	defer s.oprfMu.Unlock()
+	session, ok := s.GarblerOnlineSessions[rangeIdx]
+	if ok {
+		delete(s.GarblerOnlineSessions, rangeIdx)
+	}
+	return session, ok
+}
+
+// DestroyOPRFSessions detaches every map-resident garbler session, then clears
+// it outside the map lock. Sessions already taken by a final-output handler
+// remain owned by that handler.
+func (s *TEEKSessionState) DestroyOPRFSessions() {
+	if s == nil {
+		return
+	}
+	s.oprfMu.Lock()
+	sessions := make([]*mpc.GarblerSession, 0, len(s.GarblerOnlineSessions))
+	for rangeIdx, session := range s.GarblerOnlineSessions {
+		sessions = append(sessions, session)
+		delete(s.GarblerOnlineSessions, rangeIdx)
+	}
+	s.GarblerOnlineSessions = nil
+	s.oprfMu.Unlock()
+	for _, session := range sessions {
+		session.Destroy()
+	}
 }
 
 // SetOPRFResult safely sets an OPRF result for the given range index

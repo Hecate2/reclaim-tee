@@ -12,6 +12,7 @@ import (
 
 type pendingOPRFEvaluation struct {
 	Session   *mpc.EvaluatorSession
+	Payload   *mpc.OnlinePayload
 	TLSStart  int
 	TLSLength int
 }
@@ -117,8 +118,10 @@ func (t *TEETSessionManager) SetTEETSessionState(sessionID string, state *TEETSe
 
 func (t *TEETSessionManager) RemoveTEETSessionState(sessionID string) {
 	t.stateMutex.Lock()
+	state := t.teetStates[sessionID]
 	delete(t.teetStates, sessionID)
 	t.stateMutex.Unlock()
+	state.DestroyOPRFSessions()
 }
 
 func (t *TEETSessionManager) controlGenerationForSession(session *shared.Session) (uint64, bool) {
@@ -160,10 +163,13 @@ func (t *TEETSessionManager) closeSessionIfCurrent(session *shared.Session) erro
 	}
 	t.stateMutex.Lock()
 	state := t.teetStates[session.ID]
+	var removed *TEETSessionState
 	if state != nil && state.session == session {
+		removed = state
 		delete(t.teetStates, session.ID)
 	}
 	t.stateMutex.Unlock()
+	removed.DestroyOPRFSessions()
 	return t.SessionManager.CloseSessionIfCurrent(session)
 }
 
@@ -232,6 +238,41 @@ func (s *TEETSessionState) TakePendingOPRF(rangeIdx int) (*pendingOPRFEvaluation
 		delete(s.PendingOPRF, rangeIdx)
 	}
 	return pending, ok
+}
+
+// RemovePendingOPRF removes only the exact unpublished or failed-send owner.
+// A delayed cleanup cannot remove a replacement for the same range.
+func (s *TEETSessionState) RemovePendingOPRF(rangeIdx int, expected *pendingOPRFEvaluation) bool {
+	s.oprfMu.Lock()
+	defer s.oprfMu.Unlock()
+	if expected == nil || s.PendingOPRF[rangeIdx] != expected {
+		return false
+	}
+	delete(s.PendingOPRF, rangeIdx)
+	return true
+}
+
+// DestroyOPRFSessions detaches and clears every map-resident evaluator
+// session. A round-3 handler first takes its session and therefore retains
+// exclusive ownership through its own deferred Destroy.
+func (s *TEETSessionState) DestroyOPRFSessions() {
+	if s == nil {
+		return
+	}
+	s.oprfMu.Lock()
+	pendings := make([]*pendingOPRFEvaluation, 0, len(s.PendingOPRF))
+	for rangeIdx, pending := range s.PendingOPRF {
+		if pending != nil {
+			pendings = append(pendings, pending)
+		}
+		delete(s.PendingOPRF, rangeIdx)
+	}
+	s.PendingOPRF = nil
+	s.oprfMu.Unlock()
+	for _, pending := range pendings {
+		pending.Session.Destroy()
+		pending.Payload.Release()
+	}
 }
 
 // GetOPRFResult safely retrieves an OPRF result for the given range index

@@ -207,7 +207,7 @@ func (t *TEET) reconstructFullRequestWithStreams(encryptedRedacted []byte, range
 	reconstructed := make([]byte, len(encryptedRedacted))
 	copy(reconstructed, encryptedRedacted)
 	t.logger.Debug("Starting redaction stream application with provided streams",
-		zap.Binary("redacted_preview", encryptedRedacted[:min(64, len(encryptedRedacted))]),
+		zap.Int("redacted_bytes", len(encryptedRedacted)),
 		zap.Int("redaction_ranges", len(ranges)),
 		zap.Int("available_streams", len(redactionStreams)))
 	for i, r := range ranges {
@@ -226,13 +226,12 @@ func (t *TEET) reconstructFullRequestWithStreams(encryptedRedacted []byte, range
 			zap.Int("stream_index", i),
 			zap.Int("range_start", r.Start),
 			zap.Int("range_end", r.Start+r.Length),
-			zap.Binary("stream_preview", stream[:min(16, len(stream))]))
+			zap.Int("stream_bytes", len(stream)))
 		for j := 0; j < r.Length && j < len(stream); j++ {
 			reconstructed[r.Start+j] ^= stream[j]
 		}
 	}
 	t.logger.Debug("Completed redaction stream application",
-		zap.Binary("reconstructed_preview", reconstructed[:min(64, len(reconstructed))]),
 		zap.Int("total_bytes", len(reconstructed)))
 	return reconstructed, nil
 }

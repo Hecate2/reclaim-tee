@@ -2,7 +2,6 @@ package client
 
 import (
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"net"
 	"sync"
@@ -642,24 +641,20 @@ func (c *Client) getResponseRedactions(response *HTTPResponse) ([]shared.Respons
 	for _, r := range ranges {
 		// Check if this range requires OPRF processing (Hash field indicates OPRF type)
 		if r.Start >= 0 && r.Start+r.Length <= len(response.FullResponse) {
-			dataToProcess := response.FullResponse[r.Start : r.Start+r.Length]
-
 			if r.Hash == *providers.HASH_TYPE_OPRF {
 				// Client-side TOPRF processing
 				c.oprfRedactionRanges[r.Start] = r.Length
 				c.logger.Info("Marked range for TOPRF processing",
 					zap.Int("start", r.Start),
 					zap.Int("length", r.Length),
-					zap.String("hash_type", r.Hash),
-					zap.String("data", string(dataToProcess)))
+					zap.String("hash_type", r.Hash))
 			} else if r.Hash == *providers.HASH_TYPE_OPRF_MPC {
 				// TEE-to-TEE MPC OPRF processing
 				c.oprfMpcRedactionRanges[r.Start] = r.Length
 				c.logger.Info("Marked range for MPC OPRF processing",
 					zap.Int("start", r.Start),
 					zap.Int("length", r.Length),
-					zap.String("hash_type", r.Hash),
-					zap.String("data", string(dataToProcess)))
+					zap.String("hash_type", r.Hash))
 			}
 		}
 	}
@@ -754,11 +749,8 @@ func (c *Client) SubmitToAttestorCore(params ClaimTeeBundleParams) (*ClaimWithSi
 		if params.Parameters != nil && params.Parameters.ParamValues != nil {
 			c.replaceParamValuesWithOPRF(params.Parameters)
 
-			// Log the updated parameters
-			if updatedParamsJSON, err := json.Marshal(params.Parameters); err == nil {
-				c.logger.Info("Updated parameters with OPRF replacements",
-					zap.String("parameters", string(updatedParamsJSON)))
-			}
+			c.logger.Info("Updated parameters with OPRF replacements",
+				zap.Int("parameter_count", len(params.Parameters.ParamValues)))
 		}
 	}
 

@@ -19,7 +19,7 @@ import (
 // TEE_K is the authoritative, mutually-attested source of ranges: it relays the
 // client's ranges here (with TotalRanges), so TEE_T derives all OPRF state from
 // this single TCP-ordered stream rather than racing a separate client message.
-func (t *TEET) handleOPRFOnlineFull(identity *teetSessionIdentity, msg *teeproto.OPRFOnlineFull) error {
+func (t *TEET) handleOPRFOnlineFull(identity *teetSessionIdentity, msg *teeproto.OPRFOnlineFull) (retErr error) {
 	startTime := time.Now()
 	if err := identity.ensureCurrent(); err != nil {
 		return err
@@ -104,9 +104,11 @@ func (t *TEET) handleOPRFOnlineFull(identity *teetSessionIdentity, msg *teeproto
 	if err != nil {
 		return fmt.Errorf("failed to pad ciphertext: %w", err)
 	}
+	defer clear(paddedCiphertext[:])
 
 	// Build evaluator input: [64 bytes data][16 bytes key]
 	var evaluatorInput [80]byte
+	defer clear(evaluatorInput[:])
 	copy(evaluatorInput[:64], paddedCiphertext[:])
 	copy(evaluatorInput[64:], teetState.OPRFKeyShare)
 
@@ -115,6 +117,12 @@ func (t *TEET) handleOPRFOnlineFull(identity *teetSessionIdentity, msg *teeproto
 	if err != nil {
 		return fmt.Errorf("failed to deserialize online payload: %w", err)
 	}
+	payloadOwned := true
+	defer func() {
+		if payloadOwned {
+			payload.Release()
+		}
+	}()
 	if payload.SessionID != msg.GetOprfSessionId() {
 		return fmt.Errorf("OPRF round 1 session mismatch for range %d", rangeIndex)
 	}
@@ -131,6 +139,7 @@ func (t *TEET) handleOPRFOnlineFull(identity *teetSessionIdentity, msg *teeproto
 	if err != nil {
 		return fmt.Errorf("failed to consume OT entries: %w", err)
 	}
+	defer clear(otEntries)
 
 	otDone := time.Now()
 
@@ -138,20 +147,37 @@ func (t *TEET) handleOPRFOnlineFull(identity *teetSessionIdentity, msg *teeproto
 	if err != nil {
 		return fmt.Errorf("failed to prepare evaluator OT corrections: %w", err)
 	}
-	if err := identity.ensureCurrent(); err != nil {
-		return err
-	}
-	if err := teetState.SetPendingOPRF(rangeIndex, &pendingOPRFEvaluation{
-		Session:   evaluatorSession,
-		TLSStart:  int(msg.TlsStart),
-		TLSLength: int(msg.TlsLength),
-	}); err != nil {
-		return err
-	}
+	defer clear(corrections)
+	payloadOwned = false
+	evaluatorSessionOwned := true
+	defer func() {
+		if evaluatorSessionOwned {
+			evaluatorSession.Destroy()
+		}
+	}()
 	serializedCorrections, err := mpc.MarshalChoiceCorrections(corrections)
 	if err != nil {
 		return fmt.Errorf("failed to serialize choice corrections: %w", err)
 	}
+	if err := identity.ensureCurrent(); err != nil {
+		return err
+	}
+	pending := &pendingOPRFEvaluation{
+		Session:   evaluatorSession,
+		Payload:   payload,
+		TLSStart:  int(msg.TlsStart),
+		TLSLength: int(msg.TlsLength),
+	}
+	if err := teetState.SetPendingOPRF(rangeIndex, pending); err != nil {
+		return err
+	}
+	evaluatorSessionOwned = false
+	defer func() {
+		if retErr != nil && teetState.RemovePendingOPRF(rangeIndex, pending) {
+			pending.Session.Destroy()
+			pending.Payload.Release()
+		}
+	}()
 
 	if err := t.sendOPRFChoiceCorrectionsToTEEK(identity, &teeproto.OPRFMPCRound2{
 		SessionId:         sessionID,
@@ -198,6 +224,8 @@ func (t *TEET) handleOPRFMasks(identity *teetSessionIdentity, msg *teeproto.OPRF
 	if !ok {
 		return fmt.Errorf("no pending OPRF evaluation for range %d", rangeIndex)
 	}
+	defer pending.Session.Destroy()
+	defer pending.Payload.Release()
 	if pending.Session.SessionID != msg.GetOprfSessionId() {
 		return fmt.Errorf("OPRF round 3 session mismatch for range %d", rangeIndex)
 	}

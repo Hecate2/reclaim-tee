@@ -97,6 +97,9 @@ func TestKOS2ChallengeOversizeCountFailsBeforeReceiverPoolMutation(t *testing.T)
 	if state.pending != nil || pending.outcome != receiverPrecomputeAborted {
 		t.Fatal("malformed challenge did not abort only its pending receiver batch")
 	}
+	if _, err := mpc.FinishExtensionReceiver(extension, nil); err == nil || !strings.Contains(err.Error(), "already used") {
+		t.Fatalf("malformed challenge retained extension state: %v", err)
+	}
 }
 
 func TestConsumeOTReceiverEntriesWaitsForReorderedCompletion(t *testing.T) {

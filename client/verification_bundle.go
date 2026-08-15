@@ -272,7 +272,6 @@ func (c *Client) populateOPRFMPCRanges(oprfOutputs []*teeproto.OPRFOutput) error
 		c.logger.Debug("Populated MPC OPRF range for ParamValue replacement",
 			zap.Int("http_start", mapping.HTTPStart),
 			zap.Int("http_length", mapping.HTTPLength),
-			zap.String("data", string(originalData)),
 			zap.Int("hash_len", len(output.HashOutput)))
 	}
 
@@ -910,8 +909,6 @@ func (c *Client) replaceParamValuesWithOPRF(providerParams *providers.HTTPProvid
 
 				c.logger.Info("Replaced ParamValue with OPRF output",
 					zap.String("key", key),
-					zap.String("original", originalData),
-					zap.String("oprf_encoded", finalOPRF),
 					zap.Int("original_length", len(originalData)),
 					zap.Int("oprf_length", len(finalOPRF)),
 					zap.Bool("is_mpc", oprfData.IsMPC))

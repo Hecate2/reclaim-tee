@@ -60,7 +60,7 @@ func (p *SenderPool) Add(entries []SenderOT) error {
 	if err := p.validateAddLocked(entries); err != nil {
 		return err
 	}
-	p.entries = append(p.entries, entries...)
+	p.entries = appendWithWipedGrowth(p.entries, entries)
 	return nil
 }
 
@@ -281,10 +281,34 @@ func (p *ReceiverPool) Add(entries []ReceiverOT) error {
 	if err := validateReceiverOTIndices(entries, start); err != nil {
 		return err
 	}
-	p.entries = append(p.entries, entries...)
+	p.entries = appendWithWipedGrowth(p.entries, entries)
 	p.used = append(p.used, make([]bool, len(entries))...)
 	p.availableCount += len(entries)
 	return nil
+}
+
+// appendWithWipedGrowth mirrors append while ensuring that a reallocation
+// does not leave secret entries in the abandoned backing array.
+func appendWithWipedGrowth[T any](dst, src []T) []T {
+	if len(src) <= cap(dst)-len(dst) {
+		oldLen := len(dst)
+		dst = dst[:oldLen+len(src)]
+		copy(dst[oldLen:], src)
+		return dst
+	}
+
+	needed := len(dst) + len(src)
+	newCap := needed
+	if cap(dst) <= int(^uint(0)>>1)/2 && cap(dst)*2 > newCap {
+		newCap = cap(dst) * 2
+	}
+	next := make([]T, needed, newCap)
+	copy(next, dst)
+	copy(next[len(dst):], src)
+	if cap(dst) != 0 {
+		clear(dst[:cap(dst)])
+	}
+	return next
 }
 
 // Consume returns one unused absolute range. It accepts out-of-order ranges

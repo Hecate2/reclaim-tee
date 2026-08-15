@@ -140,6 +140,7 @@ func (t *TEET) handleOTPrecomputeBegin(conn *shared.WSConnection, generation uin
 		state.pending = pending
 		return nil
 	}); err != nil {
+		baseSender.Destroy()
 		return err
 	}
 
@@ -158,6 +159,7 @@ func (t *TEET) handleOTPrecomputeBegin(conn *shared.WSConnection, generation uin
 func (t *TEET) handleOTPrecomputeChoices(conn *shared.WSConnection, generation uint64, lease controlStateLease, msg *teeproto.OTPrecomputeRequest) error {
 	var state *OTReceiverState
 	var pending *receiverPrecompute
+	var baseSender *mpc.BaseOTSenderState
 	if err := lease(func() error {
 		t.otReceiverStateMu.Lock()
 		defer t.otReceiverStateMu.Unlock()
@@ -176,10 +178,12 @@ func (t *TEET) handleOTPrecomputeChoices(conn *shared.WSConnection, generation u
 			return fmt.Errorf("unexpected base OT choice phase %d", pending.phase)
 		}
 		pending.phase = receiverPrecomputeProcessingChoices
+		baseSender = pending.baseSender
 		return nil
 	}); err != nil {
 		return err
 	}
+	defer baseSender.Destroy()
 
 	started := time.Now()
 	choiceMessage, err := mpc.UnmarshalPrecomputeBaseChoices(msg.GetOtSenderSetup(), pending.begin.SessionID)
@@ -187,7 +191,7 @@ func (t *TEET) handleOTPrecomputeChoices(conn *shared.WSConnection, generation u
 		t.clearPendingReceiverPrecompute(state, pending)
 		return err
 	}
-	cipherMessage, basePairs, err := mpc.FinishBaseOTSender(pending.baseSender, choiceMessage)
+	cipherMessage, basePairs, err := mpc.FinishBaseOTSender(baseSender, choiceMessage)
 	if err != nil {
 		t.clearPendingReceiverPrecompute(state, pending)
 		return err
@@ -201,6 +205,13 @@ func (t *TEET) handleOTPrecomputeChoices(conn *shared.WSConnection, generation u
 		t.clearPendingReceiverPrecompute(state, pending)
 		return err
 	}
+	extensionOwned := true
+	defer func() {
+		if extensionOwned {
+			extension.Destroy()
+			clear(entries)
+		}
+	}()
 	commitmentMessage, err := mpc.MarshalPrecomputeCommitment(cipherMessage, commitment)
 	if err != nil {
 		t.clearPendingReceiverPrecompute(state, pending)
@@ -215,6 +226,7 @@ func (t *TEET) handleOTPrecomputeChoices(conn *shared.WSConnection, generation u
 		}
 		pending.extension = extension
 		pending.entries = entries
+		extensionOwned = false
 		pending.phase = receiverPrecomputeAwaitChallenge
 		return nil
 	}); err != nil {
@@ -232,6 +244,7 @@ func (t *TEET) handleOTPrecomputeChoices(conn *shared.WSConnection, generation u
 func (t *TEET) handleOTPrecomputeChallenge(conn *shared.WSConnection, generation uint64, lease controlStateLease, msg *teeproto.OTPrecomputeRequest) error {
 	var state *OTReceiverState
 	var pending *receiverPrecompute
+	var extension *mpc.ExtensionReceiverState
 	if err := lease(func() error {
 		t.otReceiverStateMu.Lock()
 		defer t.otReceiverStateMu.Unlock()
@@ -247,17 +260,19 @@ func (t *TEET) handleOTPrecomputeChallenge(conn *shared.WSConnection, generation
 			return fmt.Errorf("unexpected OT extension challenge phase %d", pending.phase)
 		}
 		pending.phase = receiverPrecomputeProcessingChallenge
+		extension = pending.extension
 		return nil
 	}); err != nil {
 		return err
 	}
+	defer extension.Destroy()
 
 	challenge, err := mpc.UnmarshalExtensionChallengeFor(msg.GetOtSenderSetup(), pending.begin.SessionID, int(pending.begin.Count))
 	if err != nil {
 		t.clearPendingReceiverPrecompute(state, pending)
 		return err
 	}
-	proof, err := mpc.FinishExtensionReceiver(pending.extension, challenge)
+	proof, err := mpc.FinishExtensionReceiver(extension, challenge)
 	if err != nil {
 		t.clearPendingReceiverPrecompute(state, pending)
 		return err
@@ -330,6 +345,8 @@ func (t *TEET) handleOTPrecomputeComplete(generation uint64, lease controlStateL
 			return err
 		}
 		pending := state.pending
+		clear(pending.entries)
+		pending.entries = nil
 		state.epoch = mpc.ExtensionEpoch(pending.begin.SessionID)
 		state.pending = nil
 		state.ready = true
@@ -538,9 +555,29 @@ func finishReceiverPrecompute(pending *receiverPrecompute, outcome receiverPreco
 		return
 	}
 	pending.outcome = outcome
+	destroyIdleReceiverPrecompute(pending)
 	if pending.done != nil {
 		close(pending.done)
 	}
+}
+
+// destroyIdleReceiverPrecompute clears state that is not owned by an active
+// handler. Processing handlers clear their in-use base/extension objects and
+// destroy any unpublished result before returning.
+func destroyIdleReceiverPrecompute(pending *receiverPrecompute) {
+	if pending == nil {
+		return
+	}
+	if pending.phase != receiverPrecomputeProcessingChoices {
+		pending.baseSender.Destroy()
+		pending.baseSender = nil
+	}
+	if pending.phase != receiverPrecomputeProcessingChallenge {
+		pending.extension.Destroy()
+		pending.extension = nil
+	}
+	clear(pending.entries)
+	pending.entries = nil
 }
 
 func (t *TEET) resumeOTPool(epoch string, nextIndex uint64) bool {

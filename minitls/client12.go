@@ -157,18 +157,16 @@ func (c *Client) continueTLS12HandshakeAfterServerHello() error {
 	if c.extendedMasterSecret {
 		// RFC 7627: Use Extended Master Secret
 		c.logger.Debug("Using Extended Master Secret (RFC 7627)")
-		c.logger.Debug("Pre-master secret", zap.Int("bytes", len(sharedSecret)), zap.String("secret", fmt.Sprintf("%x", sharedSecret)))
+		c.logger.Debug("Pre-master secret generated", zap.Int("bytes", len(sharedSecret)))
 		c.logger.Debug("Session hash", zap.Int("bytes", len(sessionHash)), zap.String("hash", fmt.Sprintf("%x", sessionHash)))
 		c.tls12KeySchedule.DeriveMasterSecretExtended(sharedSecret, sessionHash)
-		c.logger.Debug("Derived master secret", zap.Int("bytes", len(c.tls12KeySchedule.masterSecret)), zap.String("secret", fmt.Sprintf("%x", c.tls12KeySchedule.masterSecret)))
 	} else {
 		// Standard master secret derivation
 		c.logger.Debug("Using standard master secret derivation")
-		c.logger.Debug("Pre-master secret", zap.Int("bytes", len(sharedSecret)), zap.String("secret", fmt.Sprintf("%x", sharedSecret)))
+		c.logger.Debug("Pre-master secret generated", zap.Int("bytes", len(sharedSecret)))
 		c.logger.Debug("Client random", zap.String("random", fmt.Sprintf("%x", c.clientRandom)))
 		c.logger.Debug("Server random", zap.String("random", fmt.Sprintf("%x", c.serverRandom)))
 		c.tls12KeySchedule.DeriveMasterSecret(sharedSecret)
-		c.logger.Debug("Derived master secret", zap.Int("bytes", len(c.tls12KeySchedule.masterSecret)), zap.String("secret", fmt.Sprintf("%x", c.tls12KeySchedule.masterSecret)))
 	}
 
 	c.logger.Debug("Master secret derived successfully")

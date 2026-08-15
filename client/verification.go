@@ -182,13 +182,9 @@ func (c *Client) reconstructHTTPResponseFromDecryptedData() error {
 
 		// Only include application data, skip handshake and alerts
 		if parsed.ContentType == minitls.RecordTypeApplicationData && len(parsed.ActualContent) > 0 {
-			// Log the actual content for debugging
-			previewLen := min(len(parsed.ActualContent), 100)
 			c.logger.Debug("Decrypted ApplicationData content",
 				zap.Uint64("seq_num", seqNum),
-				zap.Int("length", len(parsed.ActualContent)),
-				zap.String("preview", string(parsed.ActualContent[:previewLen])),
-				zap.String("hex", fmt.Sprintf("%x", parsed.ActualContent[:previewLen])))
+				zap.Int("length", len(parsed.ActualContent)))
 
 			fullResponse = append(fullResponse, parsed.ActualContent...)
 		} else if parsed.ContentType != minitls.RecordTypeApplicationData {
@@ -196,7 +192,7 @@ func (c *Client) reconstructHTTPResponseFromDecryptedData() error {
 				zap.Uint64("seq_num", seqNum),
 				zap.Uint8("content_type", parsed.ContentType),
 				zap.String("content_type_name", getContentTypeName(parsed.ContentType)),
-				zap.String("preview", fmt.Sprintf("%x", parsed.ActualContent)))
+				zap.Int("content_length", len(parsed.ActualContent)))
 
 			// If this is an alert (other than close_notify), it indicates an error
 			if parsed.ContentType == minitls.RecordTypeAlert && len(parsed.ActualContent) >= 2 {
@@ -272,8 +268,7 @@ func (c *Client) reconstructHTTPResponseFromDecryptedData() error {
 			c.logger.Info("Response processing successful", zap.Int("response_bytes", len(actualHTTPResponse)))
 			return nil
 		} else {
-			previewLen := min(len(responseStr), 100)
-			c.logger.Error("Reconstructed response doesn't look like HTTP", zap.String("preview", responseStr[:previewLen]))
+			c.logger.Error("Reconstructed response doesn't look like HTTP", zap.Int("response_bytes", len(responseStr)))
 			return fmt.Errorf("corrupted response: no HTTP status line found")
 		}
 	} else {

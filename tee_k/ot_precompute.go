@@ -356,6 +356,12 @@ func (t *TEEK) handleOTPrecomputeResponse(conn *shared.WSConnection, generation 
 			t.failPendingPrecompute(state, pending, err)
 			return err
 		}
+		baseReceiverOwned := true
+		defer func() {
+			if baseReceiverOwned {
+				baseReceiver.Destroy()
+			}
+		}()
 		choiceFrame, err := mpc.MarshalPrecomputeBaseChoices(session, choices)
 		if err != nil {
 			t.failPendingPrecompute(state, pending, err)
@@ -373,6 +379,7 @@ func (t *TEEK) handleOTPrecomputeResponse(conn *shared.WSConnection, generation 
 			return fmt.Errorf("OT sender state changed during base OT")
 		}
 		pending.baseReceiver = baseReceiver
+		baseReceiverOwned = false
 		count, initial, epoch := pending.count, pending.isInitial, state.epoch
 		state.mu.Unlock()
 		t.connManager.mu.RUnlock()
@@ -397,6 +404,7 @@ func (t *TEEK) handleOTPrecomputeResponse(conn *shared.WSConnection, generation 
 		epoch := state.epoch
 		state.mu.Unlock()
 		t.connManager.mu.RUnlock()
+		defer baseReceiver.Destroy()
 
 		expected := mpc.PrecomputeBegin{SessionID: session, StartIndex: startIndex, Count: uint32(count), Epoch: epoch}
 		ciphertexts, commitment, err := mpc.UnmarshalPrecomputeCommitmentFor(msg.GetOtReceiverData(), expected)
@@ -416,6 +424,12 @@ func (t *TEEK) handleOTPrecomputeResponse(conn *shared.WSConnection, generation 
 			t.failPendingPrecompute(state, pending, err)
 			return err
 		}
+		extensionOwned := true
+		defer func() {
+			if extensionOwned {
+				extension.Destroy()
+			}
+		}()
 		challengeFrame, err := mpc.MarshalExtensionChallenge(challenge)
 		if err != nil {
 			t.failPendingPrecompute(state, pending, err)
@@ -431,6 +445,7 @@ func (t *TEEK) handleOTPrecomputeResponse(conn *shared.WSConnection, generation 
 			return fmt.Errorf("OT sender state changed while preparing KOS2 challenge")
 		}
 		pending.extension = extension
+		extensionOwned = false
 		pending.phase = senderPrecomputeAwaitProof
 		initial := pending.isInitial
 		state.mu.Unlock()
@@ -447,6 +462,7 @@ func (t *TEEK) handleOTPrecomputeResponse(conn *shared.WSConnection, generation 
 		extension := pending.extension
 		state.mu.Unlock()
 		t.connManager.mu.RUnlock()
+		defer extension.Destroy()
 		proof, err := mpc.UnmarshalExtensionProofFor(msg.GetOtReceiverData(), pending.session)
 		if err != nil {
 			t.failPendingPrecompute(state, pending, err)
@@ -477,6 +493,7 @@ func signalSenderPrecompute(pending *senderPrecompute, err error) {
 }
 
 func (t *TEEK) completeSenderPrecompute(state *OTPrecomputeState, pending *senderPrecompute, entries []mpc.SenderOT) error {
+	defer clear(entries)
 	if state == nil || pending == nil || t.connManager == nil {
 		return fmt.Errorf("OT precompute identity is incomplete")
 	}
@@ -592,6 +609,7 @@ func (t *TEEK) failPendingPrecompute(state *OTPrecomputeState, expected *senderP
 	}
 	state.pending = nil
 	state.mu.Unlock()
+	destroyIdleSenderPrecompute(expected)
 	signalSenderPrecompute(expected, err)
 	return true
 }
@@ -615,8 +633,27 @@ func (t *TEEK) failPendingPrecomputeAndClear(state *OTPrecomputeState, expected 
 	state.pending = nil
 	t.publishOTReadyLocked(state)
 	state.mu.Unlock()
+	destroyIdleSenderPrecompute(expected)
 	signalSenderPrecompute(expected, err)
 	return true
+}
+
+// destroyIdleSenderPrecompute clears state only when no handler can be using
+// it outside the state lock. Processing phases consume and clear their own
+// base/extension state before they return.
+func destroyIdleSenderPrecompute(pending *senderPrecompute) {
+	if pending == nil {
+		return
+	}
+	switch pending.phase {
+	case senderPrecomputeProcessingCommitment, senderPrecomputeProcessingProof:
+		return
+	}
+	pending.baseReceiver.Destroy()
+	pending.baseReceiver = nil
+	pending.extension.Destroy()
+	pending.extension = nil
+	clear(pending.session[:])
 }
 
 func (t *TEEK) sendOTPrecomputeComplete(pending *senderPrecompute, poolSize uint64) error {
@@ -830,6 +867,7 @@ func (t *TEEK) clearOTPool() {
 	state.resumePending = nil
 	t.publishOTReadyLocked(state)
 	state.mu.Unlock()
+	destroyIdleSenderPrecompute(pending)
 	signalSenderPrecompute(pending, fmt.Errorf("OT precomputation aborted while clearing pool"))
 	t.logger.Info("Cleared OT pool due to disconnect")
 }
@@ -848,6 +886,7 @@ func (t *TEEK) suspendOTPoolForReconnect() {
 		epoch := state.epoch
 		t.publishOTReadyLocked(state)
 		state.mu.Unlock()
+		destroyIdleSenderPrecompute(pending)
 		signalSenderPrecompute(pending, fmt.Errorf("OT precomputation interrupted by disconnect"))
 		t.logger.Info("Retained OT pool across disconnect for resume", zap.String("epoch", epoch))
 		return

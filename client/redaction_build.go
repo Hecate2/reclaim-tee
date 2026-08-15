@@ -28,10 +28,6 @@ func (c *Client) createRedactedRequest(httpRequest []byte) (shared.RedactedReque
 		zap.String("target_host", c.targetHost),
 		zap.Int("host_length", len(c.targetHost)))
 
-	c.logger.Debug("Complete HTTP request before redaction",
-		zap.String("request", string(httpRequest)),
-		zap.Int("total_length", len(httpRequest)))
-
 	ranges := c.requestRedactionRanges
 	if len(ranges) == 0 {
 		return shared.RedactedRequestData{}, shared.RedactionStreamsData{}, fmt.Errorf("no redaction ranges provided - library requires explicit redaction ranges")
@@ -57,26 +53,6 @@ func (c *Client) createRedactedRequest(httpRequest []byte) (shared.RedactedReque
 	}
 
 	redactedRequest := c.applyRedaction(httpRequest, ranges, streams)
-
-	prettyReq := append([]byte(nil), redactedRequest...)
-	for _, r := range ranges {
-		end := r.Start + r.Length
-		if r.Start < 0 || end > len(prettyReq) {
-			continue
-		}
-		for i := r.Start; i < end; i++ {
-			prettyReq[i] = '*'
-		}
-	}
-
-	c.logger.Debug("Non-sensitive parts (unchanged)")
-	lines := strings.SplitSeq(string(httpRequest), "\r\n")
-	for line := range lines {
-		if strings.HasPrefix(line, "GET ") || strings.HasPrefix(line, "Host: ") ||
-			strings.HasPrefix(line, "Connection: ") || line == "" {
-			c.logger.Debug("Non-sensitive line", zap.String("line", line))
-		}
-	}
 
 	c.logger.Info("Redaction summary",
 		zap.Int("original_length", len(httpRequest)),

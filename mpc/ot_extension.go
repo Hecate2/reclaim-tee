@@ -521,6 +521,26 @@ func clearExtensionSenderState(state *ExtensionSenderState) {
 	state.commitment = ExtensionCommitment{}
 }
 
+// Destroy clears an abandoned extension receiver state. It is idempotent and
+// makes the state unusable.
+func (state *ExtensionReceiverState) Destroy() {
+	if state == nil {
+		return
+	}
+	state.used = true
+	clearExtensionReceiverState(state)
+}
+
+// Destroy clears an abandoned extension sender state. It is idempotent and
+// makes the state unusable.
+func (state *ExtensionSenderState) Destroy() {
+	if state == nil {
+		return
+	}
+	state.used = true
+	clearExtensionSenderState(state)
+}
+
 func extensionPaddedCount(count int) (int, error) {
 	if count <= 0 || count > maxExtensionOTs {
 		return 0, fmt.Errorf("mpc: invalid OT extension count %d", count)

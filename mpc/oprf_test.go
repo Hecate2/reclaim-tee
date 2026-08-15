@@ -78,6 +78,10 @@ func TestOnlinePayloadRoundTripAndSize(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := mpc.MarshalOnlinePayload(decoded); err != nil {
+		t.Fatalf("evaluation changed caller-owned payload lifetime: %v", err)
+	}
+	decoded.Release()
 	trusted, err := mpc.VerifyOutput(garbler, result.OutputLabels)
 	if err != nil {
 		t.Fatal(err)

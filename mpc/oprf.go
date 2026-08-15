@@ -46,12 +46,23 @@ type OnlinePayload struct {
 // Release returns garbling scratch to the package pool. It is idempotent. The
 // payload must not be read after Release.
 func (p *OnlinePayload) Release() {
-	if p == nil || p.garbled == nil {
+	if p == nil {
 		return
 	}
-	p.garbled.release()
+	garbled := p.garbled
 	p.garbled = nil
+	p.Key = [16]byte{}
+	clear(p.Tables)
 	p.Tables = nil
+	clear(p.GarblerInputs)
+	p.GarblerInputs = nil
+	p.OutputTranslations = [OutputBits / 8]byte{}
+	// Tables aliases garbled scratch. Clear every public alias before returning
+	// that scratch to sync.Pool so another goroutine cannot reuse it while this
+	// release is still writing through the old slice.
+	if garbled != nil {
+		garbled.release()
+	}
 }
 
 // GarblerSession holds single-use state for corrections and output-label
@@ -77,6 +88,42 @@ type EvaluatorSession struct {
 	inputBits [InputBits]bool
 	ots       []ReceiverOT
 	evaluated bool
+}
+
+// Destroy clears an abandoned garbler session. It is idempotent and makes the
+// session unusable. Completed sessions are safe to destroy again.
+func (s *GarblerSession) Destroy() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	clear(s.evaluatorWires)
+	clear(s.otPads)
+	clear(s.outputWires)
+	s.evaluatorWires = nil
+	s.otPads = nil
+	s.outputWires = nil
+	s.corrected = true
+	s.verified = true
+}
+
+// Destroy clears an abandoned evaluator session. It is idempotent and makes
+// the session unusable. Completed sessions are safe to destroy again.
+func (s *EvaluatorSession) Destroy() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.payload != nil {
+		s.payload.Release()
+	}
+	s.payload = nil
+	clear(s.inputBits[:])
+	clear(s.ots)
+	s.ots = nil
+	s.evaluated = true
 }
 
 // OnlineResult is returned by the evaluator. The garbler must verify

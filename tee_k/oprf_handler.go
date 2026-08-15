@@ -132,6 +132,7 @@ func (t *TEEK) initiateOPRFForRange(sessionID string, teekState *TEEKSessionStat
 		return fmt.Errorf("failed to reserve OT entries: %w", err)
 	}
 	defer func() {
+		clear(otEntries)
 		if retErr == nil {
 			return
 		}
@@ -145,8 +146,10 @@ func (t *TEEK) initiateOPRFForRange(sessionID string, teekState *TEEKSessionStat
 	if err != nil {
 		return fmt.Errorf("failed to pad keystream: %w", err)
 	}
+	defer clear(paddedKeystream[:])
 
 	var garblerInput [80]byte
+	defer clear(garblerInput[:])
 	copy(garblerInput[:64], paddedKeystream[:])
 	copy(garblerInput[64:], keyShareSnapshot)
 
@@ -157,9 +160,16 @@ func (t *TEEK) initiateOPRFForRange(sessionID string, teekState *TEEKSessionStat
 		return fmt.Errorf("CMACGarblerOnline failed: %w", err)
 	}
 	defer payload.Release()
-
-	// Store garbler session for output verification later
-	teekState.SetGarblerOnlineSession(rangeIndex, garblerSession)
+	garblerSessionOwned := true
+	defer func() {
+		if garblerSessionOwned {
+			garblerSession.Destroy()
+			return
+		}
+		if retErr != nil && teekState.RemoveGarblerOnlineSession(rangeIndex, garblerSession) {
+			garblerSession.Destroy()
+		}
+	}()
 
 	// Compute TLS session hash for replay protection
 	tlsSessionHash, err := t.computeTLSSessionHash(sessionID)
@@ -171,6 +181,11 @@ func (t *TEEK) initiateOPRFForRange(sessionID string, teekState *TEEKSessionStat
 	if err != nil {
 		return fmt.Errorf("failed to serialize online payload: %w", err)
 	}
+
+	// Publish only after every local fallible preparation step. A failed send
+	// removes this exact session in the ownership defer above.
+	teekState.SetGarblerOnlineSession(rangeIndex, garblerSession)
+	garblerSessionOwned = false
 
 	t.logger.WithSession(sessionID).Debug("Sending OPRF online full",
 		zap.Int("range", rangeIndex),
@@ -215,7 +230,7 @@ func (t *TEEK) abandonOTReservation(state *TEEKSessionState, rangeIndex int, exp
 
 // handleOPRFChoiceCorrections applies c=d XOR b to the precomputed random OT
 // pads and returns masks that let TEE_T recover only its selected wire labels.
-func (t *TEEK) handleOPRFChoiceCorrections(identity *teekSessionIdentity, msg *teeproto.OPRFMPCRound2) error {
+func (t *TEEK) handleOPRFChoiceCorrections(identity *teekSessionIdentity, msg *teeproto.OPRFMPCRound2) (retErr error) {
 	if err := identity.ensureCurrent(); err != nil {
 		return err
 	}
@@ -238,6 +253,11 @@ func (t *TEEK) handleOPRFChoiceCorrections(identity *teekSessionIdentity, msg *t
 	if !ok {
 		return fmt.Errorf("no garbler session found for range %d", rangeIndex)
 	}
+	defer func() {
+		if retErr != nil && teekState.RemoveGarblerOnlineSession(rangeIndex, garblerSession) {
+			garblerSession.Destroy()
+		}
+	}()
 	if msg.GetOprfSessionId() != garblerSession.SessionID {
 		return fmt.Errorf("OPRF round 2 session mismatch for range %d", rangeIndex)
 	}
@@ -253,6 +273,7 @@ func (t *TEEK) handleOPRFChoiceCorrections(identity *teekSessionIdentity, msg *t
 	if err != nil {
 		return fmt.Errorf("failed to apply choice corrections: %w", err)
 	}
+	defer clear(masks)
 
 	serializedMasks, err := mpc.MarshalOTMasks(masks)
 	if err != nil {
@@ -290,10 +311,11 @@ func (t *TEEK) handleOPRFResult(identity *teekSessionIdentity, msg *teeproto.OPR
 	}
 
 	// MANDATORY: Verify output labels
-	garblerSession, ok := teekState.GetGarblerOnlineSession(rangeIndex)
+	garblerSession, ok := teekState.TakeGarblerOnlineSession(rangeIndex)
 	if !ok {
 		return fmt.Errorf("no garbler session found for range %d", rangeIndex)
 	}
+	defer garblerSession.Destroy()
 	if msg.GetOprfSessionId() != garblerSession.SessionID {
 		return fmt.Errorf("OPRF result session mismatch for range %d", rangeIndex)
 	}
@@ -303,6 +325,7 @@ func (t *TEEK) handleOPRFResult(identity *teekSessionIdentity, msg *teeproto.OPR
 	if err != nil {
 		return fmt.Errorf("failed to deserialize output labels: %w", err)
 	}
+	defer clear(outputLabels)
 
 	// Verify output labels AND derive CMAC bytes from them. We deliberately
 	// ignore msg.CmacOutput/msg.HashOutput — a compromised TEE_T could send

@@ -7,6 +7,34 @@ import (
 	"testing"
 )
 
+func TestPoolGrowthWipesAbandonedSecretBacking(t *testing.T) {
+	senderBacking := []SenderOT{{R0: Label{D0: 1}, R1: Label{D1: 2}, Index: 0}}
+	sender := &SenderPool{entries: senderBacking, baseIndex: 0, nextIndex: 0}
+	if err := sender.Add([]SenderOT{{R0: Label{D0: 3}, R1: Label{D1: 4}, Index: 1}}); err != nil {
+		t.Fatal(err)
+	}
+	if senderBacking[0] != (SenderOT{}) {
+		t.Fatal("sender pool growth left secrets in the old backing array")
+	}
+	if len(sender.entries) != 2 || sender.entries[0].Index != 0 || sender.entries[1].Index != 1 {
+		t.Fatal("sender pool growth changed committed entries")
+	}
+
+	receiverBacking := []ReceiverOT{{R: Label{D0: 5}, Index: 0, Choice: true}}
+	receiver := &ReceiverPool{
+		entries: receiverBacking, used: []bool{false}, baseIndex: 0, highWater: 0, availableCount: 1,
+	}
+	if err := receiver.Add([]ReceiverOT{{R: Label{D0: 6}, Index: 1}}); err != nil {
+		t.Fatal(err)
+	}
+	if receiverBacking[0] != (ReceiverOT{}) {
+		t.Fatal("receiver pool growth left secrets in the old backing array")
+	}
+	if len(receiver.entries) != 2 || receiver.entries[0].Index != 0 || receiver.entries[1].Index != 1 {
+		t.Fatal("receiver pool growth changed committed entries")
+	}
+}
+
 func TestPoolsConsumeCompactAndExtend(t *testing.T) {
 	const initial = OTPoolInitialSize
 	senderEntries := indexedSenderOTs(0, initial)
