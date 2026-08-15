@@ -2772,7 +2772,7 @@ func (x *OTPrecomputeRequest) GetEpoch() string {
 type OTResumeRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Epoch         string                 `protobuf:"bytes,1,opt,name=epoch,proto3" json:"epoch,omitempty"`                           // Pool synchronization token TEE_K is resuming
-	NextIndex     uint32                 `protobuf:"varint,2,opt,name=next_index,json=nextIndex,proto3" json:"next_index,omitempty"` // TEE_K's next unreserved pool index (consistency check)
+	NextIndex     uint64                 `protobuf:"varint,2,opt,name=next_index,json=nextIndex,proto3" json:"next_index,omitempty"` // TEE_K's next unreserved pool index (consistency check)
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2814,7 +2814,7 @@ func (x *OTResumeRequest) GetEpoch() string {
 	return ""
 }
 
-func (x *OTResumeRequest) GetNextIndex() uint32 {
+func (x *OTResumeRequest) GetNextIndex() uint64 {
 	if x != nil {
 		return x.NextIndex
 	}
@@ -2919,7 +2919,7 @@ func (x *OTPrecomputeResponse) GetOtReceiverData() []byte {
 
 type OTPrecomputeComplete struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	PoolSize      uint32                 `protobuf:"varint,1,opt,name=pool_size,json=poolSize,proto3" json:"pool_size,omitempty"` // Total OTs generated after committing this batch
+	PoolSize      uint64                 `protobuf:"varint,1,opt,name=pool_size,json=poolSize,proto3" json:"pool_size,omitempty"` // Total OTs generated after committing this batch
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2954,7 +2954,7 @@ func (*OTPrecomputeComplete) Descriptor() ([]byte, []int) {
 	return file_transport_proto_rawDescGZIP(), []int{37}
 }
 
-func (x *OTPrecomputeComplete) GetPoolSize() uint32 {
+func (x *OTPrecomputeComplete) GetPoolSize() uint64 {
 	if x != nil {
 		return x.PoolSize
 	}
@@ -2975,7 +2975,7 @@ type OPRFOnlineFull struct {
 	// Serialized circuit payload: tables, garbler labels, and one output
 	// translation bit per output wire.
 	GarbledTables []byte `protobuf:"bytes,7,opt,name=garbled_tables,json=garbledTables,proto3" json:"garbled_tables,omitempty"`
-	OtStartIndex  uint32 `protobuf:"varint,10,opt,name=ot_start_index,json=otStartIndex,proto3" json:"ot_start_index,omitempty"` // Starting index in precomputed OT pool
+	OtStartIndex  uint64 `protobuf:"varint,10,opt,name=ot_start_index,json=otStartIndex,proto3" json:"ot_start_index,omitempty"` // Starting index in precomputed OT pool
 	TotalRanges   int32  `protobuf:"varint,12,opt,name=total_ranges,json=totalRanges,proto3" json:"total_ranges,omitempty"`      // Total OPRF ranges this session; TEE_T's authoritative expected count
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -3060,7 +3060,7 @@ func (x *OPRFOnlineFull) GetGarbledTables() []byte {
 	return nil
 }
 
-func (x *OPRFOnlineFull) GetOtStartIndex() uint32 {
+func (x *OPRFOnlineFull) GetOtStartIndex() uint64 {
 	if x != nil {
 		return x.OtStartIndex
 	}
@@ -3947,14 +3947,14 @@ const file_transport_proto_rawDesc = "" +
 	"\x0fOTResumeRequest\x12\x14\n" +
 	"\x05epoch\x18\x01 \x01(\tR\x05epoch\x12\x1d\n" +
 	"\n" +
-	"next_index\x18\x02 \x01(\rR\tnextIndex\".\n" +
+	"next_index\x18\x02 \x01(\x04R\tnextIndex\".\n" +
 	"\x10OTResumeResponse\x12\x1a\n" +
 	"\baccepted\x18\x01 \x01(\bR\baccepted\"V\n" +
 	"\x14OTPrecomputeResponse\x12\x14\n" +
 	"\x05count\x18\x01 \x01(\rR\x05count\x12(\n" +
 	"\x10ot_receiver_data\x18\x02 \x01(\fR\x0eotReceiverData\"3\n" +
 	"\x14OTPrecomputeComplete\x12\x1b\n" +
-	"\tpool_size\x18\x01 \x01(\rR\bpoolSize\"\x8a\x03\n" +
+	"\tpool_size\x18\x01 \x01(\x04R\bpoolSize\"\x8a\x03\n" +
 	"\x0eOPRFOnlineFull\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12&\n" +
@@ -3967,7 +3967,7 @@ const file_transport_proto_rawDesc = "" +
 	"\x10tls_session_hash\x18\x06 \x01(\fR\x0etlsSessionHash\x12%\n" +
 	"\x0egarbled_tables\x18\a \x01(\fR\rgarbledTables\x12$\n" +
 	"\x0eot_start_index\x18\n" +
-	" \x01(\rR\fotStartIndex\x12!\n" +
+	" \x01(\x04R\fotStartIndex\x12!\n" +
 	"\ftotal_ranges\x18\f \x01(\x05R\vtotalRangesJ\x04\b\b\x10\tJ\x04\b\t\x10\n" +
 	"J\x04\b\v\x10\fR\x0egarbler_inputsR\foutput_hintsR\n" +
 	"dual_masks\"\xa6\x01\n" +

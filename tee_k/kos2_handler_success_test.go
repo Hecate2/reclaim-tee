@@ -275,7 +275,7 @@ func assertKOS2SenderPending(
 	if pending.controlConn != control || pending.controlGeneration != generation {
 		t.Fatal("sender pending control owner does not match current generation")
 	}
-	if state.pool.TotalCount() != wantPool || state.pool.Available() != wantPool || state.ready != wantReady {
+	if state.pool.TotalCount() != uint64(wantPool) || state.pool.Available() != wantPool || state.ready != wantReady {
 		t.Fatalf("sender pre-proof pool total=%d available=%d ready=%t", state.pool.TotalCount(), state.pool.Available(), state.ready)
 	}
 }

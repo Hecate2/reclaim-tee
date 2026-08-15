@@ -152,7 +152,7 @@ func TestOTReadyPublicationSerializesFinalReservationAndRefillCompletion(t *test
 		count: mpc.OTPoolExtendSize, startIndex: mpc.OTsPerOPRF,
 		done: make(chan error, 1), controlConn: sessionConn.controlConn,
 		controlGeneration: sessionConn.controlGeneration, extendClaim: claim,
-		sendComplete: func(uint32) error { return nil },
+		sendComplete: func(uint64) error { return nil },
 		beforeStateValidation: func() {
 			close(completionBeforeState)
 		},

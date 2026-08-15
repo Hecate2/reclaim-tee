@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"io"
+	"math"
 	"strings"
 	"testing"
 
@@ -56,6 +57,17 @@ func TestInitialOTEpochRandomFailureReturnsWithoutStateMutation(t *testing.T) {
 	}
 }
 
+func TestPrecomputeIdentityRejectsFrontierOverflowBeforeRandomness(t *testing.T) {
+	rng := &failAfterReader{remaining: 64}
+	_, _, err := newSenderPrecomputeIdentity(rng, math.MaxUint64, 1, false)
+	if err == nil || !strings.Contains(err.Error(), "overflows uint64") {
+		t.Fatalf("frontier overflow error=%v", err)
+	}
+	if rng.calls != 0 || rng.read != 0 {
+		t.Fatalf("overflowing frontier made %d RNG calls and read %d bytes", rng.calls, rng.read)
+	}
+}
+
 func TestMaximumKOS2CommitmentFitsWebSocketLimit(t *testing.T) {
 	payloadSize, err := mpc.PrecomputeCommitmentWireSize(mpc.MaxPrecomputeOTs)
 	if err != nil {
@@ -80,9 +92,11 @@ var errInjectedRandom = errors.New("injected random failure")
 type failAfterReader struct {
 	remaining int
 	read      int
+	calls     int
 }
 
 func (r *failAfterReader) Read(dst []byte) (int, error) {
+	r.calls++
 	if r.remaining == 0 {
 		return 0, errInjectedRandom
 	}

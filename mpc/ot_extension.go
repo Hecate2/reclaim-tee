@@ -135,6 +135,9 @@ func StartExtensionReceiver(
 	if err != nil {
 		return nil, nil, nil, err
 	}
+	if _, err := checkedIndexEnd(startIndex, count); err != nil {
+		return nil, nil, nil, err
+	}
 	byteRows := padded / 8
 
 	choices := make([]byte, byteRows)
@@ -326,6 +329,9 @@ func validateExtensionCommitment(epoch string, cipherMessage []byte, commitment 
 	if int(commitment.PaddedCount) != padded {
 		return fmt.Errorf("mpc: padded OT count %d, want %d", commitment.PaddedCount, padded)
 	}
+	if _, err := checkedIndexEnd(commitment.StartIndex, int(commitment.Count)); err != nil {
+		return err
+	}
 	wantU := BaseOTCount * padded / 8
 	if len(commitment.U) != wantU {
 		return fmt.Errorf("mpc: OT extension matrix length %d, want %d", len(commitment.U), wantU)
@@ -449,6 +455,9 @@ func repetitionColumnChecks(matrix []byte, padded int, chi []Label) (checks [Bas
 }
 
 func hashReceiverOTs(raw []Label, choices []byte, startIndex uint64, count int) ([]ReceiverOT, error) {
+	if _, err := checkedIndexEnd(startIndex, count); err != nil {
+		return nil, err
+	}
 	receiver := make([]ReceiverOT, count)
 	hasher, err := aes.NewCipher(tmmoKey[:])
 	if err != nil {
@@ -467,6 +476,9 @@ func hashReceiverOTs(raw []Label, choices []byte, startIndex uint64, count int) 
 
 func hashSenderOTs(state *ExtensionSenderState) ([]SenderOT, error) {
 	count := int(state.commitment.Count)
+	if _, err := checkedIndexEnd(state.commitment.StartIndex, count); err != nil {
+		return nil, err
+	}
 	sender := make([]SenderOT, count)
 	hasher, err := aes.NewCipher(tmmoKey[:])
 	if err != nil {

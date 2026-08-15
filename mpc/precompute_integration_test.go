@@ -189,7 +189,7 @@ func TestKOS2SevenFramePrimitiveAndProtobufExchange(t *testing.T) {
 	completeEnvelope := roundTripKOS2Envelope(t, &teeproto.Envelope{
 		SessionId: controlSession,
 		Payload: &teeproto.Envelope_OtPrecomputeComplete{OtPrecomputeComplete: &teeproto.OTPrecomputeComplete{
-			PoolSize: uint32(kPool.TotalCount() + len(pendingSender)),
+			PoolSize: kPool.TotalCount() + uint64(len(pendingSender)),
 		}},
 	}, &phases)
 
@@ -203,8 +203,8 @@ func TestKOS2SevenFramePrimitiveAndProtobufExchange(t *testing.T) {
 	if completeEnvelope.GetSessionId() != controlSession || completeEnvelope.GetOtPrecomputeComplete() == nil {
 		t.Fatal("invalid OTPrecomputeComplete envelope")
 	}
-	if got := completeEnvelope.GetOtPrecomputeComplete().GetPoolSize(); got != uint32(tPool.TotalCount()+len(pendingReceiver)) {
-		t.Fatalf("complete pool size=%d, want %d", got, tPool.TotalCount()+len(pendingReceiver))
+	if got := completeEnvelope.GetOtPrecomputeComplete().GetPoolSize(); got != tPool.TotalCount()+uint64(len(pendingReceiver)) {
+		t.Fatalf("complete pool size=%d, want %d", got, tPool.TotalCount()+uint64(len(pendingReceiver)))
 	}
 	if err := tPool.Add(pendingReceiver); err != nil {
 		t.Fatal(err)
@@ -303,7 +303,7 @@ func requireKOS2ResponseMetadata(t *testing.T, envelope *teeproto.Envelope, coun
 
 func assertKOS2Pools(t *testing.T, kPool *SenderPool, tPool *ReceiverPool, kReady, tReady bool, want int) {
 	t.Helper()
-	if kPool.TotalCount() != want || kPool.Available() != want || tPool.TotalCount() != want || tPool.Available() != want {
+	if kPool.TotalCount() != uint64(want) || kPool.Available() != want || tPool.TotalCount() != uint64(want) || tPool.Available() != want {
 		t.Fatalf("pool counts K=(%d,%d) T=(%d,%d), want totals and available %d", kPool.TotalCount(), kPool.Available(), tPool.TotalCount(), tPool.Available(), want)
 	}
 	if kReady != (want > 0) || tReady != (want > 0) {

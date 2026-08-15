@@ -324,6 +324,9 @@ func VerifyOutput(session *GarblerSession, labels []Label) ([16]byte, error) {
 }
 
 func validateSenderOTIndices(ots []SenderOT, start uint64) error {
+	if _, err := checkedIndexEnd(start, len(ots)); err != nil {
+		return err
+	}
 	for i := range ots {
 		if ots[i].Index != start+uint64(i) {
 			return fmt.Errorf("mpc: sender OT index %d: got %d want %d", i, ots[i].Index, start+uint64(i))
@@ -333,6 +336,9 @@ func validateSenderOTIndices(ots []SenderOT, start uint64) error {
 }
 
 func validateReceiverOTIndices(ots []ReceiverOT, start uint64) error {
+	if _, err := checkedIndexEnd(start, len(ots)); err != nil {
+		return err
+	}
 	for i := range ots {
 		if ots[i].Index != start+uint64(i) {
 			return fmt.Errorf("mpc: receiver OT index %d: got %d want %d", i, ots[i].Index, start+uint64(i))

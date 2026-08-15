@@ -188,6 +188,37 @@ The protocol uses these existing messages from `proto/transport.proto`:
 
 Fields 8, 9, and 11 of `OPRFOnlineFull` remain reserved. They previously carried unsafe or obsolete values.
 
+### Cumulative OT index compatibility
+
+`OTResumeRequest.next_index`, `OTPrecomputeComplete.pool_size`, and
+`OPRFOnlineFull.ot_start_index` are cumulative `uint64` frontiers. The field
+numbers and protobuf varint wire type did not change. Values through
+`MaxUint32` therefore have exactly the same bytes as the previous `uint32`
+fields. Values above that boundary use at most five additional varint bytes.
+
+This migration does not change client messages or client APIs. Per-batch OT
+counts remain `uint32`, and production batches remain limited to 1 through
+100,000 OTs. Only the cumulative lifetime of a retained TEE_K/TEE_T pool
+changes.
+
+Go source compatibility is narrower than wire compatibility. The exported
+`mpc.SenderPool.TotalCount` and `mpc.ReceiverPool.TotalCount` return types, and
+the generated Go types for the three internal protobuf fields, change to
+`uint64`. The repository's current clients do not use these APIs and remain
+unchanged. Direct external Go consumers of those MPC or internal protobuf types
+must update any `int` or `uint32` assignments and recompile.
+
+Deploy TEE_T first and then TEE_K. Mixed versions are wire-compatible while
+the cumulative frontier is at most `MaxUint32`. Above that boundary, an old
+peer truncates the new value and fails the existing pool-total, resume, or
+duplicated MPC1/protobuf index checks; it cannot silently reuse wrapped OTs.
+After a pool crosses the boundary, rollback must not retain or resume that pool.
+The required recovery is a forced control reconnect followed by a successful
+full initial precompute, which resets both pools before online work resumes.
+Restarting the TEE_K/TEE_T pair is the conservative operational procedure that
+guarantees this reset, but a VM/process restart is not an implementation
+requirement when the forced reconnect and full reset complete successfully.
+
 ## Replay and failure handling
 
 TEE_K creates a random OPRF session identifier for each circuit. Every online message carries it and the range index.

@@ -39,7 +39,7 @@ func TestSupersededCompleteResultCannotAbortReplacementPrecompute(t *testing.T) 
 				startIndex: 1, done: make(chan error, 1),
 				controlConn: control, controlGeneration: generation,
 				extendClaim: oldClaim,
-				sendComplete: func(uint32) error {
+				sendComplete: func(uint64) error {
 					close(paused)
 					<-resume
 					return test.sendErr
@@ -70,7 +70,7 @@ func TestSupersededCompleteResultCannotAbortReplacementPrecompute(t *testing.T) 
 				startIndex: 1, done: make(chan error, 1),
 				controlConn: control, controlGeneration: generation,
 				extendClaim:  replacementClaim,
-				sendComplete: func(uint32) error { return nil },
+				sendComplete: func(uint64) error { return nil },
 			}
 			state.pending = replacement
 			state.mu.Unlock()

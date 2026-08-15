@@ -24,6 +24,9 @@ func MarshalExtensionCommitment(commitment *ExtensionCommitment) ([]byte, error)
 	if int(commitment.PaddedCount) != padded {
 		return nil, fmt.Errorf("mpc: padded OT count %d, want %d", commitment.PaddedCount, padded)
 	}
+	if _, err := checkedIndexEnd(commitment.StartIndex, int(commitment.Count)); err != nil {
+		return nil, err
+	}
 	wantU := BaseOTCount * padded / 8
 	if len(commitment.U) != wantU {
 		return nil, fmt.Errorf("mpc: OT extension matrix length %d, want %d", len(commitment.U), wantU)
@@ -57,12 +60,16 @@ func UnmarshalExtensionCommitment(data []byte) (*ExtensionCommitment, error) {
 	if encodedPadded != padded {
 		return nil, fmt.Errorf("mpc: padded OT count %d, want %d", encodedPadded, padded)
 	}
+	startIndex := binary.BigEndian.Uint64(data[36:44])
+	if _, err := checkedIndexEnd(startIndex, count); err != nil {
+		return nil, err
+	}
 	wantLen := uint64(extensionCommitmentHeaderSize) + uint64(BaseOTCount)*uint64(padded)/8
 	if uint64(len(data)) != wantLen {
 		return nil, fmt.Errorf("mpc: OT extension commitment length %d, want %d", len(data), wantLen)
 	}
 	commitment := &ExtensionCommitment{
-		StartIndex: uint64(binary.BigEndian.Uint64(data[36:44])), Count: uint32(count),
+		StartIndex: startIndex, Count: uint32(count),
 		PaddedCount: uint32(padded), U: append([]byte(nil), data[116:]...),
 	}
 	copy(commitment.SessionID[:], data[4:36])

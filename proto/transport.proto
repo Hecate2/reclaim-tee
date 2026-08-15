@@ -295,7 +295,7 @@ message OTPrecomputeRequest {
 // reconnect and asks TEE_T to keep using it instead of re-precomputing.
 message OTResumeRequest {
   string epoch = 1;           // Pool synchronization token TEE_K is resuming
-  uint32 next_index = 2;      // TEE_K's next unreserved pool index (consistency check)
+  uint64 next_index = 2;      // TEE_K's next unreserved pool index (consistency check)
 }
 
 message OTResumeResponse {
@@ -308,7 +308,7 @@ message OTPrecomputeResponse {
 }
 
 message OTPrecomputeComplete {
-  uint32 pool_size = 1;       // Total OTs generated after committing this batch
+  uint64 pool_size = 1;       // Total OTs generated after committing this batch
 }
 
 // Online round 1: the garbler sends the circuit before it knows the receiver's
@@ -328,7 +328,7 @@ message OPRFOnlineFull {
   reserved 8, 9, 11;
   reserved "garbler_inputs", "output_hints", "dual_masks";
 
-  uint32 ot_start_index = 10;    // Starting index in precomputed OT pool
+  uint64 ot_start_index = 10;    // Starting index in precomputed OT pool
   int32 total_ranges = 12;       // Total OPRF ranges this session; TEE_T's authoritative expected count
 }
 

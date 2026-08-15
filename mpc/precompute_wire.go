@@ -85,6 +85,9 @@ func MarshalPrecomputeBegin(begin PrecomputeBegin) ([]byte, error) {
 	if _, err := extensionPaddedCount(int(begin.Count)); err != nil {
 		return nil, err
 	}
+	if _, err := checkedIndexEnd(begin.StartIndex, int(begin.Count)); err != nil {
+		return nil, err
+	}
 	if err := validateExtensionEpoch(begin.Epoch); err != nil {
 		return nil, err
 	}
@@ -115,6 +118,9 @@ func UnmarshalPrecomputeBegin(data []byte) (PrecomputeBegin, error) {
 		return PrecomputeBegin{}, err
 	}
 	if _, err := extensionPaddedCount(int(begin.Count)); err != nil {
+		return PrecomputeBegin{}, err
+	}
+	if _, err := checkedIndexEnd(begin.StartIndex, int(begin.Count)); err != nil {
 		return PrecomputeBegin{}, err
 	}
 	return begin, nil
@@ -207,6 +213,9 @@ func UnmarshalPrecomputeCommitment(data []byte) ([]byte, *ExtensionCommitment, e
 // IKNP matrix. Production handlers use this entry point for untrusted frames.
 func UnmarshalPrecomputeCommitmentFor(data []byte, expected PrecomputeBegin) ([]byte, *ExtensionCommitment, error) {
 	if err := ValidatePrecomputeCount(int(expected.Count)); err != nil {
+		return nil, nil, err
+	}
+	if _, err := checkedIndexEnd(expected.StartIndex, int(expected.Count)); err != nil {
 		return nil, nil, err
 	}
 	wantLen, err := PrecomputeCommitmentWireSize(int(expected.Count))

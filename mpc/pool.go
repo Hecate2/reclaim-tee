@@ -45,15 +45,46 @@ func NewSenderPool(capacity int) *SenderPool {
 	return &SenderPool{entries: make([]SenderOT, 0, capacity)}
 }
 
+func (p *SenderPool) totalLocked() (uint64, error) {
+	total, err := checkedIndexEnd(p.baseIndex, len(p.entries))
+	if err != nil || p.nextIndex < p.baseIndex || p.nextIndex > total {
+		return 0, errors.New("mpc: invalid sender pool frontier")
+	}
+	return total, nil
+}
+
 // Add appends a verified extension batch. Indices must continue the pool.
 func (p *SenderPool) Add(entries []SenderOT) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	start := p.baseIndex + uint64(len(p.entries))
-	if err := validateSenderOTIndices(entries, start); err != nil {
+	if err := p.validateAddLocked(entries); err != nil {
 		return err
 	}
 	p.entries = append(p.entries, entries...)
+	return nil
+}
+
+// ValidateAdd checks that entries can be appended at the exact cumulative
+// frontier without changing the pool. Protocol handlers use it before sending
+// an irreversible completion acknowledgment; Add repeats the same validation
+// when the batch is committed locally.
+func (p *SenderPool) ValidateAdd(entries []SenderOT) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.validateAddLocked(entries)
+}
+
+func (p *SenderPool) validateAddLocked(entries []SenderOT) error {
+	start, err := p.totalLocked()
+	if err != nil {
+		return err
+	}
+	if _, err := checkedIndexEnd(start, len(entries)); err != nil {
+		return err
+	}
+	if err := validateSenderOTIndices(entries, start); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -67,15 +98,21 @@ func (p *SenderPool) Reserve(count int) (uint64, []SenderOT, error) {
 	if p.nextIndex < p.baseIndex {
 		return 0, nil, errors.New("mpc: invalid sender pool index state")
 	}
-	end := p.nextIndex + uint64(count)
-	total := p.baseIndex + uint64(len(p.entries))
-	if end < p.nextIndex || end > total {
+	total, err := p.totalLocked()
+	if err != nil {
+		return 0, nil, err
+	}
+	end, err := checkedIndexEnd(p.nextIndex, count)
+	if err != nil {
+		return 0, nil, err
+	}
+	if end > total {
 		return 0, nil, fmt.Errorf("mpc: insufficient sender OTs: need %d, available %d", count, total-p.nextIndex)
 	}
 	start := p.nextIndex
-	offset := start - p.baseIndex
-	result := append([]SenderOT(nil), p.entries[offset:offset+uint64(count)]...)
-	clear(p.entries[offset : offset+uint64(count)])
+	offset := int(start - p.baseIndex)
+	result := append([]SenderOT(nil), p.entries[offset:offset+count]...)
+	clear(p.entries[offset : offset+count])
 	p.nextIndex = end
 	p.compactConsumed()
 	return start, result, nil
@@ -111,13 +148,21 @@ func (p *SenderPool) clearLocked() {
 func (p *SenderPool) Available() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return int(p.baseIndex + uint64(len(p.entries)) - p.nextIndex)
+	total, err := p.totalLocked()
+	if err != nil {
+		return 0
+	}
+	return int(total - p.nextIndex)
 }
 
-func (p *SenderPool) TotalCount() int {
+func (p *SenderPool) TotalCount() uint64 {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return int(p.baseIndex + uint64(len(p.entries)))
+	total, err := p.totalLocked()
+	if err != nil {
+		return 0
+	}
+	return total
 }
 
 func (p *SenderPool) NextIndex() uint64 {
@@ -129,7 +174,11 @@ func (p *SenderPool) NextIndex() uint64 {
 func (p *SenderPool) NeedsExtend() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return int(p.baseIndex+uint64(len(p.entries))-p.nextIndex) < OTPoolWatermark && p.extendClaim == nil
+	total, err := p.totalLocked()
+	if err != nil {
+		return false
+	}
+	return int(total-p.nextIndex) < OTPoolWatermark && p.extendClaim == nil
 }
 
 // ClaimExtendIfNeeded atomically claims ownership of the next low-watermark
@@ -138,7 +187,11 @@ func (p *SenderPool) NeedsExtend() bool {
 func (p *SenderPool) ClaimExtendIfNeeded() *SenderExtendClaim {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	available := int(p.baseIndex + uint64(len(p.entries)) - p.nextIndex)
+	total, err := p.totalLocked()
+	if err != nil {
+		return nil
+	}
+	available := int(total - p.nextIndex)
 	if available >= OTPoolWatermark || p.extendClaim != nil {
 		return nil
 	}
@@ -184,7 +237,8 @@ func (p *SenderPool) compactConsumed() {
 	if consumed < OTPoolWatermark && consumed < uint64(len(p.entries))/2 {
 		return
 	}
-	remaining := copy(p.entries, p.entries[consumed:])
+	consumedCount := int(consumed)
+	remaining := copy(p.entries, p.entries[consumedCount:])
 	clear(p.entries[remaining:])
 	p.entries = p.entries[:remaining]
 	p.baseIndex = p.nextIndex
@@ -206,10 +260,24 @@ func NewReceiverPool(capacity int) *ReceiverPool {
 	return &ReceiverPool{entries: make([]ReceiverOT, 0, capacity)}
 }
 
+func (p *ReceiverPool) totalLocked() (uint64, error) {
+	total, err := checkedIndexEnd(p.baseIndex, len(p.entries))
+	if err != nil || len(p.used) != len(p.entries) || p.availableCount < 0 || p.availableCount > len(p.entries) || p.highWater < p.baseIndex || p.highWater > total {
+		return 0, errors.New("mpc: invalid receiver pool frontier")
+	}
+	return total, nil
+}
+
 func (p *ReceiverPool) Add(entries []ReceiverOT) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	start := p.baseIndex + uint64(len(p.entries))
+	start, err := p.totalLocked()
+	if err != nil {
+		return err
+	}
+	if _, err := checkedIndexEnd(start, len(entries)); err != nil {
+		return err
+	}
 	if err := validateReceiverOTIndices(entries, start); err != nil {
 		return err
 	}
@@ -227,13 +295,13 @@ func (p *ReceiverPool) Consume(start uint64, count int) ([]ReceiverOT, error) {
 	if err := p.validateConsumableLocked(start, count); err != nil {
 		return nil, err
 	}
-	end := start + uint64(count)
-	offset := start - p.baseIndex
-	result := append([]ReceiverOT(nil), p.entries[offset:offset+uint64(count)]...)
-	for i := offset; i < offset+uint64(count); i++ {
+	end, _ := checkedIndexEnd(start, count)
+	offset := int(start - p.baseIndex)
+	result := append([]ReceiverOT(nil), p.entries[offset:offset+count]...)
+	for i := offset; i < offset+count; i++ {
 		p.used[i] = true
 	}
-	clear(p.entries[offset : offset+uint64(count)])
+	clear(p.entries[offset : offset+count])
 	p.availableCount -= count
 	if end > p.highWater {
 		p.highWater = end
@@ -259,15 +327,21 @@ func (p *ReceiverPool) validateConsumableLocked(start uint64, count int) error {
 	if start < p.baseIndex {
 		return fmt.Errorf("mpc: receiver OT range starts before retained index %d", p.baseIndex)
 	}
-	end := start + uint64(count)
-	total := p.baseIndex + uint64(len(p.entries))
-	if end < start || end > total {
+	total, err := p.totalLocked()
+	if err != nil {
+		return err
+	}
+	end, err := checkedIndexEnd(start, count)
+	if err != nil || end > total {
+		if err != nil {
+			return err
+		}
 		return fmt.Errorf("mpc: insufficient receiver OTs: need through %d, total %d", end, total)
 	}
-	offset := start - p.baseIndex
-	for i := offset; i < offset+uint64(count); i++ {
+	offset := int(start - p.baseIndex)
+	for i := offset; i < offset+count; i++ {
 		if p.used[i] {
-			return fmt.Errorf("mpc: receiver OT index %d already used", p.baseIndex+i)
+			return fmt.Errorf("mpc: receiver OT index %d already used", start+uint64(i-offset))
 		}
 	}
 	return nil
@@ -278,12 +352,15 @@ func (p *ReceiverPool) validateConsumableLocked(start uint64, count int) error {
 func (p *ReceiverPool) AdvanceTo(next uint64) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	total := p.baseIndex + uint64(len(p.entries))
+	total, err := p.totalLocked()
+	if err != nil {
+		return err
+	}
 	if next < p.highWater || next > total {
 		return fmt.Errorf("mpc: receiver OT resume index %d outside [%d,%d]", next, p.highWater, total)
 	}
-	end := next - p.baseIndex
-	for i := uint64(0); i < end; i++ {
+	end := int(next - p.baseIndex)
+	for i := 0; i < end; i++ {
 		if !p.used[i] {
 			p.used[i] = true
 			p.availableCount--
@@ -310,13 +387,20 @@ func (p *ReceiverPool) Clear() {
 func (p *ReceiverPool) Available() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if _, err := p.totalLocked(); err != nil {
+		return 0
+	}
 	return p.availableCount
 }
 
-func (p *ReceiverPool) TotalCount() int {
+func (p *ReceiverPool) TotalCount() uint64 {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return int(p.baseIndex + uint64(len(p.entries)))
+	total, err := p.totalLocked()
+	if err != nil {
+		return 0
+	}
+	return total
 }
 
 func (p *ReceiverPool) NextIndex() uint64 {

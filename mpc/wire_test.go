@@ -3,6 +3,7 @@ package mpc
 import (
 	"crypto/rand"
 	"encoding/binary"
+	"math"
 	"strings"
 	"testing"
 )
@@ -66,6 +67,111 @@ func TestOnlineWireCodecs(t *testing.T) {
 		}
 	}
 	assertRejectsBadCountAndLength(t, labelData, UnmarshalOutputLabels)
+}
+
+func TestHighOTStartsRemainOpaqueOnExistingBinaryFrames(t *testing.T) {
+	epoch := testEpoch(t)
+	var session [32]byte
+	session[0] = 1
+	start := uint64(math.MaxUint32 + 1)
+
+	begin := PrecomputeBegin{SessionID: session, StartIndex: start, Count: InputBits, Epoch: epoch}
+	beginFrame, err := MarshalPrecomputeBegin(begin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decodedBegin, err := UnmarshalPrecomputeBegin(beginFrame)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decodedBegin.StartIndex != start || string(beginFrame[:4]) != "KOB2" {
+		t.Fatalf("KOB2 start=%d magic=%q", decodedBegin.StartIndex, beginFrame[:4])
+	}
+
+	padded, err := extensionPaddedCount(InputBits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	commitment := &ExtensionCommitment{
+		SessionID: session, StartIndex: start, Count: InputBits, PaddedCount: uint32(padded),
+		U: make([]byte, BaseOTCount*padded/8),
+	}
+	commitmentFrame, err := MarshalExtensionCommitment(commitment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decodedCommitment, err := UnmarshalExtensionCommitment(commitmentFrame)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decodedCommitment.StartIndex != start || string(commitmentFrame[:4]) != "KOC2" {
+		t.Fatalf("KOC2 start=%d magic=%q", decodedCommitment.StartIndex, commitmentFrame[:4])
+	}
+
+	engine, err := defaultEngine()
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := &OnlinePayload{
+		OTStartIndex: start, Tables: make([]Label, engine.tableCount), GarblerInputs: make([]Label, InputBits),
+	}
+	payloadFrame, err := MarshalOnlinePayload(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decodedPayload, err := UnmarshalOnlinePayload(payloadFrame)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decodedPayload.OTStartIndex != start || string(payloadFrame[:4]) != "MPC1" {
+		t.Fatalf("MPC1 start=%d magic=%q", decodedPayload.OTStartIndex, payloadFrame[:4])
+	}
+}
+
+func TestPrecomputeFramesRejectUint64FrontierOverflow(t *testing.T) {
+	epoch := testEpoch(t)
+	count := uint32(InputBits)
+	lastValid := uint64(math.MaxUint64) - uint64(count)
+	begin := PrecomputeBegin{StartIndex: lastValid, Count: count, Epoch: epoch}
+	frame, err := MarshalPrecomputeBegin(begin)
+	if err != nil {
+		t.Fatalf("exact-end KOB2: %v", err)
+	}
+	if _, err := UnmarshalPrecomputeBegin(frame); err != nil {
+		t.Fatalf("decode exact-end KOB2: %v", err)
+	}
+
+	begin.StartIndex++
+	if _, err := MarshalPrecomputeBegin(begin); err == nil {
+		t.Fatal("marshaled overflowing KOB2")
+	}
+	binary.BigEndian.PutUint64(frame[36:44], begin.StartIndex)
+	if _, err := UnmarshalPrecomputeBegin(frame); err == nil {
+		t.Fatal("unmarshaled overflowing KOB2")
+	}
+
+	padded, err := extensionPaddedCount(int(count))
+	if err != nil {
+		t.Fatal(err)
+	}
+	commitment := &ExtensionCommitment{
+		StartIndex: lastValid, Count: count, PaddedCount: uint32(padded), U: make([]byte, BaseOTCount*padded/8),
+	}
+	commitmentFrame, err := MarshalExtensionCommitment(commitment)
+	if err != nil {
+		t.Fatalf("exact-end KOC2: %v", err)
+	}
+	if _, err := UnmarshalExtensionCommitment(commitmentFrame); err != nil {
+		t.Fatalf("decode exact-end KOC2: %v", err)
+	}
+	commitment.StartIndex++
+	if _, err := MarshalExtensionCommitment(commitment); err == nil {
+		t.Fatal("marshaled overflowing KOC2")
+	}
+	binary.BigEndian.PutUint64(commitmentFrame[36:44], commitment.StartIndex)
+	if _, err := UnmarshalExtensionCommitment(commitmentFrame); err == nil {
+		t.Fatal("unmarshaled overflowing KOC2")
+	}
 }
 
 func TestPrecomputeWireFraming(t *testing.T) {

@@ -118,7 +118,7 @@ func (t *TEET) handleOPRFOnlineFull(identity *teetSessionIdentity, msg *teeproto
 	if payload.SessionID != msg.GetOprfSessionId() {
 		return fmt.Errorf("OPRF round 1 session mismatch for range %d", rangeIndex)
 	}
-	if payload.OTStartIndex != uint64(msg.GetOtStartIndex()) {
+	if payload.OTStartIndex != msg.GetOtStartIndex() {
 		return fmt.Errorf("OPRF OT start index mismatch: payload=%d message=%d",
 			payload.OTStartIndex, msg.GetOtStartIndex())
 	}
@@ -127,7 +127,7 @@ func (t *TEET) handleOPRFOnlineFull(identity *teetSessionIdentity, msg *teeproto
 
 	// Consume the single-use OTs only after the complete payload and its
 	// duplicated metadata pass validation.
-	otEntries, err := t.consumeOTReceiverEntriesForIdentity(identity, session.Context, uint64(msg.OtStartIndex), mpc.OTsPerOPRF, waitForReceiverPrecompute)
+	otEntries, err := t.consumeOTReceiverEntriesForIdentity(identity, session.Context, msg.OtStartIndex, mpc.OTsPerOPRF, waitForReceiverPrecompute)
 	if err != nil {
 		return fmt.Errorf("failed to consume OT entries: %w", err)
 	}

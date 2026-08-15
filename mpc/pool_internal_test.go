@@ -1,6 +1,7 @@
 package mpc
 
 import (
+	"math"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -62,6 +63,119 @@ func TestPoolsConsumeCompactAndExtend(t *testing.T) {
 	if sender.TotalCount() != 0 || receiver.TotalCount() != 0 || sender.NextIndex() != 0 || receiver.NextIndex() != 0 {
 		t.Fatal("clear did not reset pool indices")
 	}
+}
+
+func TestSenderPoolHighFrontierExactEndAndOverflowAreAtomic(t *testing.T) {
+	base := uint64(math.MaxUint64 - 3)
+	entries := indexedSenderOTs(base, 3)
+	pool := &SenderPool{entries: entries, baseIndex: base, nextIndex: base}
+
+	if got := pool.TotalCount(); got != math.MaxUint64 {
+		t.Fatalf("total=%d, want %d", got, uint64(math.MaxUint64))
+	}
+	start, reserved, err := pool.Reserve(3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if start != base || len(reserved) != 3 || pool.NextIndex() != math.MaxUint64 || pool.TotalCount() != math.MaxUint64 {
+		t.Fatalf("exact-end reserve start=%d len=%d next=%d total=%d", start, len(reserved), pool.NextIndex(), pool.TotalCount())
+	}
+
+	beforeBase, beforeNext, beforeLen := pool.baseIndex, pool.nextIndex, len(pool.entries)
+	if _, _, err := pool.Reserve(1); err == nil {
+		t.Fatal("reserved past the exhausted uint64 frontier")
+	}
+	if pool.baseIndex != beforeBase || pool.nextIndex != beforeNext || len(pool.entries) != beforeLen {
+		t.Fatal("overflowing reserve mutated sender pool")
+	}
+	if err := pool.Add([]SenderOT{{Index: math.MaxUint64}}); err == nil {
+		t.Fatal("appended an OT at the exhausted uint64 frontier")
+	}
+	if pool.baseIndex != beforeBase || pool.nextIndex != beforeNext || len(pool.entries) != beforeLen {
+		t.Fatal("overflowing append mutated sender pool")
+	}
+}
+
+func TestReceiverPoolHighFrontierExactEndAndOverflowAreAtomic(t *testing.T) {
+	base := uint64(math.MaxUint64 - 3)
+	entries := indexedReceiverOTs(base, 3)
+	pool := &ReceiverPool{
+		entries: entries, used: make([]bool, len(entries)), baseIndex: base,
+		highWater: base, availableCount: len(entries),
+	}
+
+	if got := pool.TotalCount(); got != math.MaxUint64 {
+		t.Fatalf("total=%d, want %d", got, uint64(math.MaxUint64))
+	}
+	consumed, err := pool.Consume(base, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(consumed) != 3 || pool.NextIndex() != math.MaxUint64 || pool.TotalCount() != math.MaxUint64 || pool.Available() != 0 {
+		t.Fatalf("exact-end consume len=%d next=%d total=%d available=%d", len(consumed), pool.NextIndex(), pool.TotalCount(), pool.Available())
+	}
+
+	beforeBase, beforeHigh, beforeLen := pool.baseIndex, pool.highWater, len(pool.entries)
+	if _, err := pool.Consume(math.MaxUint64, 1); err == nil {
+		t.Fatal("consumed past the exhausted uint64 frontier")
+	}
+	if pool.baseIndex != beforeBase || pool.highWater != beforeHigh || len(pool.entries) != beforeLen || pool.Available() != 0 {
+		t.Fatal("overflowing consume mutated receiver pool")
+	}
+	if err := pool.Add([]ReceiverOT{{Index: math.MaxUint64}}); err == nil {
+		t.Fatal("appended an OT at the exhausted uint64 frontier")
+	}
+	if pool.baseIndex != beforeBase || pool.highWater != beforeHigh || len(pool.entries) != beforeLen || pool.Available() != 0 {
+		t.Fatal("overflowing append mutated receiver pool")
+	}
+}
+
+func TestPoolInvariantViolationsFailClosedWithoutMutation(t *testing.T) {
+	sender := &SenderPool{entries: indexedSenderOTs(10, 1), baseIndex: 10, nextIndex: 9}
+	if err := sender.Add([]SenderOT{{Index: 11}}); err == nil {
+		t.Fatal("sender append accepted next index below base")
+	}
+	if _, _, err := sender.Reserve(1); err == nil {
+		t.Fatal("sender reserve accepted next index below base")
+	}
+	if len(sender.entries) != 1 || sender.baseIndex != 10 || sender.nextIndex != 9 {
+		t.Fatal("invalid sender state was mutated")
+	}
+
+	receiver := &ReceiverPool{
+		entries: indexedReceiverOTs(10, 1), baseIndex: 10, highWater: 10, availableCount: 1,
+	}
+	if err := receiver.Add([]ReceiverOT{{Index: 11}}); err == nil {
+		t.Fatal("receiver append accepted mismatched entry/used slices")
+	}
+	if _, err := receiver.Consume(10, 1); err == nil {
+		t.Fatal("receiver consume accepted mismatched entry/used slices")
+	}
+	if err := receiver.AdvanceTo(10); err == nil {
+		t.Fatal("receiver resume accepted mismatched entry/used slices")
+	}
+	if len(receiver.entries) != 1 || len(receiver.used) != 0 || receiver.baseIndex != 10 || receiver.highWater != 10 || receiver.availableCount != 1 {
+		t.Fatal("invalid receiver state was mutated")
+	}
+}
+
+func FuzzCheckedOTIndexEnd(f *testing.F) {
+	f.Add(uint64(0), uint32(1))
+	f.Add(uint64(math.MaxUint32), uint32(100_000))
+	f.Add(uint64(math.MaxUint64), uint32(1))
+	f.Fuzz(func(t *testing.T, start uint64, count uint32) {
+		end, err := CheckedOTIndexEnd(start, int(count))
+		fits := uint64(count) <= math.MaxUint64-start
+		if fits {
+			if err != nil || end < start || end-start != uint64(count) {
+				t.Fatalf("start=%d count=%d end=%d err=%v", start, count, end, err)
+			}
+			return
+		}
+		if err == nil {
+			t.Fatalf("accepted overflowing start=%d count=%d end=%d", start, count, end)
+		}
+	})
 }
 
 func TestPoolRejectsReplayOverlapAndInvalidAppend(t *testing.T) {

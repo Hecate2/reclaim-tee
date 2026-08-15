@@ -480,8 +480,8 @@ func TestConsumeOTReceiverEntriesRejectsRangeOverflowWithoutWaiting(t *testing.T
 		t.Fatal("overflowing range entered pending barrier")
 		return nil
 	})
-	if err == nil || !strings.Contains(err.Error(), "insufficient receiver OTs") {
-		t.Fatalf("error = %v, want insufficient receiver OTs", err)
+	if err == nil || !strings.Contains(err.Error(), "overflows uint64") {
+		t.Fatalf("error = %v, want uint64 overflow", err)
 	}
 }
 

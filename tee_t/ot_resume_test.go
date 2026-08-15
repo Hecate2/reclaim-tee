@@ -27,7 +27,7 @@ func TestResumeOTPool(t *testing.T) {
 		name      string
 		state     *OTReceiverState
 		reqEpoch  string
-		nextIndex uint32
+		nextIndex uint64
 		want      bool
 	}{
 		{

@@ -336,7 +336,7 @@ func assertKOS2ReceiverPending(
 	if state.pending.controlGeneration != generation {
 		t.Fatalf("receiver pending generation=%d, want owner generation %d", state.pending.controlGeneration, generation)
 	}
-	if state.pool.TotalCount() != wantPool || state.pool.Available() != wantPool || state.ready != wantReady {
+	if state.pool.TotalCount() != uint64(wantPool) || state.pool.Available() != wantPool || state.ready != wantReady {
 		t.Fatalf("receiver pre-proof pool total=%d available=%d ready=%t", state.pool.TotalCount(), state.pool.Available(), state.ready)
 	}
 	return state.pending

@@ -81,6 +81,9 @@ func (t *TEET) handleOTPrecomputeBegin(conn *shared.WSConnection, generation uin
 	if err := mpc.ValidatePrecomputeCount(int(begin.Count)); err != nil {
 		return err
 	}
+	if _, err := mpc.CheckedOTIndexEnd(begin.StartIndex, int(begin.Count)); err != nil {
+		return err
+	}
 	if begin.Count != msg.GetCount() || begin.Epoch != msg.GetEpoch() {
 		return fmt.Errorf("OT precompute begin metadata mismatch")
 	}
@@ -109,7 +112,7 @@ func (t *TEET) handleOTPrecomputeBegin(conn *shared.WSConnection, generation uin
 		if state.pending != nil {
 			return fmt.Errorf("OT precomputation already in progress")
 		}
-		if begin.StartIndex != uint64(state.pool.TotalCount()) {
+		if begin.StartIndex != state.pool.TotalCount() {
 			return fmt.Errorf("OT extension start index %d, want %d", begin.StartIndex, state.pool.TotalCount())
 		}
 		if !msg.GetIsInitial() && msg.GetEpoch() != state.epoch {
@@ -316,8 +319,11 @@ func (t *TEET) handleOTPrecomputeComplete(generation uint64, lease controlStateL
 		if state.pending.phase != receiverPrecomputeAwaitComplete {
 			return fmt.Errorf("unexpected OT precompute completion phase %d", state.pending.phase)
 		}
-		expectedTotal := state.pool.TotalCount() + len(state.pending.entries)
-		if int(msg.GetPoolSize()) != expectedTotal {
+		expectedTotal, err := mpc.CheckedOTIndexEnd(state.pool.TotalCount(), len(state.pending.entries))
+		if err != nil {
+			return err
+		}
+		if msg.GetPoolSize() != expectedTotal {
 			return fmt.Errorf("OT pool total mismatch: peer=%d local=%d", msg.GetPoolSize(), expectedTotal)
 		}
 		if err := state.pool.Add(state.pending.entries); err != nil {
@@ -460,11 +466,11 @@ func pendingReceiverCompletionForRange(state *OTReceiverState, startIndex uint64
 	if count <= 0 {
 		return nil, nil
 	}
-	end := startIndex + uint64(count)
-	if end < startIndex {
+	end, err := mpc.CheckedOTIndexEnd(startIndex, count)
+	if err != nil {
 		return nil, nil
 	}
-	committedTotal := uint64(state.pool.TotalCount())
+	committedTotal := state.pool.TotalCount()
 	if end <= committedTotal {
 		return nil, nil
 	}
@@ -472,8 +478,8 @@ func pendingReceiverCompletionForRange(state *OTReceiverState, startIndex uint64
 	if pending == nil || pending.done == nil || len(pending.entries) == 0 || pending.begin.StartIndex != committedTotal {
 		return nil, nil
 	}
-	pendingEnd := pending.begin.StartIndex + uint64(len(pending.entries))
-	if pendingEnd < pending.begin.StartIndex || startIndex > pendingEnd || end > pendingEnd {
+	pendingEnd, err := mpc.CheckedOTIndexEnd(pending.begin.StartIndex, len(pending.entries))
+	if err != nil || startIndex > pendingEnd || end > pendingEnd {
 		return nil, nil
 	}
 	if startIndex < committedTotal {
@@ -537,7 +543,7 @@ func finishReceiverPrecompute(pending *receiverPrecompute, outcome receiverPreco
 	}
 }
 
-func (t *TEET) resumeOTPool(epoch string, nextIndex uint32) bool {
+func (t *TEET) resumeOTPool(epoch string, nextIndex uint64) bool {
 	if !mpc.IsCurrentExtensionEpoch(epoch) {
 		return false
 	}
@@ -546,7 +552,7 @@ func (t *TEET) resumeOTPool(epoch string, nextIndex uint32) bool {
 	if t.otReceiverState == nil || !t.otReceiverState.ready || t.otReceiverState.pending != nil || t.otReceiverState.epoch == "" || t.otReceiverState.epoch != epoch {
 		return false
 	}
-	return t.otReceiverState.pool.AdvanceTo(uint64(nextIndex)) == nil
+	return t.otReceiverState.pool.AdvanceTo(nextIndex) == nil
 }
 
 func (t *TEET) handleOTResumeRequest(conn *shared.WSConnection, lease controlStateLease, msg *teeproto.OTResumeRequest) error {

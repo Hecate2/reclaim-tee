@@ -186,7 +186,7 @@ func (t *TEEK) initiateOPRFForRange(sessionID string, teekState *TEEKSessionStat
 			TlsLength:      r.TlsLength,
 			TlsSessionHash: tlsSessionHash,
 			GarbledTables:  serializedPayload, // Contains all circuit data
-			OtStartIndex:   uint32(startIdx),
+			OtStartIndex:   startIdx,
 			TotalRanges:    int32(totalRanges),
 		})
 	})
