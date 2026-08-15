@@ -168,7 +168,7 @@ TEE_K compares each label with its local pair. It derives the CMAC only from val
 
 ## Message definitions
 
-The protocol uses these existing messages from `proto/transport.proto`:
+The protocol uses these messages from `proto/transport.proto`; `OPRFMPCRound2` and `OPRFMPCRound3` are peer-only additions:
 
 - `OTPrecomputeRequest` carries the KOS2 begin, base-OT choices, or full challenge.
 

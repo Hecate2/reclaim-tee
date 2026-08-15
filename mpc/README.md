@@ -73,11 +73,11 @@ The local median costs are:
 
 These medians use the benchmark host described above. The full symmetric benchmark excludes P-256 base OT, protobuf/WebSocket framing, and network time.
 
-The protocol reuses the existing precomputation protobuf byte fields. Version-2 phase tags distinguish seven internal frames. No protobuf schema or client message changes are required.
+The protocol reuses the existing precomputation protobuf byte fields. Version-2 phase tags distinguish seven internal frames. The schema adds peer-only online fields 73 and 74; client messages do not change.
 
 TEE_T first fixes the base-OT ciphertexts and complete IKNP `U` matrix. TEE_K parses and validates that commitment before it samples and sends every independent `chi` coefficient. TEE_T returns `x` and all 128 column values `t_i`; TEE_K verifies every equation `q_i = t_i XOR (delta_i ? x : 0)` before either pool can commit.
 
-For a 100,000-OT batch, the KOS2 opaque payloads total 1,627,080 bytes, compared with 1,612,185 bytes for KOS1. This is 14,895 bytes, or about 0.924 percent, more. Protobuf and WebSocket overhead is additional. Precomputation grows from five to seven frames; the four-message online OPRF protocol is unchanged.
+For a 100,000-OT batch, the KOS2 opaque payloads total 1,627,080 bytes, compared with 1,612,185 bytes for KOS1. This is 14,895 bytes, or about 0.924 percent, more. Protobuf and WebSocket overhead is additional. Precomputation grows from five to seven frames. The online protocol grows from two messages to four so the evaluator commits its hidden choice corrections before TEE_K sends correction-aware masks.
 
 Both sides commit a batch only after the KOS proof passes. The pool token rotates after each committed batch.
 
