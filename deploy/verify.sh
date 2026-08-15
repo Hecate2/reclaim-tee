@@ -197,8 +197,9 @@ echo "============================================="
 # repart, so they need no --privileged, no /dev, and no cloud creds (GCP_PROJECT
 # is unused once packaging is skipped). base_images are commit-independent ->
 # rebuilt from the CURRENT pins.env. sev-snp app_images track their sourceCommit;
-# snp-build.sh clones that commit for the app while retaining the current pinned
-# build infrastructure. App is cross-cloud, so we use gcp.
+# snp-build.sh clones that commit and uses its recorded app toolchain and CA
+# bundle, while retaining the current loader/base inputs. App is cross-cloud,
+# so we use gcp.
 # ---------------------------------------------------------------------------
 SNP_BUILD="${REPO_ROOT}/deploy/snp-build.sh"
 if [[ -x "${SNP_BUILD}" ]]; then
@@ -224,9 +225,9 @@ for b in json.load(open('${HISTORY}')).get('base_images', []):
         log "Verifying SNP app (tee_${ROLE} @ ${COMMIT:0:12})..."
         git -C "${REPO_ROOT}" rev-parse --verify "${COMMIT}^{commit}" >/dev/null 2>&1 || { log "ERROR: sourceCommit ${COMMIT} not in repo"; PASS=false; continue; }
         APP_LOG="${TMPDIR}/snp-app-${ROLE}.log"
-        # Use today's pinned builder, including its immutable package snapshot.
         # SNP_BUILD_COMMIT makes snp-build.sh create a real clone of the recorded
-        # source commit so Go embeds the same VCS stamp as the fleet build.
+        # source commit, use that commit's app pins, and embed the same VCS stamp
+        # as the fleet build. Base inputs stay on the current pins.
         GCP_PROJECT=verify SNP_BUILD_ONLY=1 SNP_BUILD_COMMIT="${COMMIT}" \
             "${SNP_BUILD}" "${ROLE}" gcp >"${APP_LOG}" 2>&1 || true
         ACT_APP=$(sed -n 's/.*app digest *= *\(snp-app:[0-9a-f]*\).*/\1/p' "${APP_LOG}" | tail -1)

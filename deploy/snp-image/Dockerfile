@@ -7,8 +7,9 @@ ARG CA_IMAGE=alpine@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d
 ARG UBUNTU_DIGEST=sha256:786a8b558f7be160c6c8c4a54f9a57274f3b4fb1491cf65146521ae77ff1dc54
 
 # Ubuntu's minimal image has no TLS roots, but the official snapshot service
-# uses HTTPS. Bootstrap trust from the same digest-pinned CA image used for the
-# app bundle; Ubuntu's ca-certificates package replaces this file below.
+# uses HTTPS. Bootstrap trust comes from the digest-pinned current base CA that
+# snp-build.sh passes here; historical app CA pins do not alter this base input.
+# Ubuntu's ca-certificates package replaces this file below.
 FROM ${CA_IMAGE} AS apt-tls
 
 FROM ubuntu:24.04@${UBUNTU_DIGEST}

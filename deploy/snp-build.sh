@@ -17,10 +17,17 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [[ -f "${SCRIPT_DIR}/.env" ]]; then set -a; source "${SCRIPT_DIR}/.env"; set +a; fi
 source "${SCRIPT_DIR}/_lib.sh"
 set -a; source "${SCRIPT_DIR}/snp-image/pins.env"; set +a
+source "${SCRIPT_DIR}/snp-image/app-pins.sh"
+source "${SCRIPT_DIR}/snp-image/source-commit.sh"
 
 : "${SNP_LOADER_GO_TOOLCHAIN:?set SNP_LOADER_GO_TOOLCHAIN in snp-image/pins.env}"
 : "${SNP_TEE_GO_TOOLCHAIN:?set SNP_TEE_GO_TOOLCHAIN in snp-image/pins.env}"
 : "${SNP_APT_SNAPSHOT:?set SNP_APT_SNAPSHOT in snp-image/pins.env}"
+
+# SNP_CA_IMAGE is an app-bundle input as well as the TLS bootstrap image for
+# the base builder. Preserve the current value for the base; historical app
+# reconstruction replaces only the app copy below.
+SNP_BASE_CA_IMAGE="${SNP_CA_IMAGE:?set SNP_CA_IMAGE in snp-image/pins.env}"
 
 GCP_PROJECT="${GCP_PROJECT:?set GCP_PROJECT in deploy/.env}"
 IMG_DIR="${SCRIPT_DIR}/snp-image"
@@ -89,7 +96,7 @@ build_raw() {
     local priv="--privileged -v /dev:/dev" idonly=""
     [[ "${SNP_BUILD_ONLY:-0}" == 1 ]] && { priv=""; idonly="-e SNP_IDENTITY_ONLY=1"; }
     ( _np; ${DOCKER} build --build-arg KERNEL_PKG="$(kernel_for "$cloud")" \
-        --build-arg CA_IMAGE="${SNP_CA_IMAGE}" --build-arg APT_SNAPSHOT="${SNP_APT_SNAPSHOT}" \
+        --build-arg CA_IMAGE="${SNP_BASE_CA_IMAGE}" --build-arg APT_SNAPSHOT="${SNP_APT_SNAPSHOT}" \
         --build-arg UBUNTU_DIGEST="${SNP_UBUNTU_DIGEST}" \
         --build-arg SYSTEMD_BOOT_VER="${SNP_SYSTEMD_BOOT_VER}" --build-arg SYSTEMD_UKIFY_VER="${SNP_SYSTEMD_UKIFY_VER}" \
         --build-arg SYSTEMD_VER="${SNP_SYSTEMD_VER}" --build-arg ZSTD_VER="${SNP_ZSTD_VER}" \
@@ -209,9 +216,12 @@ fi
 if [[ -n "${BUILD_COMMIT}" ]]; then
     CLONE_DIR="$(mktemp -d)"; trap 'rm -rf "${CLONE_DIR}"' EXIT
     echo "[build] app source: clean clone @ ${BUILD_COMMIT:0:12} (dirty-tree-immune)"
-    git clone -q "${REPO_ROOT}" "${CLONE_DIR}"
-    git -C "${CLONE_DIR}" checkout -q "${BUILD_COMMIT}"
+    snp_checkout_source_commit "${REPO_ROOT}" "${BUILD_COMMIT}" "${CLONE_DIR}"
     REPO_ROOT="${CLONE_DIR}"
+    # The app toolchain and CA bundle are part of the recorded app identity, so
+    # take them from the same source commit. Loader/base inputs remain the
+    # current values loaded before the clone.
+    snp_load_app_pins "${REPO_ROOT}/deploy/snp-image/pins.env"
 fi
 
 # The app digest is VCS-stamped (tracks the commit), so a dirty tree yields a
@@ -224,6 +234,7 @@ if [[ -n "$(git -C "${REPO_ROOT}" status --porcelain 2>/dev/null)" && "${SNP_ALL
 fi
 
 echo "[build] === tee_${ROLE}@${CLOUD} (tag ${TAG}) ==="
+echo "[build] app inputs: ${SNP_TEE_GO_TOOLCHAIN}, ${SNP_CA_IMAGE}"
 build_loader
 build_bundle "${ROLE}"
 build_raw "${CLOUD}"
