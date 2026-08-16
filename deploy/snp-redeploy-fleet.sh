@@ -108,16 +108,23 @@ print(k.get('sourceCommit',''), t.get('sourceCommit',''), k.get('version',''), t
 declare -a P_NAME P_KCLOUD P_KLOC P_KIP P_TCLOUD P_TLOC P_TIP P_ID P_ACTIVE P_KDIG P_TDIG
 discover() {
   log "Discovering pairs (GCP + AWS ${AWS_REGION} + router ${ROUTER}) ..."
-  local tmp; tmp="$(mktemp)"
-  g compute instances list --filter="name~snp-" --format="value(name,zone,networkInterfaces[0].accessConfigs[0].natIP)" 2>/dev/null \
-    | while read -r nm zone ip; do
-        [[ "${nm}" =~ ^(snp-.+)-(k|t)-gcp$ ]] && echo "${BASH_REMATCH[1]}|${BASH_REMATCH[2]}|gcp|${zone}|${ip}"
-      done >> "${tmp}" || true
-  a ec2 describe-instances --filters "Name=tag:Name,Values=snp-*" "Name=instance-state-name,Values=pending,running" \
-      --query 'Reservations[].Instances[].[Tags[?Key==`Name`]|[0].Value,PublicIpAddress]' --output text 2>/dev/null \
-    | while read -r nm ip; do
-        [[ "${nm}" =~ ^(snp-.+)-(k|t)-aws$ ]] && echo "${BASH_REMATCH[1]}|${BASH_REMATCH[2]}|aws|${AWS_REGION}|${ip}"
-      done >> "${tmp}" || true
+  local tmp gcp_rows aws_rows; tmp="$(mktemp)"
+  if ! gcp_rows="$(g compute instances list --filter="name~snp-" --format="value(name,zone,networkInterfaces[0].accessConfigs[0].natIP)" 2>/dev/null)"; then
+    rm -f "${tmp}"
+    die "GCP instance discovery failed"
+  fi
+  while read -r nm zone ip; do
+    [[ "${nm}" =~ ^(snp-.+)-(k|t)-gcp$ ]] && echo "${BASH_REMATCH[1]}|${BASH_REMATCH[2]}|gcp|${zone}|${ip}"
+  done <<<"${gcp_rows}" >> "${tmp}"
+
+  if ! aws_rows="$(a ec2 describe-instances --filters "Name=tag:Name,Values=snp-*" "Name=instance-state-name,Values=pending,running" \
+      --query 'Reservations[].Instances[].[Tags[?Key==`Name`]|[0].Value,PublicIpAddress]' --output text 2>/dev/null)"; then
+    rm -f "${tmp}"
+    die "AWS EC2 discovery failed (refresh AWS credentials/MFA)"
+  fi
+  while read -r nm ip; do
+    [[ "${nm}" =~ ^(snp-.+)-(k|t)-aws$ ]] && echo "${BASH_REMATCH[1]}|${BASH_REMATCH[2]}|aws|${AWS_REGION}|${ip}"
+  done <<<"${aws_rows}" >> "${tmp}"
 
   local pairs; mapfile -t pairs < <(cut -d'|' -f1 "${tmp}" | sort -u)
   [[ ${#pairs[@]} -gt 0 ]] || { rm -f "${tmp}"; die "no SNP pairs discovered from cloud resources"; }
@@ -299,6 +306,10 @@ sys.exit(0 if [p for p in d.get('pairs',[]) if str(p.get('teek_addr','')).starts
 }
 
 trim_allowlist() {
+  if [[ -n "${SNP_ONLY:-}" ]]; then
+    log "Partial rollout (SNP_ONLY=${SNP_ONLY}): keeping existing app digests for untouched pairs."
+    return
+  fi
   log "Trimming old app digests from allowlist (keep new apps + bases) ..."
   local d
   for d in $(rt "${ROUTER}/allowlist" | python3 -c "import json,sys;[print(x) for x in json.load(sys.stdin).get('digests',[])]"); do

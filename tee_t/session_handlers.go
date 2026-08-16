@@ -153,6 +153,16 @@ func (t *TEET) handleBatchedEncryptedResponses(identity *teetSessionIdentity, ms
 	if err := identity.ensureCurrent(); err != nil {
 		return err
 	}
+	teetState, err := t.sessionManager.stateForSession(session)
+	if err != nil {
+		t.terminateSessionWithErrorForIdentity(identity, shared.ReasonSessionStateCorrupted, err, "Failed to get TEE_T session state")
+		return err
+	}
+	if !teetState.ResponseBatchReceived.CompareAndSwap(false, true) {
+		err = fmt.Errorf("multiple encrypted response batches received for session")
+		t.terminateSessionWithErrorForIdentity(identity, shared.ReasonProtocolViolation, err, "Multiple encrypted response batches received")
+		return err
+	}
 
 	if session.ResponseState == nil {
 		session.ResponseState = &shared.ResponseSessionState{

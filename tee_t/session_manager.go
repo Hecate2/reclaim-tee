@@ -37,6 +37,10 @@ type TEETSessionState struct {
 	// both the peer finished and OPRF completion; the CAS winner signs.
 	TOutputSigned atomic.Bool
 
+	// The client sends all TLS response records in one terminal batch. Accepting
+	// another batch would let it replace or extend the response transcript.
+	ResponseBatchReceived atomic.Bool
+
 	// MPC OPRF state. TEE_K is the authoritative source of ranges: it relays
 	// the client's ranges via OPRFOnlineFull (with TotalRanges), so TEE_T
 	// derives everything from that single TCP-ordered stream. handleOPRFOnlineFull
