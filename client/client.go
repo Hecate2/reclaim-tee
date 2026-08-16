@@ -1,6 +1,7 @@
 package client
 
 import (
+	"bytes"
 	"encoding/base64"
 	"fmt"
 	"net"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"go.uber.org/zap"
+	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -358,8 +360,27 @@ func (c *Client) resolveClientMode() ClientMode {
 	return detectMode(c.teekURL, c.teetURL)
 }
 
-// setAttestorAuthRequest decodes a base64 protobuf AuthenticationRequest and
-// stores it for the attestor InitRequest. Empty input clears any auth request.
+// setAttestorAuthRequest decodes a base64 AuthenticationRequest and stores it
+// for the attestor InitRequest. Empty input clears any auth request.
+//
+// Two encodings are accepted, because two producers exist and both are correct.
+// Clients holding a protobuf message send the binary wire format. Clients that
+// obtain the request from attestor-core's createAuthRequest, including the
+// Reclaim in-app SDK on its native TEE path, send protobuf's canonical JSON
+// encoding. Both carry identical data: the field names are
+// AuthenticatedUserData's, and signature is base64 because that is how proto3
+// JSON encodes a bytes field.
+//
+// The encodings are told apart by the first non-whitespace byte. A protobuf tag
+// of 0x7b would mean field 15 with the group wire type that proto3 dropped, and
+// AuthenticationRequest's own fields begin 0x0a, 0x10, 0x18 and 0x22, so a
+// well-formed message never presents as '{'. Routing on the prefix alone, rather
+// than also requiring valid JSON, keeps the diagnostic useful: truncated JSON
+// still reports a JSON error instead of a confusing protobuf one.
+// TestProtobufIsNeverDetectedAsJSON holds that line.
+//
+// JSON is parsed in protojson's strict mode, so an unrecognized field is an
+// error rather than a silently dropped value such as an expiry.
 func (c *Client) setAttestorAuthRequest(authRequestB64 string) error {
 	if authRequestB64 == "" {
 		c.attestorAuthRequest = nil
@@ -372,7 +393,11 @@ func (c *Client) setAttestorAuthRequest(authRequestB64 string) error {
 	}
 
 	authRequest := &teeproto.AuthenticationRequest{}
-	if err := proto.Unmarshal(raw, authRequest); err != nil {
+	if bytes.HasPrefix(bytes.TrimSpace(raw), []byte("{")) {
+		if err := protojson.Unmarshal(raw, authRequest); err != nil {
+			return fmt.Errorf("failed to unmarshal JSON auth request: %v", err)
+		}
+	} else if err := proto.Unmarshal(raw, authRequest); err != nil {
 		return fmt.Errorf("failed to unmarshal auth request: %v", err)
 	}
 
