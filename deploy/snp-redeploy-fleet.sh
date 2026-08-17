@@ -54,6 +54,7 @@ esac
 AWS_REGION="${SNP_PAIR_AWS_REGION:?set SNP_PAIR_AWS_REGION in deploy/.env}"
 AWS_PROFILE="${AWS_PROFILE:?set AWS_PROFILE in deploy/.env}"
 AWS_MFA_SOURCE_PROFILE="${AWS_MFA_SOURCE_PROFILE:?set AWS_MFA_SOURCE_PROFILE in deploy/.env}"
+AWS_MFA_SERIAL="${AWS_MFA_SERIAL:?set AWS_MFA_SERIAL in deploy/.env}"
 SNP_PROXY="${SNP_PROXY:-http://127.0.0.1:10808}"
 STATIC_OPRF="${SNP_TEST_STATIC_OPRF:-0}"
 DRAIN_TIMEOUT="${SNP_DRAIN_TIMEOUT:-600}"
@@ -87,10 +88,10 @@ ensure_gcp_auth() {
 
   log "GCP credentials missing or expired; starting gcloud auth login ..."
   if [[ -n "${GCP_AUTH_ACCOUNT}" ]]; then
-    ( unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY 2>/dev/null || true; gcloud auth login "${GCP_AUTH_ACCOUNT}" --no-launch-browser ) \
+    ( unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY 2>/dev/null || true; gcloud auth login "${GCP_AUTH_ACCOUNT}" --no-launch-browser --force ) \
       || die "gcloud authentication failed"
   else
-    ( unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY 2>/dev/null || true; gcloud auth login --no-launch-browser ) \
+    ( unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY 2>/dev/null || true; gcloud auth login --no-launch-browser --force ) \
       || die "gcloud authentication failed"
   fi
 
@@ -106,7 +107,8 @@ ensure_aws_auth() {
 
   log "AWS credentials for ${AWS_PROFILE} missing or expired; starting MFA login ..."
   ( export http_proxy="${SNP_PROXY}" https_proxy="${SNP_PROXY}"; aws configure mfa-login \
-      --profile "${AWS_MFA_SOURCE_PROFILE}" --update-profile "${AWS_PROFILE}" ) \
+      --profile "${AWS_MFA_SOURCE_PROFILE}" --update-profile "${AWS_PROFILE}" \
+      --serial-number "${AWS_MFA_SERIAL}" ) \
     || die "AWS MFA authentication failed for ${AWS_PROFILE}"
   AWS_AUTH_ARN="$(a sts get-caller-identity --query Arn --output text 2>/dev/null || true)"
   [[ "${AWS_AUTH_ARN}" == arn:aws:* ]] || die "AWS credentials for ${AWS_PROFILE} are still unusable after MFA login"
