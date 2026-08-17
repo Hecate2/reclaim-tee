@@ -32,7 +32,8 @@ set -euo pipefail
 #   SNP_ONLY=snp-sg-1 ./deploy/snp-redeploy-fleet.sh      # resume: only these pair(s), comma-separated
 #   SNP_SKIP_BUILD=1 ./deploy/snp-redeploy-fleet.sh       # reuse registered images (digest asserts still run)
 #
-# Requires docker+buildx and authenticated gcloud + aws (checked in preflight).
+# Requires docker+buildx. Expired gcloud and AWS MFA credentials are refreshed
+# interactively during preflight.
 # =============================================================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -51,6 +52,8 @@ esac
 [[ -n "${ADMIN_TOKEN}" ]] || { echo "no admin token for ${TARGET}" >&2; exit 1; }
 
 AWS_REGION="${SNP_PAIR_AWS_REGION:?set SNP_PAIR_AWS_REGION in deploy/.env}"
+AWS_PROFILE="${AWS_PROFILE:?set AWS_PROFILE in deploy/.env}"
+AWS_MFA_SOURCE_PROFILE="${AWS_MFA_SOURCE_PROFILE:?set AWS_MFA_SOURCE_PROFILE in deploy/.env}"
 SNP_PROXY="${SNP_PROXY:-http://127.0.0.1:10808}"
 STATIC_OPRF="${SNP_TEST_STATIC_OPRF:-0}"
 DRAIN_TIMEOUT="${SNP_DRAIN_TIMEOUT:-600}"
@@ -64,22 +67,62 @@ die() { echo "ERROR: $*" >&2; echo "ERROR: $*" >> "${LOG_DIR}/run.log" 2>/dev/nu
 
 # gcloud + router curls want the proxy UNSET; aws wants it SET. See [[wsl-proxy]].
 g()  { ( unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY 2>/dev/null || true; gcloud_retry gcloud "$@" --project="${GCP_PROJECT}" ); }
-a()  { ( export http_proxy="${SNP_PROXY}" https_proxy="${SNP_PROXY}"; aws --region "${AWS_REGION}" "$@" ); }
+a() {
+  ( export http_proxy="${SNP_PROXY}" https_proxy="${SNP_PROXY}"; aws --profile "${AWS_PROFILE}" --region "${AWS_REGION}" "$@" )
+}
 rt() { ( unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY 2>/dev/null || true; curl -sf -H "Authorization: Bearer ${ADMIN_TOKEN}" "$@" ); }
 
 # ---- preflight -------------------------------------------------------------
+GCP_AUTH_ACCOUNT=""
+AWS_AUTH_ARN=""
+
+ensure_gcp_auth() {
+  GCP_AUTH_ACCOUNT="$( ( unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY 2>/dev/null || true; gcloud auth list --filter=status:ACTIVE --format='value(account)' 2>/dev/null ) | head -1 || true)"
+  if [[ -n "${GCP_AUTH_ACCOUNT}" ]] && (
+    unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY 2>/dev/null || true
+    gcloud auth print-access-token >/dev/null 2>&1
+  ); then
+    return
+  fi
+
+  log "GCP credentials missing or expired; starting gcloud auth login ..."
+  if [[ -n "${GCP_AUTH_ACCOUNT}" ]]; then
+    ( unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY 2>/dev/null || true; gcloud auth login "${GCP_AUTH_ACCOUNT}" --no-launch-browser ) \
+      || die "gcloud authentication failed"
+  else
+    ( unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY 2>/dev/null || true; gcloud auth login --no-launch-browser ) \
+      || die "gcloud authentication failed"
+  fi
+
+  GCP_AUTH_ACCOUNT="$( ( unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY 2>/dev/null || true; gcloud auth list --filter=status:ACTIVE --format='value(account)' 2>/dev/null ) | head -1 || true)"
+  [[ -n "${GCP_AUTH_ACCOUNT}" ]] || die "gcloud authentication completed without an active account"
+  ( unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY 2>/dev/null || true; gcloud auth print-access-token >/dev/null 2>&1 ) \
+    || die "gcloud credentials are still unusable after login"
+}
+
+ensure_aws_auth() {
+  AWS_AUTH_ARN="$(a sts get-caller-identity --query Arn --output text 2>/dev/null || true)"
+  [[ "${AWS_AUTH_ARN}" == arn:aws:* ]] && return
+
+  log "AWS credentials for ${AWS_PROFILE} missing or expired; starting MFA login ..."
+  ( export http_proxy="${SNP_PROXY}" https_proxy="${SNP_PROXY}"; aws configure mfa-login \
+      --profile "${AWS_MFA_SOURCE_PROFILE}" --update-profile "${AWS_PROFILE}" ) \
+    || die "AWS MFA authentication failed for ${AWS_PROFILE}"
+  AWS_AUTH_ARN="$(a sts get-caller-identity --query Arn --output text 2>/dev/null || true)"
+  [[ "${AWS_AUTH_ARN}" == arn:aws:* ]] || die "AWS credentials for ${AWS_PROFILE} are still unusable after MFA login"
+}
+
 preflight() {
   log "Preflight: docker / gcloud / aws ..."
   command -v docker >/dev/null || die "docker not found"
+  command -v gcloud >/dev/null || die "gcloud not found"
+  command -v aws >/dev/null || die "aws not found"
   docker version --format '{{.Server.Version}}' >/dev/null 2>&1 || die "docker daemon not reachable"
   docker buildx version >/dev/null 2>&1 || die "docker buildx missing"
-  local acct arn
-  acct="$( ( unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY 2>/dev/null || true; gcloud auth list --filter=status:ACTIVE --format='value(account)' 2>/dev/null ) | head -1 || true)"
-  [[ -n "${acct}" ]] || die "gcloud not authenticated (run: gcloud auth login)"
-  arn="$( ( export http_proxy="${SNP_PROXY}" https_proxy="${SNP_PROXY}"; aws sts get-caller-identity --query Arn --output text 2>/dev/null ) || true )"
-  [[ "${arn}" == arn:aws:* ]] || die "aws not authenticated (run: aws sso login / configure creds)"
+  ensure_gcp_auth
+  ensure_aws_auth
   git -C "${REPO_ROOT}" rev-parse HEAD >/dev/null 2>&1 || die "no git HEAD"
-  log "  docker OK | gcloud=${acct} | aws=${arn}"
+  log "  docker OK | gcloud=${GCP_AUTH_ACCOUNT} | aws=${AWS_AUTH_ARN} (profile=${AWS_PROFILE})"
 }
 
 # ---- target from image-history.json ---------------------------------------
