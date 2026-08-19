@@ -13,16 +13,20 @@ import (
 	"go.uber.org/zap"
 )
 
-const (
-	defaultHTTPSPort   = 443
-	alternateHTTPSPort = 8443
-)
+const defaultHTTPSPort = 443
+
+var supportedHTTPSTargetPorts = [...]int{
+	81, 85, 150, 155, 443, 1006, 2095, 2096, 4430,
+	8079, 8080, 8081, 8084, 8443, 8483, 50001, 50300,
+}
 
 func validateSupportedHTTPSPort(port int) error {
-	if port != defaultHTTPSPort && port != alternateHTTPSPort {
-		return fmt.Errorf("only HTTPS ports 443 and 8443 are allowed, got port %d", port)
+	for _, supportedPort := range supportedHTTPSTargetPorts {
+		if port == supportedPort {
+			return nil
+		}
 	}
-	return nil
+	return fmt.Errorf("only HTTPS ports %v are allowed, got port %d", supportedHTTPSTargetPorts, port)
 }
 
 func expectedHTTPRequestAuthority(connData *shared.RequestConnectionData) (string, error) {
