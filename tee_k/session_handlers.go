@@ -2,6 +2,8 @@ package main
 
 import (
 	"fmt"
+	"net"
+	"strconv"
 	"strings"
 	"time"
 
@@ -11,6 +13,28 @@ import (
 	"go.uber.org/zap"
 )
 
+const (
+	defaultHTTPSPort   = 443
+	alternateHTTPSPort = 8443
+)
+
+func validateSupportedHTTPSPort(port int) error {
+	if port != defaultHTTPSPort && port != alternateHTTPSPort {
+		return fmt.Errorf("only HTTPS ports 443 and 8443 are allowed, got port %d", port)
+	}
+	return nil
+}
+
+func expectedHTTPRequestAuthority(connData *shared.RequestConnectionData) (string, error) {
+	if err := validateSupportedHTTPSPort(connData.Port); err != nil {
+		return "", err
+	}
+	if connData.Port == defaultHTTPSPort {
+		return connData.Hostname, nil
+	}
+	return net.JoinHostPort(connData.Hostname, strconv.Itoa(connData.Port)), nil
+}
+
 // handleRequestConnection handles connection request from client
 func (t *TEEK) handleRequestConnection(sessionID string, msg *shared.Message) error {
 	t.logger.WithSession(sessionID).Debug("Handling connection request")
@@ -18,6 +42,10 @@ func (t *TEEK) handleRequestConnection(sessionID string, msg *shared.Message) er
 	var reqData shared.RequestConnectionData
 	if err := msg.UnmarshalData(&reqData); err != nil {
 		t.terminateSessionWithError(sessionID, shared.ReasonMessageParsingFailed, err, "Failed to parse connection request")
+		return err
+	}
+	if err := validateSupportedHTTPSPort(reqData.Port); err != nil {
+		t.terminateSessionWithError(sessionID, shared.ReasonProtocolViolation, err, "Unsupported target port")
 		return err
 	}
 
@@ -248,14 +276,12 @@ func (t *TEEK) validateHTTPRequestFormat(redactedRequest []byte, ranges []shared
 		return fmt.Errorf("invalid HTTP request line format")
 	}
 
-	// CRITICAL VALIDATION: Check Host header matches connection hostname
+	// CRITICAL VALIDATION: Check Host header matches the connection authority.
 	if connData != nil {
-		// Only HTTPS (port 443) is allowed
-		if connData.Port != 443 {
-			return fmt.Errorf("only HTTPS (port 443) is allowed, got port %d", connData.Port)
+		expectedAuthority, err := expectedHTTPRequestAuthority(connData)
+		if err != nil {
+			return err
 		}
-
-		expectedHost := connData.Hostname
 
 		hostHeader := extractHeader(lines, "Host")
 		if hostHeader == "" {
@@ -267,9 +293,10 @@ func (t *TEEK) validateHTTPRequestFormat(redactedRequest []byte, ranges []shared
 			return fmt.Errorf("host header must not be redacted")
 		}
 
-		// Validate Host header matches expected hostname (must not include port for 443)
-		if hostHeader != expectedHost {
-			return fmt.Errorf("host header '%s' does not match connection hostname '%s'", hostHeader, expectedHost)
+		// Bind the HTTP authority to the TCP destination. The default HTTPS port
+		// is omitted; alternate ports must be explicit in the Host header.
+		if hostHeader != expectedAuthority {
+			return fmt.Errorf("host header '%s' does not match connection authority '%s'", hostHeader, expectedAuthority)
 		}
 
 		t.logger.Debug("Host header validation passed")
