@@ -29,7 +29,7 @@ require (
 	github.com/markkurossi/mpc v0.0.0-20260616034910-9c484ce016a7
 	github.com/mr-tron/base58 v1.3.0
 	github.com/reclaimprotocol/jsonpathplus-go/v2 v2.0.1
-	github.com/reclaimprotocol/xpath-go v1.5.0
+	github.com/reclaimprotocol/xpath-go v1.5.1
 	github.com/reclaimprotocol/zk-symmetric-crypto/gnark v0.0.0-20260526062330-40c74b9e1c9f
 	github.com/xeipuuv/gojsonschema v1.2.0
 	go.mozilla.org/pkcs7 v0.10.0
