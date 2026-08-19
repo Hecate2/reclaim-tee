@@ -12,27 +12,33 @@ func TestValidateHTTPRequestFormatAcceptsSupportedHTTPSPorts(t *testing.T) {
 	t.Parallel()
 
 	teek := &TEEK{logger: shared.NewNopLogger()}
-	tests := []struct {
-		name       string
-		hostname   string
-		port       int
-		hostHeader string
-	}{
-		{name: "default HTTPS port", hostname: "example.com", port: 443, hostHeader: "example.com"},
-		{name: "alternate HTTPS port", hostname: "example.com", port: 8443, hostHeader: "example.com:8443"},
-		{name: "alternate HTTPS port IPv6", hostname: "2001:db8::1", port: 8443, hostHeader: "[2001:db8::1]:8443"},
-	}
+	ports := []int{81, 85, 150, 155, 443, 1006, 2095, 2096, 4430, 8079, 8080, 8081, 8084, 8443, 8483, 50001, 50300}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
+	for _, port := range ports {
+		t.Run(fmt.Sprintf("port_%d", port), func(t *testing.T) {
 			t.Parallel()
 
-			request := []byte(fmt.Sprintf("GET / HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", tt.hostHeader))
-			connData := &shared.RequestConnectionData{Hostname: tt.hostname, Port: tt.port}
+			hostHeader := fmt.Sprintf("example.com:%d", port)
+			if port == 443 {
+				hostHeader = "example.com"
+			}
+			request := []byte(fmt.Sprintf("GET / HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", hostHeader))
+			connData := &shared.RequestConnectionData{Hostname: "example.com", Port: port}
 			if err := teek.validateHTTPRequestFormat(request, nil, connData); err != nil {
 				t.Fatalf("validateHTTPRequestFormat() error = %v", err)
 			}
 		})
+	}
+}
+
+func TestValidateHTTPRequestFormatAcceptsAlternateHTTPSPortIPv6(t *testing.T) {
+	t.Parallel()
+
+	teek := &TEEK{logger: shared.NewNopLogger()}
+	request := []byte("GET / HTTP/1.1\r\nHost: [2001:db8::1]:8443\r\nConnection: close\r\n\r\n")
+	connData := &shared.RequestConnectionData{Hostname: "2001:db8::1", Port: 8443}
+	if err := teek.validateHTTPRequestFormat(request, nil, connData); err != nil {
+		t.Fatalf("validateHTTPRequestFormat() error = %v", err)
 	}
 }
 
@@ -47,8 +53,10 @@ func TestValidateHTTPRequestFormatRejectsUnsupportedHTTPSPort(t *testing.T) {
 	if err == nil {
 		t.Fatal("validateHTTPRequestFormat() error = nil, want unsupported port error")
 	}
-	if !strings.Contains(err.Error(), "443 and 8443") {
-		t.Fatalf("validateHTTPRequestFormat() error = %q, want supported-port list", err)
+	for _, want := range []string{"81", "50300", "got port 9443"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("validateHTTPRequestFormat() error = %q, want %q", err, want)
+		}
 	}
 }
 
