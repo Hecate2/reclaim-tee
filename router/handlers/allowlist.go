@@ -2,7 +2,7 @@ package handlers
 
 import (
 	"context"
-	"encoding/json"
+	"encoding/json/v2"
 	"errors"
 	"net/http"
 	"net/url"
@@ -42,7 +42,7 @@ func (s *Server) HandleAddDigest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req addDigestRequest
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&req); err != nil {
+	if err := json.UnmarshalRead(http.MaxBytesReader(w, r.Body, 4096), &req); err != nil {
 		writeErr(w, http.StatusBadRequest, "decode body: "+err.Error())
 		return
 	}

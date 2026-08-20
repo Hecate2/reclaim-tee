@@ -24,7 +24,6 @@ require (
 	github.com/google/go-sev-guest v0.15.0
 	github.com/google/go-tpm v0.9.8
 	github.com/google/go-tpm-tools v0.4.9
-	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.3
 	github.com/joho/godotenv v1.5.1
 	github.com/markkurossi/mpc v0.0.0-20260616034910-9c484ce016a7
@@ -77,6 +76,7 @@ require (
 	github.com/google/logger v1.1.2 // indirect
 	github.com/google/pprof v0.0.0-20260802141513-ef3492d7dac3 // indirect
 	github.com/google/s2a-go v0.1.9 // indirect
+	github.com/google/uuid v1.6.0 // indirect
 	github.com/googleapis/enterprise-certificate-proxy v0.3.21 // indirect
 	github.com/googleapis/gax-go/v2 v2.23.0 // indirect
 	github.com/ingonyama-zk/icicle-gnark/v3 v3.2.2 // indirect

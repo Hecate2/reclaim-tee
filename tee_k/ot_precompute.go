@@ -6,8 +6,8 @@ import (
 	"io"
 	"sync"
 	"time"
+	"uuid"
 
-	"github.com/google/uuid"
 	"github.com/reclaimprotocol/reclaim-tee/mpc"
 	teeproto "github.com/reclaimprotocol/reclaim-tee/proto"
 	"github.com/reclaimprotocol/reclaim-tee/shared"
@@ -271,7 +271,7 @@ func newSenderPrecomputeIdentity(rng io.Reader, startIndex uint64, count int, is
 	if !isInitial {
 		return session, "", nil
 	}
-	epochNonce, err := uuid.NewRandomFromReader(rng)
+	epochNonce, err := newV4UUIDFromReader(rng)
 	if err != nil {
 		return session, "", fmt.Errorf("sample initial OT extension epoch: %w", err)
 	}
@@ -280,6 +280,18 @@ func newSenderPrecomputeIdentity(rng io.Reader, startIndex uint64, count int, is
 		return session, "", err
 	}
 	return session, epoch, nil
+}
+
+// newV4UUIDFromReader preserves deterministic and injectable randomness for
+// OT precomputation while using the standard library UUID type.
+func newV4UUIDFromReader(r io.Reader) (uuid.UUID, error) {
+	var id uuid.UUID
+	if _, err := io.ReadFull(r, id[:]); err != nil {
+		return uuid.Nil(), err
+	}
+	id[6] = (id[6] & 0x0f) | 0x40
+	id[8] = (id[8] & 0x3f) | 0x80
+	return id, nil
 }
 
 func (t *TEEK) sendOTPrecomputeRequest(conn interface {

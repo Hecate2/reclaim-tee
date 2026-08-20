@@ -23,7 +23,7 @@ static void store_log_callback(LogCallback callback) {
 */
 import "C"
 import (
-	"encoding/json"
+	"encoding/json/v2"
 	"fmt"
 	"os"
 	"sync"

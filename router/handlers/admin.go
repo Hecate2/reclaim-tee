@@ -4,10 +4,10 @@ import (
 	"errors"
 	"net/http"
 	"time"
+	"uuid"
 
 	"github.com/reclaimprotocol/reclaim-tee/router/store"
 
-	"github.com/google/uuid"
 	"go.uber.org/zap"
 )
 

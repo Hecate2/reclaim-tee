@@ -3,7 +3,7 @@ package client
 import (
 	"crypto/ecdsa"
 	"encoding/hex"
-	"encoding/json"
+	"encoding/json/v2"
 	"fmt"
 	"math/rand/v2"
 	"net/url"
@@ -273,7 +273,7 @@ func (ac *AttestorClient) SubmitTeeBundle(verificationBundle *teeproto.Verificat
 	// }
 
 	// 2. Prepare parameters and context as JSON
-	parametersJson, err := json.Marshal(params.Parameters)
+	parametersJson, err := json.Marshal(params.Parameters, json.Deterministic(true))
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal parameters: %v", err)
 	}

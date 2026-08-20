@@ -4,7 +4,7 @@ package shared
 
 import (
 	"context"
-	"encoding/json"
+	"encoding/json/v2"
 	"errors"
 	"io"
 	"net/http"
@@ -25,16 +25,16 @@ func stubTokens(_ context.Context, _ string) (string, error) {
 func TestRouterClient_Register_HappyPath(t *testing.T) {
 	var seenPath, seenAuth string
 	var seenBody RegisterRequest
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		seenPath = r.URL.Path
 		seenAuth = r.Header.Get("Authorization")
 		body, _ := io.ReadAll(r.Body)
 		_ = json.Unmarshal(body, &seenBody)
-		_ = json.NewEncoder(w).Encode(RegisterResponse{
+		_ = json.MarshalWrite(w, RegisterResponse{
 			PairID: seenBody.PairID, Status: "registering",
 		})
 	}))
-	t.Cleanup(srv.Close)
+	httpClient := srv.Client()
 
 	var seenAudience string
 	tokens := func(_ context.Context, aud string) (string, error) {
@@ -42,6 +42,7 @@ func TestRouterClient_Register_HappyPath(t *testing.T) {
 		return fakeSAToken, nil
 	}
 	c := NewRouterClient(srv.URL, tokens)
+	c.httpClient = httpClient
 	_, err := c.Register(t.Context(), RegisterRequest{
 		PairID: "p1", Role: "K", SelfAddr: "10.0.0.1:443",
 		PeerAddrClaim: "10.0.0.2:443", ImageDigest: "sha256:abc",
@@ -64,17 +65,17 @@ func TestRouterClient_Register_HappyPath(t *testing.T) {
 	}
 }
 
-
 // TestRouterClient_Heartbeat_404IsErrNotFound — if the router doesn't know
 // the pair_id (e.g. router restart wiped in-memory state), heartbeat must
 // surface ErrRouterNotFound so the TEE can decide to re-register.
 func TestRouterClient_Heartbeat_404IsErrNotFound(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "pair not found", http.StatusNotFound)
 	}))
-	t.Cleanup(srv.Close)
+	httpClient := srv.Client()
 
 	c := NewRouterClient(srv.URL, stubTokens)
+	c.httpClient = httpClient
 	_, err := c.Heartbeat(t.Context(), HeartbeatRequest{PairID: "p1", Role: "K"})
 	if !errors.Is(err, ErrRouterNotFound) {
 		t.Fatalf("expected ErrRouterNotFound, got %v", err)
@@ -82,15 +83,16 @@ func TestRouterClient_Heartbeat_404IsErrNotFound(t *testing.T) {
 }
 
 func TestRouterClient_BaseURLTrailingSlash(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/register" {
 			t.Errorf("expected /register, got %q (should not get doubled slashes)", r.URL.Path)
 		}
-		_ = json.NewEncoder(w).Encode(RegisterResponse{PairID: "p1", Status: "registering"})
+		_ = json.MarshalWrite(w, RegisterResponse{PairID: "p1", Status: "registering"})
 	}))
-	t.Cleanup(srv.Close)
+	httpClient := srv.Client()
 
 	c := NewRouterClient(srv.URL+"/", stubTokens)
+	c.httpClient = httpClient
 	if _, err := c.Register(t.Context(), RegisterRequest{
 		PairID: "p1", Role: "K", SelfAddr: "x", PeerAddrClaim: "y",
 		ImageDigest: "z", AttestationJWT: "a",
@@ -114,12 +116,13 @@ func TestRouterClient_TokenError(t *testing.T) {
 
 // TestRouterClient_500ReturnsError confirms that non-2xx is propagated.
 func TestRouterClient_500ReturnsError(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "boom", http.StatusInternalServerError)
 	}))
-	t.Cleanup(srv.Close)
+	httpClient := srv.Client()
 
 	c := NewRouterClient(srv.URL, stubTokens)
+	c.httpClient = httpClient
 	_, err := c.Register(t.Context(), RegisterRequest{
 		PairID: "p1", Role: "K", SelfAddr: "x", PeerAddrClaim: "y",
 		ImageDigest: "z", AttestationJWT: "a",

@@ -4,7 +4,7 @@ import (
 	"context"
 	"crypto/rsa"
 	"encoding/base64"
-	"encoding/json"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"io"
@@ -169,7 +169,7 @@ func (g *GoogleJWKSFetcher) fetchAndCache(ctx context.Context) error {
 	var doc struct {
 		Keys []rawJWK `json:"keys"`
 	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, maxJWKSBytes)).Decode(&doc); err != nil {
+	if err := json.UnmarshalRead(io.LimitReader(resp.Body, maxJWKSBytes), &doc); err != nil {
 		return fmt.Errorf("decode jwks: %w", err)
 	}
 	keys := make(map[string]any, len(doc.Keys))

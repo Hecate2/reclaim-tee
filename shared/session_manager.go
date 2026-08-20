@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"sync"
 	"time"
+	"uuid"
 
 	teeproto "github.com/reclaimprotocol/reclaim-tee/proto"
 
-	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"go.uber.org/zap"
 	"google.golang.org/protobuf/proto"
@@ -71,10 +71,7 @@ func (sm *SessionManager) SetOnSessionExpired(fn func(session *Session)) {
 
 // CreateSession creates a new session with secure UUID
 func (sm *SessionManager) CreateSession(clientConn Connection) (string, error) {
-	sessionID, err := uuid.NewRandom()
-	if err != nil {
-		return "", fmt.Errorf("failed to generate session ID: %w", err)
-	}
+	sessionID := uuid.NewV4()
 
 	ctx, cancel := context.WithCancel(context.Background())
 

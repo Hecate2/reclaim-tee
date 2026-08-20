@@ -82,10 +82,11 @@ func startStandaloneMode(config *TEEKConfig, logger *shared.Logger, boot *shared
 	}()
 
 	server := &http.Server{
-		Addr:         fmt.Sprintf(":%d", config.Port),
-		Handler:      setupRoutes(teek),
-		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 30 * time.Second,
+		Addr:                fmt.Sprintf(":%d", config.Port),
+		Handler:             setupRoutes(teek),
+		ReadTimeout:         30 * time.Second,
+		WriteTimeout:        30 * time.Second,
+		MaxHeaderValueCount: 50,
 	}
 
 	logger.Info("OT precomputation complete, starting HTTP server", zap.Int("port", config.Port))

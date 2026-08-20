@@ -195,9 +195,10 @@ func startRouterMode(parent context.Context, config *TEETConfig, logger *shared.
 	mux := setupRoutes(teet)
 	var handler http.Handler = mux
 	server := &http.Server{
-		Addr:         fmt.Sprintf(":%d", config.Port),
-		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 30 * time.Second,
+		Addr:                fmt.Sprintf(":%d", config.Port),
+		ReadTimeout:         30 * time.Second,
+		WriteTimeout:        30 * time.Second,
+		MaxHeaderValueCount: 50,
 	}
 	serveTLS := false
 	if teet.ratls != nil {

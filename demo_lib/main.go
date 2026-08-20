@@ -49,7 +49,8 @@ extern void goZKInitCallback(unsigned char algorithm_id);
 */
 import "C"
 import (
-	"encoding/json"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"fmt"
 	"log"
 	"os"
@@ -286,7 +287,7 @@ func main() {
 
 	// Print full JSON for debugging/integration
 	fmt.Println("\nFull Claim JSON:")
-	prettyJSON, err := json.MarshalIndent(claimData, "", "  ")
+	prettyJSON, err := json.Marshal(claimData, jsontext.WithIndent("  "))
 	if err != nil {
 		fmt.Printf("Error formatting JSON: %v\n", err)
 		fmt.Println(claimDataStr)

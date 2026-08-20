@@ -5,27 +5,27 @@ import (
 	"crypto/ecdsa"
 	"crypto/sha256"
 	"crypto/x509"
-	"encoding/json"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"net"
 	"net/http"
 	"time"
+	"uuid"
 
 	"github.com/reclaimprotocol/reclaim-tee/router/auth"
 	"github.com/reclaimprotocol/reclaim-tee/router/geo"
 	"github.com/reclaimprotocol/reclaim-tee/router/store"
 	"github.com/reclaimprotocol/reclaim-tee/shared"
 
-	"github.com/google/uuid"
 	"go.uber.org/zap"
 )
 
 type registerRequest struct {
-	PairID         string `json:"pair_id"`
-	Role           string `json:"role"`
-	SelfAddr       string `json:"self_addr"`
-	PeerAddrClaim  string `json:"peer_addr_claim"`
+	PairID          string `json:"pair_id"`
+	Role            string `json:"role"`
+	SelfAddr        string `json:"self_addr"`
+	PeerAddrClaim   string `json:"peer_addr_claim"`
 	ImageDigest     string `json:"image_digest"`
 	AttestationType string `json:"attestation_type,omitempty"`
 	AttestationJWT  string `json:"attestation_jwt"`
@@ -58,7 +58,7 @@ func (s *Server) HandleRegister(w http.ResponseWriter, r *http.Request) {
 	log := s.Logger
 
 	var req registerRequest
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
+	if err := json.UnmarshalRead(http.MaxBytesReader(w, r.Body, 1<<20), &req); err != nil {
 		writeErr(w, http.StatusBadRequest, "decode body: "+err.Error())
 		return
 	}
@@ -324,4 +324,3 @@ func (req registerRequest) validate() error {
 	}
 	return nil
 }
-

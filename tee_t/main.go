@@ -68,10 +68,11 @@ func startStandaloneMode(config *TEETConfig, logger *shared.Logger, boot *shared
 	}()
 
 	server := &http.Server{
-		Addr:         fmt.Sprintf(":%d", config.Port),
-		Handler:      setupRoutes(teet),
-		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 30 * time.Second,
+		Addr:                fmt.Sprintf(":%d", config.Port),
+		Handler:             setupRoutes(teet),
+		ReadTimeout:         30 * time.Second,
+		WriteTimeout:        30 * time.Second,
+		MaxHeaderValueCount: 50,
 	}
 
 	logger.Info("Starting standalone server", zap.Int("port", config.Port))

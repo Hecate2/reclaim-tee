@@ -1,7 +1,8 @@
 package client
 
 import (
-	"encoding/json"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"fmt"
 	"strings"
 	"time"
@@ -120,7 +121,7 @@ const (
 // NewReclaimClientFromJSON creates a new ReclaimClient with JSON-encoded provider params and optional config
 func NewReclaimClientFromJSON(providerParamsJSON string, configJSON string) (*ReclaimClient, error) {
 	// First parse to extract provider name and raw JSON for validation
-	var rawData map[string]json.RawMessage
+	var rawData map[string]jsontext.Value
 	if err := json.Unmarshal([]byte(providerParamsJSON), &rawData); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal request JSON: %v", err)
 	}

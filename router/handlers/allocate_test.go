@@ -2,7 +2,7 @@ package handlers
 
 import (
 	"bytes"
-	"encoding/json"
+	"encoding/json/v2"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -55,6 +55,29 @@ func doAllocate(t *testing.T, s *Server, clientNonce string) *httptest.ResponseR
 	w := httptest.NewRecorder()
 	s.HandleAllocate(w, req)
 	return w
+}
+
+func TestAllocateRejectsAmbiguousOrMalformedJSON(t *testing.T) {
+	tests := []struct {
+		name string
+		body []byte
+	}{
+		{name: "duplicate member", body: []byte(`{"client_nonce":"first","client_nonce":"second"}`)},
+		{name: "invalid UTF-8", body: []byte{'{', '"', 'c', 'l', 'i', 'e', 'n', 't', '_', 'n', 'o', 'n', 'c', 'e', '"', ':', '"', 0xff, '"', '}'}},
+		{name: "multiple values", body: []byte(`{"client_nonce":"first"}{"client_nonce":"second"}`)},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s, _ := newTestServerWithSigner(t)
+			req := httptest.NewRequest(http.MethodPost, "/allocate", bytes.NewReader(tt.body))
+			w := httptest.NewRecorder()
+			s.HandleAllocate(w, req)
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want %d; body=%s", w.Code, http.StatusBadRequest, w.Body.String())
+			}
+		})
+	}
 }
 
 func TestAllocateNoReadyPairs(t *testing.T) {

@@ -5,7 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"encoding/base64"
-	"encoding/json"
+	"encoding/json/v2"
 	"errors"
 	"math/big"
 	"net/http"
@@ -195,15 +195,15 @@ func TestGoogleJWKSFetcher_FetchesAndCaches(t *testing.T) {
 	priv, _ := rsa.GenerateKey(rand.Reader, 2048)
 	pubJWK := rsaJWK("kid-1", &priv.PublicKey)
 	var hits int
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		hits++
-		_ = json.NewEncoder(w).Encode(map[string]any{"keys": []rawJWK{pubJWK}})
+		_ = json.MarshalWrite(w, map[string]any{"keys": []rawJWK{pubJWK}})
 	}))
-	t.Cleanup(srv.Close)
+	client := srv.Client()
 
 	g := &GoogleJWKSFetcher{
 		url:        srv.URL,
-		client:     srv.Client(),
+		client:     client,
 		refreshTTL: time.Hour,
 	}
 
@@ -232,15 +232,15 @@ func TestGoogleJWKSFetcher_RefreshOnUnknownKid(t *testing.T) {
 	priv, _ := rsa.GenerateKey(rand.Reader, 2048)
 	var serveKid string
 	var hits int
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		hits++
-		_ = json.NewEncoder(w).Encode(map[string]any{"keys": []rawJWK{rsaJWK(serveKid, &priv.PublicKey)}})
+		_ = json.MarshalWrite(w, map[string]any{"keys": []rawJWK{rsaJWK(serveKid, &priv.PublicKey)}})
 	}))
-	t.Cleanup(srv.Close)
+	client := srv.Client()
 
 	g := &GoogleJWKSFetcher{
 		url:        srv.URL,
-		client:     srv.Client(),
+		client:     client,
 		refreshTTL: time.Hour,
 	}
 	serveKid = "kid-A"
@@ -259,14 +259,14 @@ func TestGoogleJWKSFetcher_RefreshOnUnknownKid(t *testing.T) {
 }
 
 func TestGoogleJWKSFetcher_ServerErrorPropagates(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "boom", http.StatusInternalServerError)
 	}))
-	t.Cleanup(srv.Close)
+	client := srv.Client()
 
 	g := &GoogleJWKSFetcher{
 		url:        srv.URL,
-		client:     srv.Client(),
+		client:     client,
 		refreshTTL: time.Hour,
 	}
 	if _, err := g.GetKey(t.Context(), "kid-1"); err == nil {

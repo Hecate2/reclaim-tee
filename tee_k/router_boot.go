@@ -9,10 +9,10 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+	"uuid"
 
 	"github.com/reclaimprotocol/reclaim-tee/shared"
 
-	"github.com/google/uuid"
 	"go.uber.org/zap"
 )
 
@@ -54,7 +54,7 @@ func startRouterMode(parent context.Context, config *TEEKConfig, logger *shared.
 		logger.Info("Discovered SELF_ADDR from GCE metadata", zap.String("self_addr", config.SelfAddr))
 	}
 
-	pairID := uuid.NewString()
+	pairID := uuid.NewV4().String()
 	logger.Info("Generated pair ID", zap.String("pair_id", pairID))
 
 	var ratls *shared.RATLSManager
@@ -151,10 +151,11 @@ func startRouterMode(parent context.Context, config *TEEKConfig, logger *shared.
 	go teek.establishSharedTEETConnection()
 
 	server := &http.Server{
-		Addr:         fmt.Sprintf(":%d", config.Port),
-		Handler:      setupRoutes(teek),
-		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 30 * time.Second,
+		Addr:                fmt.Sprintf(":%d", config.Port),
+		Handler:             setupRoutes(teek),
+		ReadTimeout:         30 * time.Second,
+		WriteTimeout:        30 * time.Second,
+		MaxHeaderValueCount: 50,
 	}
 	serveTLS := false
 	if teek.ratls != nil {

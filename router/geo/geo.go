@@ -11,7 +11,7 @@ package geo
 
 import (
 	"context"
-	"encoding/json"
+	"encoding/json/v2"
 	"fmt"
 	"math"
 	"net"
@@ -138,7 +138,7 @@ func getJSON(ctx context.Context, c *http.Client, url string, v any) error {
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("%s: status %d", url, resp.StatusCode)
 	}
-	return json.NewDecoder(resp.Body).Decode(v)
+	return json.UnmarshalRead(resp.Body, v)
 }
 
 // regionCentroid maps an AWS/GCP region to an approximate datacenter lat/long.

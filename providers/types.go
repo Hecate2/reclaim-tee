@@ -1,7 +1,7 @@
 package providers
 
 import (
-	"encoding/json"
+	"encoding/json/v2"
 	"github.com/reclaimprotocol/reclaim-tee/shared"
 )
 

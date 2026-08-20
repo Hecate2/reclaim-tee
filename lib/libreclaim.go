@@ -48,7 +48,7 @@ import "C"
 import (
 	"encoding/base64"
 	"encoding/hex"
-	"encoding/json"
+	"encoding/json/v2"
 	"fmt"
 	"os"
 	"unsafe"
@@ -524,7 +524,7 @@ func Prove(params []byte) (proofRes unsafe.Pointer, resLen int) {
 				logger.Error("Panic in Prove function",
 					zap.Any("error", err))
 			}
-			bRes, er := json.Marshal(err)
+			bRes, er := marshalRecoveredPanic(err)
 			if er != nil {
 				if logger != nil {
 					logger.Error("Failed to marshal error", zap.Error(er))
@@ -547,7 +547,7 @@ func GenerateOPRFRequestData(params []byte) (proofRes unsafe.Pointer, resLen int
 				logger.Error("Panic in GenerateOPRFRequestData function",
 					zap.Any("error", err))
 			}
-			bRes, er := json.Marshal(err)
+			bRes, er := marshalRecoveredPanic(err)
 			if er != nil {
 				if logger != nil {
 					logger.Error("Failed to marshal error", zap.Error(er))
@@ -570,7 +570,7 @@ func TOPRFFinalize(params []byte) (proofRes unsafe.Pointer, resLen int) {
 				logger.Error("Panic in TOPRFFinalize function",
 					zap.Any("error", err))
 			}
-			bRes, er := json.Marshal(err)
+			bRes, er := marshalRecoveredPanic(err)
 			if er != nil {
 				if logger != nil {
 					logger.Error("Failed to marshal error", zap.Error(er))
@@ -583,6 +583,10 @@ func TOPRFFinalize(params []byte) (proofRes unsafe.Pointer, resLen int) {
 
 	res := oprf.TOPRFFinalize(params)
 	return C.CBytes(res), len(res)
+}
+
+func marshalRecoveredPanic(value any) ([]byte, error) {
+	return json.Marshal(fmt.Sprint(value))
 }
 
 // ============================================================================

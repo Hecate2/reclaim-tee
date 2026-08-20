@@ -3,7 +3,8 @@ package client
 import (
 	"bytes"
 	"encoding/base64"
-	"encoding/json"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"fmt"
 	"maps"
 	"slices"
@@ -23,9 +24,9 @@ import (
 // These avoid importing the verifier package while producing identical JSON output
 
 type zkInputVerifyParams struct {
-	Cipher        string          `json:"cipher"`
-	Proof         []uint8         `json:"proof"`
-	PublicSignals json.RawMessage `json:"publicSignals"`
+	Cipher        string         `json:"cipher"`
+	Proof         []uint8        `json:"proof"`
+	PublicSignals jsontext.Value `json:"publicSignals"`
 }
 
 type zkInputTOPRFParams struct {
@@ -482,7 +483,7 @@ func (c *Client) buildVerificationBundle() ([]byte, error) {
 			verifyParams := zkInputVerifyParams{
 				Cipher:        oprfData.ZKProofParams.Cipher,
 				Proof:         oprfData.ZKProof,
-				PublicSignals: json.RawMessage(publicSignalsJSON),
+				PublicSignals: jsontext.Value(publicSignalsJSON),
 			}
 
 			// Marshal the complete verify params

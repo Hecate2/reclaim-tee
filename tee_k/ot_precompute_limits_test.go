@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"io"
 	"math"
@@ -13,6 +14,20 @@ import (
 
 	"google.golang.org/protobuf/proto"
 )
+
+func TestNewV4UUIDFromReader(t *testing.T) {
+	id, err := newV4UUIDFromReader(bytes.NewReader(make([]byte, 16)))
+	if err != nil {
+		t.Fatalf("new UUID: %v", err)
+	}
+	if got, want := id.String(), "00000000-0000-4000-8000-000000000000"; got != want {
+		t.Fatalf("UUID = %q, want %q", got, want)
+	}
+
+	if _, err := newV4UUIDFromReader(bytes.NewReader(make([]byte, 15))); !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("short reader error = %v, want %v", err, io.ErrUnexpectedEOF)
+	}
+}
 
 func TestOTPrecomputeCountPreflightBeforeStateAndRandomness(t *testing.T) {
 	rng := &failAfterReader{remaining: 64}

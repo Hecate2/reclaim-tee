@@ -2,12 +2,10 @@ package handlers
 
 import (
 	"bytes"
-	"encoding/json"
+	"encoding/json/v2"
 	"io"
-	"net"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 
@@ -22,11 +20,12 @@ import (
 
 // integrationServer wires a Server with in-memory store, fake SA + attestation
 // validators, a real LocalSigner, and admin-token enabled. Returned alongside
-// a running httptest.NewServer so the test can drive real HTTP requests.
+// an in-memory httptest server so the test can drive real HTTP requests.
 type integrationServer struct {
 	srv     *Server
 	signer  *signer.LocalSigner
 	http    *httptest.Server
+	client  *http.Client
 	baseURL string
 }
 
@@ -68,9 +67,9 @@ func newIntegrationServer(t *testing.T) *integrationServer {
 			AdminTokenHash:     sha256Hex(intAdminToken),
 		},
 	}
-	hs := httptest.NewServer(srv.Routes())
-	t.Cleanup(hs.Close)
-	return &integrationServer{srv: srv, signer: ls, http: hs, baseURL: hs.URL}
+	hs := httptest.NewTestServer(t, srv.Routes())
+	client := hs.Client()
+	return &integrationServer{srv: srv, signer: ls, http: hs, client: client, baseURL: hs.URL}
 }
 
 // post sends a JSON-encoded body to path with optional headers; returns
@@ -96,7 +95,7 @@ func (i *integrationServer) post(t *testing.T, path string, body any, headers ma
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := i.client.Do(req)
 	if err != nil {
 		t.Fatalf("do request: %v", err)
 	}
@@ -114,7 +113,7 @@ func (i *integrationServer) get(t *testing.T, path string, headers map[string]st
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := i.client.Do(req)
 	if err != nil {
 		t.Fatalf("do request: %v", err)
 	}
@@ -123,15 +122,10 @@ func (i *integrationServer) get(t *testing.T, path string, headers map[string]st
 	return resp.StatusCode, respBody
 }
 
-// loopbackAddr returns the test server's local IP:443. We set it as both
-// the TEE_K and TEE_T self_addr so the source-IP check passes (httptest
-// connections come from 127.0.0.1).
+// loopbackAddr returns a stable valid TEE address for registration requests.
+// Router registration no longer derives identity from the HTTP source address.
 func (i *integrationServer) loopbackAddr() string {
-	host, _, err := net.SplitHostPort(strings.TrimPrefix(i.baseURL, "http://"))
-	if err != nil {
-		host = "127.0.0.1"
-	}
-	return host + ":443"
+	return "127.0.0.1:443"
 }
 
 // TestIntegration_FullLifecycle exercises the whole router API end-to-end

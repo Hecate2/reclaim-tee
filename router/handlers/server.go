@@ -4,7 +4,8 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
-	"encoding/json"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"errors"
 	"net/http"
 	"strings"
@@ -101,5 +102,5 @@ func writeErr(w http.ResponseWriter, status int, msg string) {
 func writeJSON(w http.ResponseWriter, status int, body any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(body)
+	_ = json.MarshalEncode(jsontext.NewEncoder(w), body)
 }

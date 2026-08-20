@@ -1,7 +1,8 @@
 package handlers
 
 import (
-	"encoding/json"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"net/http"
 )
 
@@ -12,7 +13,7 @@ import (
 func (s *Server) HandleHealthz(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(struct {
+	_ = json.MarshalEncode(jsontext.NewEncoder(w), struct {
 		Status     string `json:"status"`
 		Standalone bool   `json:"standalone"`
 	}{

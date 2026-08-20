@@ -1,12 +1,13 @@
 package handlers
 
 import (
-	"encoding/json"
+	"encoding/json/v2"
 	"errors"
 	"net"
 	"net/http"
 	"slices"
 	"time"
+	"uuid"
 
 	"github.com/reclaimprotocol/reclaim-tee/router/geo"
 	"github.com/reclaimprotocol/reclaim-tee/router/selector"
@@ -14,7 +15,6 @@ import (
 	"github.com/reclaimprotocol/reclaim-tee/shared"
 
 	"github.com/golang-jwt/jwt/v5"
-	"github.com/google/uuid"
 	"go.uber.org/zap"
 )
 
@@ -57,7 +57,7 @@ func (s *Server) HandleAllocate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req allocateRequest
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64*1024)).Decode(&req); err != nil {
+	if err := json.UnmarshalRead(http.MaxBytesReader(w, r.Body, 64*1024), &req); err != nil {
 		writeErr(w, http.StatusBadRequest, "decode body: "+err.Error())
 		return
 	}
@@ -107,7 +107,7 @@ func (s *Server) HandleAllocate(w http.ResponseWriter, r *http.Request) {
 		Audience:    jwt.ClaimStrings{picked.ID},
 		IssuedAt:    jwt.NewNumericDate(now),
 		ExpiresAt:   jwt.NewNumericDate(now.Add(s.Config.JWTExpiry)),
-		ID:          uuid.NewString(),
+		ID:          uuid.NewV4().String(),
 	}
 	tokenStr, err := s.Signer.Sign(claims)
 	if err != nil {

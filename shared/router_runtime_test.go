@@ -4,12 +4,13 @@ package shared
 
 import (
 	"context"
-	"encoding/json"
+	"encoding/json/v2"
 	"net/http"
 	"net/http/httptest"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -24,11 +25,11 @@ type fakeHeartbeatTarget struct {
 	activeSessions int
 }
 
-func (f *fakeHeartbeatTarget) PairID() string         { return f.pairID }
-func (f *fakeHeartbeatTarget) Router() *RouterClient  { return f.router }
-func (f *fakeHeartbeatTarget) ControlHealthy() bool   { return f.controlHealthy }
-func (f *fakeHeartbeatTarget) OTReady() bool          { return f.otReady }
-func (f *fakeHeartbeatTarget) ActiveSessions() int    { return f.activeSessions }
+func (f *fakeHeartbeatTarget) PairID() string        { return f.pairID }
+func (f *fakeHeartbeatTarget) Router() *RouterClient { return f.router }
+func (f *fakeHeartbeatTarget) ControlHealthy() bool  { return f.controlHealthy }
+func (f *fakeHeartbeatTarget) OTReady() bool         { return f.otReady }
+func (f *fakeHeartbeatTarget) ActiveSessions() int   { return f.activeSessions }
 
 // fakeRouter answers /register and /heartbeat. heartbeat404Until lets a
 // test 404 the first N heartbeats to exercise the re-register path.
@@ -46,7 +47,7 @@ func (f *fakeRouter) handler() http.HandlerFunc {
 		switch r.URL.Path {
 		case "/register":
 			f.registers++
-			_ = json.NewEncoder(w).Encode(RegisterResponse{
+			_ = json.MarshalWrite(w, RegisterResponse{
 				PairID: "test-pair", Status: "registering",
 			})
 		case "/heartbeat":
@@ -55,7 +56,7 @@ func (f *fakeRouter) handler() http.HandlerFunc {
 				http.Error(w, "not found", http.StatusNotFound)
 				return
 			}
-			_ = json.NewEncoder(w).Encode(HeartbeatResponse{
+			_ = json.MarshalWrite(w, HeartbeatResponse{
 				PairID: "test-pair", Status: "degraded",
 			})
 		default:
@@ -70,133 +71,130 @@ func (f *fakeRouter) snapshot() (heartbeats, registers int) {
 	return f.heartbeats, f.registers
 }
 
-func newFakeRouter() (*fakeRouter, *httptest.Server) {
+func newFakeRouter(t *testing.T) (*fakeRouter, *RouterClient) {
+	t.Helper()
 	f := &fakeRouter{}
-	return f, httptest.NewServer(f.handler())
+	srv := httptest.NewTestServer(t, f.handler())
+	httpClient := srv.Client()
+	tokens := func(_ context.Context, _ string) (string, error) { return "fake", nil }
+	router := NewRouterClient(srv.URL, tokens)
+	router.httpClient = httpClient
+	return f, router
 }
 
 func TestRunHeartbeats_SendsPeriodically(t *testing.T) {
-	f, srv := newFakeRouter()
-	t.Cleanup(srv.Close)
+	synctest.Test(t, func(t *testing.T) {
+		f, router := newFakeRouter(t)
+		ctx, cancel := context.WithCancel(t.Context())
+		t.Cleanup(cancel)
 
-	tokens := func(_ context.Context, _ string) (string, error) { return "fake", nil }
-	router := NewRouterClient(srv.URL, tokens)
+		target := &fakeHeartbeatTarget{pairID: "test-pair", router: router}
+		done := make(chan struct{})
+		go func() {
+			RunHeartbeats(ctx, target, "K", GetTEEKLogger(),
+				func(_ context.Context) error { return nil },
+				5*time.Millisecond)
+			close(done)
+		}()
 
-	ctx, cancel := context.WithCancel(t.Context())
-	t.Cleanup(cancel)
+		synctest.Sleep(30 * time.Millisecond)
+		cancel()
+		synctest.Wait()
+		<-done
 
-	target := &fakeHeartbeatTarget{pairID: "test-pair", router: router}
-	done := make(chan struct{})
-	go func() {
-		RunHeartbeats(ctx, target, "K", GetTEEKLogger(),
-			func(_ context.Context) error { return nil },
-			5*time.Millisecond)
-		close(done)
-	}()
-
-	time.Sleep(30 * time.Millisecond)
-	cancel()
-	<-done
-
-	hb, regs := f.snapshot()
-	if hb < 3 {
-		t.Fatalf("expected at least 3 heartbeats in 30ms@5ms, got %d", hb)
-	}
-	if regs != 0 {
-		t.Fatalf("expected no re-registers when heartbeats succeed, got %d", regs)
-	}
+		hb, regs := f.snapshot()
+		if hb < 3 {
+			t.Fatalf("expected at least 3 heartbeats in 30ms@5ms, got %d", hb)
+		}
+		if regs != 0 {
+			t.Fatalf("expected no re-registers when heartbeats succeed, got %d", regs)
+		}
+	})
 }
 
 func TestRunHeartbeats_ReregistersOn404(t *testing.T) {
-	f, srv := newFakeRouter()
-	f.heartbeat404Until = 1
-	t.Cleanup(srv.Close)
+	synctest.Test(t, func(t *testing.T) {
+		f, router := newFakeRouter(t)
+		f.heartbeat404Until = 1
+		ctx, cancel := context.WithCancel(t.Context())
+		t.Cleanup(cancel)
 
-	tokens := func(_ context.Context, _ string) (string, error) { return "fake", nil }
-	router := NewRouterClient(srv.URL, tokens)
+		var reregisterCalls atomic.Int32
+		onLost := func(_ context.Context) error {
+			reregisterCalls.Add(1)
+			return nil
+		}
 
-	ctx, cancel := context.WithCancel(t.Context())
-	t.Cleanup(cancel)
+		target := &fakeHeartbeatTarget{pairID: "test-pair", router: router}
+		done := make(chan struct{})
+		go func() {
+			RunHeartbeats(ctx, target, "K", GetTEEKLogger(), onLost, 5*time.Millisecond)
+			close(done)
+		}()
 
-	var reregisterCalls atomic.Int32
-	onLost := func(_ context.Context) error {
-		reregisterCalls.Add(1)
-		return nil
-	}
+		synctest.Sleep(40 * time.Millisecond)
+		cancel()
+		synctest.Wait()
+		<-done
 
-	target := &fakeHeartbeatTarget{pairID: "test-pair", router: router}
-	done := make(chan struct{})
-	go func() {
-		RunHeartbeats(ctx, target, "K", GetTEEKLogger(), onLost, 5*time.Millisecond)
-		close(done)
-	}()
-
-	time.Sleep(40 * time.Millisecond)
-	cancel()
-	<-done
-
-	if got := reregisterCalls.Load(); got != 1 {
-		t.Fatalf("expected exactly 1 re-register triggered by 404, got %d", got)
-	}
-	hb, _ := f.snapshot()
-	if hb < 3 {
-		t.Fatalf("expected heartbeats to keep firing after 404, got %d", hb)
-	}
+		if got := reregisterCalls.Load(); got != 1 {
+			t.Fatalf("expected exactly 1 re-register triggered by 404, got %d", got)
+		}
+		hb, _ := f.snapshot()
+		if hb < 3 {
+			t.Fatalf("expected heartbeats to keep firing after 404, got %d", hb)
+		}
+	})
 }
 
 func TestRunHeartbeats_SkipsUntilPairIDKnown(t *testing.T) {
-	f, srv := newFakeRouter()
-	t.Cleanup(srv.Close)
+	synctest.Test(t, func(t *testing.T) {
+		f, router := newFakeRouter(t)
+		ctx, cancel := context.WithCancel(t.Context())
+		t.Cleanup(cancel)
 
-	tokens := func(_ context.Context, _ string) (string, error) { return "fake", nil }
-	router := NewRouterClient(srv.URL, tokens)
+		target := &fakeHeartbeatTarget{pairID: "", router: router} // unknown
+		done := make(chan struct{})
+		go func() {
+			RunHeartbeats(ctx, target, "T", GetTEETLogger(),
+				func(_ context.Context) error { return nil },
+				5*time.Millisecond)
+			close(done)
+		}()
 
-	ctx, cancel := context.WithCancel(t.Context())
-	t.Cleanup(cancel)
+		synctest.Sleep(30 * time.Millisecond)
+		cancel()
+		synctest.Wait()
+		<-done
 
-	target := &fakeHeartbeatTarget{pairID: "", router: router} // unknown
-	done := make(chan struct{})
-	go func() {
-		RunHeartbeats(ctx, target, "T", GetTEETLogger(),
-			func(_ context.Context) error { return nil },
-			5*time.Millisecond)
-		close(done)
-	}()
-
-	time.Sleep(30 * time.Millisecond)
-	cancel()
-	<-done
-
-	hb, _ := f.snapshot()
-	if hb != 0 {
-		t.Fatalf("expected zero heartbeats when pair_id empty, got %d", hb)
-	}
+		hb, _ := f.snapshot()
+		if hb != 0 {
+			t.Fatalf("expected zero heartbeats when pair_id empty, got %d", hb)
+		}
+	})
 }
 
 func TestRunHeartbeats_ContextCancelStops(t *testing.T) {
-	_, srv := newFakeRouter()
-	t.Cleanup(srv.Close)
+	synctest.Test(t, func(t *testing.T) {
+		_, router := newFakeRouter(t)
+		ctx, cancel := context.WithCancel(t.Context())
+		target := &fakeHeartbeatTarget{pairID: "p", router: router}
+		done := make(chan struct{})
+		go func() {
+			RunHeartbeats(ctx, target, "K", GetTEEKLogger(),
+				func(_ context.Context) error { return nil },
+				50*time.Millisecond)
+			close(done)
+		}()
 
-	tokens := func(_ context.Context, _ string) (string, error) { return "fake", nil }
-	router := NewRouterClient(srv.URL, tokens)
-
-	ctx, cancel := context.WithCancel(t.Context())
-	target := &fakeHeartbeatTarget{pairID: "p", router: router}
-	done := make(chan struct{})
-	go func() {
-		RunHeartbeats(ctx, target, "K", GetTEEKLogger(),
-			func(_ context.Context) error { return nil },
-			50*time.Millisecond)
-		close(done)
-	}()
-
-	cancel()
-	select {
-	case <-done:
-		// expected
-	case <-time.After(time.Second):
-		t.Fatal("RunHeartbeats did not return within 1s of context cancel")
-	}
+		cancel()
+		synctest.Wait()
+		select {
+		case <-done:
+		default:
+			t.Fatal("RunHeartbeats did not return after context cancellation")
+		}
+	})
 }
 
 func TestExtractIdentityFromRATLS_StandaloneMode(t *testing.T) {

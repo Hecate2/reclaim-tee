@@ -1,16 +1,16 @@
 package handlers
 
 import (
-	"encoding/json"
+	"encoding/json/v2"
 	"errors"
 	"net/http"
 	"strings"
 	"time"
+	"uuid"
 
 	"github.com/reclaimprotocol/reclaim-tee/router/store"
 	"github.com/reclaimprotocol/reclaim-tee/shared"
 
-	"github.com/google/uuid"
 	"go.uber.org/zap"
 )
 
@@ -40,7 +40,7 @@ func (s *Server) HandleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	log := s.Logger
 
 	var req heartbeatRequest
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
+	if err := json.UnmarshalRead(http.MaxBytesReader(w, r.Body, 1<<20), &req); err != nil {
 		writeErr(w, http.StatusBadRequest, "decode body: "+err.Error())
 		return
 	}

@@ -10,7 +10,7 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
-	"encoding/json"
+	"encoding/json/v2"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -383,7 +383,7 @@ func TestRegister_OrphanSweep_DeletesPreviousAtSameAddr(t *testing.T) {
 		t.Fatalf("first register: got %d body=%s", w.Code, w.Body.String())
 	}
 
-	// Same VM restarts (same addr A) with a new pair_id — what uuid.NewString
+	// Same VM restarts (same addr A) with a new pair_id — what uuid.NewV4
 	// produces on every boot today.
 	newID := "22222222-2222-2222-2222-222222222222"
 	body.PairID = newID

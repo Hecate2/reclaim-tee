@@ -87,9 +87,10 @@ func main() {
 	}
 
 	httpSrv := &http.Server{
-		Addr:              ":" + cfg.Port,
-		Handler:           srv.Routes(),
-		ReadHeaderTimeout: 5 * time.Second,
+		Addr:                ":" + cfg.Port,
+		Handler:             srv.Routes(),
+		ReadHeaderTimeout:   5 * time.Second,
+		MaxHeaderValueCount: 50,
 	}
 
 	logger.Info("router listening", zap.String("port", cfg.Port))
