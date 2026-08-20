@@ -24,12 +24,10 @@ func TestConnectionManagerConcurrentInitializationReturnsSingleOwner(t *testing.
 	results := make(chan *TEEKConnectionManager, callers)
 	var wg sync.WaitGroup
 	for range callers {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			<-start
 			results <- teet.connectionManager()
-		}()
+		})
 	}
 	close(start)
 	wg.Wait()
@@ -997,13 +995,11 @@ func TestSessionTEEKConnectionClosedAccessIsSynchronized(t *testing.T) {
 	conn := &SessionTEEKConnection{}
 	var wg sync.WaitGroup
 	for range 16 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for range 100 {
 				_ = conn.isClosed()
 			}
-		}()
+		})
 	}
 	conn.mu.Lock()
 	conn.closed = true

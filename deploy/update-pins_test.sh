@@ -32,9 +32,9 @@ case "${command}" in
         case "$*" in
             *golang*)
                 if [[ "${MOCK_MODE:-success}" == version-mismatch ]]; then
-                    echo 'GOLANG_VERSION=1.26.5'
+                    echo 'GOLANG_VERSION=1.26.7'
                 else
-                    echo 'GOLANG_VERSION=1.26.6'
+                    echo 'GOLANG_VERSION=1.27.0'
                 fi
                 ;;
             *moby/buildkit*)
@@ -64,9 +64,9 @@ make_repo() {
     cp "${SCRIPT_DIR}/update-pins.sh" "${repo}/deploy/update-pins.sh"
     printf 'BUILDKIT_IMAGE="moby/buildkit:buildx-stable-1@%s"\n' "${OLD_BK}" >"${repo}/deploy/build.sh"
     printf 'BUILDKIT_IMAGE="moby/buildkit:buildx-stable-1@%s"\n' "${OLD_BK}" >"${repo}/deploy/verify.sh"
-    printf '# Go 1.26.5 -- update digest when upgrading Go\nFROM golang:1.26.6-alpine3.24@%s AS app-builder\n' "${go_digest}" >"${repo}/tee_k/Dockerfile.enclave"
+    printf '# Go 1.27.0 -- update digest when upgrading Go\nFROM golang:1.27.0-alpine3.24@%s AS app-builder\n' "${go_digest}" >"${repo}/tee_k/Dockerfile.enclave"
     cp "${repo}/tee_k/Dockerfile.enclave" "${repo}/tee_t/Dockerfile.enclave"
-    printf '# Go 1.26.5 -- keep this digest in sync\nFROM golang:1.26.6-alpine3.24@%s AS app-builder\n' "${go_digest}" >"${repo}/router/Dockerfile"
+    printf '# Go 1.27.0 -- keep this digest in sync\nFROM golang:1.27.0-alpine3.24@%s AS app-builder\n' "${go_digest}" >"${repo}/router/Dockerfile"
     printf '%s\n' 'loader-must-not-change' >"${repo}/deploy/snp-image/loader/main.go"
 }
 
@@ -105,7 +105,7 @@ LOADER_BEFORE="$(sha256sum "${SUCCESS_REPO}/deploy/snp-image/loader/main.go")"
 PATH="${MOCK_BIN}:${PATH}" MOCK_MODE=success MOCK_NEW_GO="${NEW_GO}" MOCK_NEW_BK="${NEW_BK}" \
     bash "${SUCCESS_REPO}/deploy/update-pins.sh" --update >"${TEST_DIR}/success.log"
 for dockerfile in tee_k/Dockerfile.enclave tee_t/Dockerfile.enclave router/Dockerfile; do
-    grep -Fqx "FROM golang:1.26.6-alpine3.24@${NEW_GO} AS app-builder" "${SUCCESS_REPO}/${dockerfile}"
+    grep -Fqx "FROM golang:1.27.0-alpine3.24@${NEW_GO} AS app-builder" "${SUCCESS_REPO}/${dockerfile}"
 done
 grep -Fq "@${NEW_BK}\"" "${SUCCESS_REPO}/deploy/build.sh"
 grep -Fq "@${NEW_BK}\"" "${SUCCESS_REPO}/deploy/verify.sh"

@@ -21,13 +21,11 @@ func TestLocalSignerRoundTrip(t *testing.T) {
 		TEEKAddr:    "10.0.0.1:443",
 		TEETAddr:    "10.0.0.2:443",
 		ClientNonce: "nonce-123",
-		RegisteredClaims: jwt.RegisteredClaims{
-			Issuer:    "router.test",
-			Audience:  jwt.ClaimStrings{"pair-abc"},
-			IssuedAt:  jwt.NewNumericDate(now),
-			ExpiresAt: jwt.NewNumericDate(now.Add(60 * time.Second)),
-			ID:        "jti-xyz",
-		},
+		Issuer:      "router.test",
+		Audience:    jwt.ClaimStrings{"pair-abc"},
+		IssuedAt:    jwt.NewNumericDate(now),
+		ExpiresAt:   jwt.NewNumericDate(now.Add(60 * time.Second)),
+		ID:          "jti-xyz",
 	}
 
 	tokenStr, err := s.Sign(claims)

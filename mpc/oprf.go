@@ -308,7 +308,7 @@ func EvaluatorOnline(session *EvaluatorSession, masks []OTMask) (*OnlineResult, 
 		e.evalPool.Put(wires)
 	}()
 	copy(wires[:InputBits], p.GarblerInputs)
-	for i := 0; i < InputBits; i++ {
+	for i := range InputBits {
 		mask := masks[i].M0
 		if session.inputBits[i] {
 			mask = masks[i].M1

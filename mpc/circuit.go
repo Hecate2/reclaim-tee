@@ -222,7 +222,7 @@ func (e *engine) garble(rng io.Reader, key *[16]byte) (*garbled, error) {
 	random := scratch.random
 	r := labelFromBytes(random[:16]).withPermutationBit(true)
 	off := 16
-	for i := 0; i < 2*InputBits; i++ {
+	for i := range 2 * InputBits {
 		l0 := labelFromBytes(random[off : off+16])
 		off += 16
 		scratch.wires[i] = wire{l0: l0, l1: l0.xor(r)}
@@ -392,7 +392,7 @@ func unaryHash(block *fixedAES, a Label, tweak uint32, buf []byte) Label {
 
 func bytesToBits(data []byte, dst []bool) {
 	for i, b := range data {
-		for bit := 0; bit < 8; bit++ {
+		for bit := range 8 {
 			dst[i*8+bit] = b&(1<<bit) != 0
 		}
 	}

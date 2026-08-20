@@ -85,12 +85,10 @@ func (f *fakeFetcher) GetKey(_ context.Context, kid string) (any, error) {
 func mintSAToken(t *testing.T, kid, issuer, audience, email string, exp time.Time, signer *rsa.PrivateKey) string {
 	t.Helper()
 	claims := &SAClaims{
-		Email: email,
-		RegisteredClaims: jwt.RegisteredClaims{
-			Issuer:    issuer,
-			Audience:  jwt.ClaimStrings{audience},
-			ExpiresAt: jwt.NewNumericDate(exp),
-		},
+		Email:     email,
+		Issuer:    issuer,
+		Audience:  jwt.ClaimStrings{audience},
+		ExpiresAt: jwt.NewNumericDate(exp),
 	}
 	tok := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
 	tok.Header["kid"] = kid
@@ -177,12 +175,10 @@ func TestGoogleSAValidator_RejectsMissingKid(t *testing.T) {
 	)
 
 	claims := &SAClaims{
-		Email: testEmail,
-		RegisteredClaims: jwt.RegisteredClaims{
-			Issuer:    testIssuer,
-			Audience:  jwt.ClaimStrings{testAudience},
-			ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Minute)),
-		},
+		Email:     testEmail,
+		Issuer:    testIssuer,
+		Audience:  jwt.ClaimStrings{testAudience},
+		ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Minute)),
 	}
 	tok := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
 	// no kid header
@@ -277,4 +273,3 @@ func TestGoogleJWKSFetcher_ServerErrorPropagates(t *testing.T) {
 		t.Fatal("expected error when JWKS endpoint returns 500")
 	}
 }
-

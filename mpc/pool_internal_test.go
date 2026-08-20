@@ -298,13 +298,11 @@ func TestSenderPoolConcurrentRefillClaimHasOneOwner(t *testing.T) {
 	var claims atomic.Int32
 	var wg sync.WaitGroup
 	for range 64 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			if pool.ClaimExtendIfNeeded() != nil {
 				claims.Add(1)
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	if got := claims.Load(); got != 1 {

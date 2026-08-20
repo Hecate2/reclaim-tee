@@ -1,6 +1,7 @@
 package client
 
 import (
+	"maps"
 	"time"
 
 	teeproto "github.com/reclaimprotocol/reclaim-tee/proto"
@@ -106,9 +107,7 @@ func cloneHTTPResponse(source *HTTPResponse) *HTTPResponse {
 	clone := *source
 	if source.Headers != nil {
 		clone.Headers = make(map[string]string, len(source.Headers))
-		for key, value := range source.Headers {
-			clone.Headers[key] = value
-		}
+		maps.Copy(clone.Headers, source.Headers)
 	}
 	clone.Body = cloneBytesPreservingNil(source.Body)
 	clone.FullResponse = cloneBytesPreservingNil(source.FullResponse)

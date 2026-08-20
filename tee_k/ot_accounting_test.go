@@ -87,9 +87,7 @@ func TestConcurrentReservationsStartExactlyOneRefill(t *testing.T) {
 	claimResult := make(chan *mpc.SenderExtendClaim, 1)
 	var wg sync.WaitGroup
 	for rangeIndex := range 64 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			_, _, _, err := teek.reserveOTEntriesForSessionWithRefill(identity, sessionState, rangeIndex, 1, func(count int, claim *mpc.SenderExtendClaim, origin *controlConnectionToken) {
 				if count != mpc.OTPoolExtendSize {
 					badCount.Store(true)
@@ -103,7 +101,7 @@ func TestConcurrentReservationsStartExactlyOneRefill(t *testing.T) {
 			if err != nil {
 				failures.Add(1)
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	if failures.Load() != 0 {
@@ -561,14 +559,12 @@ func TestConcurrentOPRFInitiationHasSingleWinner(t *testing.T) {
 	}
 	var wg sync.WaitGroup
 	for range 2 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			<-start
 			if err := teek.processQueuedOPRFRangesWithInitiator("concurrent-oprf", state, initiate); err != nil {
 				t.Error(err)
 			}
-		}()
+		})
 	}
 	close(start)
 	<-callbackStarted

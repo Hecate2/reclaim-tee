@@ -384,7 +384,7 @@ func (p *ReceiverPool) AdvanceTo(next uint64) error {
 		return fmt.Errorf("mpc: receiver OT resume index %d outside [%d,%d]", next, p.highWater, total)
 	}
 	end := int(next - p.baseIndex)
-	for i := 0; i < end; i++ {
+	for i := range end {
 		if !p.used[i] {
 			p.used[i] = true
 			p.availableCount--

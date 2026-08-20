@@ -100,10 +100,7 @@ func (r *failAfterReader) Read(dst []byte) (int, error) {
 	if r.remaining == 0 {
 		return 0, errInjectedRandom
 	}
-	n := len(dst)
-	if n > r.remaining {
-		n = r.remaining
-	}
+	n := min(len(dst), r.remaining)
 	clear(dst[:n])
 	r.remaining -= n
 	r.read += n

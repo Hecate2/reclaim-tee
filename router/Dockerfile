@@ -9,8 +9,8 @@
 # Note: we deliberately do NOT use the `enclave` build tag here — the router
 # is a normal Cloud Run service, not Confidential Space code.
 
-# Go 1.26.6 -- keep this digest in sync with tee_k/tee_t Dockerfiles.
-FROM golang:1.26.6-alpine3.24@sha256:1a9c10cf505a9e6b1e96ea77ebdbfe79a0f10380181faf88bc3b51d7e4315fae AS app-builder
+# Go 1.27.0 -- keep this digest in sync with tee_k/tee_t Dockerfiles.
+FROM golang:1.27.0-alpine3.24@sha256:c0ef102fd47cc7cfb3db3e93c4830f500307e37dad1dca44a3795e783cb0bf58 AS app-builder
 ENV CGO_ENABLED=0
 WORKDIR /src
 

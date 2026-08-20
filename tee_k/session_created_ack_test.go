@@ -777,13 +777,11 @@ func TestSessionTEETConnectionClosedAccessIsSynchronized(t *testing.T) {
 	conn := &SessionTEETConnection{}
 	var wg sync.WaitGroup
 	for range 16 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for range 100 {
 				_ = conn.isClosed()
 			}
-		}()
+		})
 	}
 	conn.mu.Lock()
 	conn.closed = true

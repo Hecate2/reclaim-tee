@@ -11,7 +11,7 @@ func transposeColumns(matrix []byte, byteRows int, dst []Label) {
 	var block [BaseOTCount]Label
 	for row := 0; row < len(dst); row += BaseOTCount {
 		byteOffset := row / 8
-		for col := 0; col < BaseOTCount; col++ {
+		for col := range BaseOTCount {
 			src := matrix[col*byteRows+byteOffset:]
 			block[col] = Label{
 				D0: binary.LittleEndian.Uint64(src[:8]),
@@ -28,7 +28,7 @@ func transposeColumns(matrix []byte, byteRows int, dst []Label) {
 // Delight.
 func transpose128(data *[BaseOTCount]Label) {
 	var a, b, c, d [64]uint64
-	for i := 0; i < 64; i++ {
+	for i := range 64 {
 		a[i], b[i] = data[i].D0, data[i].D1
 		c[i], d[i] = data[64+i].D0, data[64+i].D1
 	}
@@ -36,7 +36,7 @@ func transpose128(data *[BaseOTCount]Label) {
 	transpose64(&b)
 	transpose64(&c)
 	transpose64(&d)
-	for i := 0; i < 64; i++ {
+	for i := range 64 {
 		j := 63 - i
 		data[i] = Label{D0: bits.Reverse64(a[j]), D1: bits.Reverse64(c[j])}
 		data[64+i] = Label{D0: bits.Reverse64(b[j]), D1: bits.Reverse64(d[j])}

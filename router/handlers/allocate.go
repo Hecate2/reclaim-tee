@@ -103,13 +103,11 @@ func (s *Server) HandleAllocate(w http.ResponseWriter, r *http.Request) {
 		TEEKAddr:    picked.TEEKAddr,
 		TEETAddr:    picked.TEETAddr,
 		ClientNonce: req.ClientNonce,
-		RegisteredClaims: jwt.RegisteredClaims{
-			Issuer:    s.Config.JWTIssuer,
-			Audience:  jwt.ClaimStrings{picked.ID},
-			IssuedAt:  jwt.NewNumericDate(now),
-			ExpiresAt: jwt.NewNumericDate(now.Add(s.Config.JWTExpiry)),
-			ID:        uuid.NewString(),
-		},
+		Issuer:      s.Config.JWTIssuer,
+		Audience:    jwt.ClaimStrings{picked.ID},
+		IssuedAt:    jwt.NewNumericDate(now),
+		ExpiresAt:   jwt.NewNumericDate(now.Add(s.Config.JWTExpiry)),
+		ID:          uuid.NewString(),
 	}
 	tokenStr, err := s.Signer.Sign(claims)
 	if err != nil {

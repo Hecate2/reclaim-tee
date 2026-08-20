@@ -14,8 +14,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(dirname "${SCRIPT_DIR}")"
 
 # Current pins
-GOLANG_TAG="golang:1.26.6-alpine3.24"
-EXPECTED_GO_VERSION="1.26.6"
+GOLANG_TAG="golang:1.27.0-alpine3.24"
+EXPECTED_GO_VERSION="1.27.0"
 BUILDKIT_TAG="moby/buildkit:buildx-stable-1"
 
 require_digest() {

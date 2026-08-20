@@ -30,8 +30,7 @@ func isTerminalAttestWedge(err error) bool {
 // substitute for serial-console logging (we control exactly what it emits).
 func captureAttestationDiag(err error) []zap.Field {
 	fields := []zap.Field{}
-	var errno syscall.Errno
-	if errors.As(err, &errno) {
+	if errno, ok := errors.AsType[syscall.Errno](err); ok {
 		fields = append(fields, zap.String("errno", errno.Error()), zap.Int("errno_num", int(errno)))
 	}
 	if fi, serr := os.Stat(sevGuestDevice); serr == nil {

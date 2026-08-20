@@ -17,10 +17,7 @@ func TestCircuitShape(t *testing.T) {
 	depth := make([]int, e.numWires)
 	maxDepth := 0
 	for _, g := range e.gates {
-		d := depth[g.in0]
-		if depth[g.in1] > d {
-			d = depth[g.in1]
-		}
+		d := max(depth[g.in1], depth[g.in0])
 		switch g.op {
 		case opXOR:
 			xor++
@@ -58,7 +55,7 @@ func TestCircuitShape(t *testing.T) {
 }
 
 func TestFixedAESMatchesCryptoAES(t *testing.T) {
-	for test := 0; test < 1_000; test++ {
+	for test := range 1_000 {
 		var key [16]byte
 		var blocks4 [64]byte
 		if _, err := rand.Read(key[:]); err != nil {

@@ -179,7 +179,7 @@ func TestJSONDetectionToleratesLeadingWhitespace(t *testing.T) {
 // naive leading-byte check has to survive whitespace trimming. This walks a
 // wide spread of real messages and asserts none is routed to the JSON decoder.
 func TestProtobufIsNeverDetectedAsJSON(t *testing.T) {
-	for i := 0; i < 2000; i++ {
+	for i := range 2000 {
 		msg := &teeproto.AuthenticationRequest{
 			Data: &teeproto.AuthenticatedUserData{
 				Id:            strings.Repeat("u", i%40),

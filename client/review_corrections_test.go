@@ -297,7 +297,7 @@ func TestVerifiedCloudSignedMessagesPassBothProviderBranches(t *testing.T) {
 func TestProtocolPhaseCannotRegressUnderConcurrentCallbacks(t *testing.T) {
 	c := NewClient("")
 	var wg sync.WaitGroup
-	for i := 0; i < 64; i++ {
+	for range 64 {
 		wg.Add(2)
 		go func() {
 			defer wg.Done()
@@ -700,7 +700,7 @@ func TestTEEClosureSendsNormalCloseControl(t *testing.T) {
 		t.Fatal(err)
 	}
 	c.Close()
-	for i := 0; i < 2; i++ {
+	for range 2 {
 		select {
 		case code := <-closeCodes:
 			if code != websocket.CloseNormalClosure {
@@ -977,7 +977,7 @@ func TestConcurrentCiphertextInsertionAndDecryptionSnapshot(t *testing.T) {
 		}
 	}()
 	close(start)
-	for i := 0; i < 10_000; i++ {
+	for range 10_000 {
 		ciphertext, exists := c.storeDecryptionStreamAndSnapshotCiphertext(0, []byte{4, 3, 2, 1})
 		if !exists || !bytes.Equal(ciphertext, []byte{1, 2, 3, 4}) {
 			t.Fatalf("ciphertext snapshot = %v, exists=%v", ciphertext, exists)
@@ -1078,7 +1078,7 @@ func TestResponseSnapshotConcurrentPublication(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		for i := 0; i < 1000; i++ {
+		for i := range 1000 {
 			c.responseContentMutex.Lock()
 			c.responseProcessingSuccessful = i%2 == 0
 			c.reconstructedResponseSize = i
@@ -1086,7 +1086,7 @@ func TestResponseSnapshotConcurrentPublication(t *testing.T) {
 			c.responseContentMutex.Unlock()
 		}
 	}()
-	for i := 0; i < 1000; i++ {
+	for range 1000 {
 		result, err := c.buildResponseResults()
 		if err != nil {
 			t.Fatal(err)

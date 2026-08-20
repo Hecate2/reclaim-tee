@@ -114,13 +114,13 @@ func legacyUint32Message(t *testing.T, number protoreflect.FieldNumber) (*dynami
 	label := descriptorpb.FieldDescriptorProto_LABEL_OPTIONAL
 	kind := descriptorpb.FieldDescriptorProto_TYPE_UINT32
 	file, err := protodesc.NewFile(&descriptorpb.FileDescriptorProto{
-		Syntax:  proto.String("proto3"),
-		Name:    proto.String("legacy.proto"),
-		Package: proto.String("legacy"),
+		Syntax:  new("proto3"),
+		Name:    new("legacy.proto"),
+		Package: new("legacy"),
 		MessageType: []*descriptorpb.DescriptorProto{{
-			Name: proto.String("Legacy"),
+			Name: new("Legacy"),
 			Field: []*descriptorpb.FieldDescriptorProto{{
-				Name: proto.String("value"), Number: proto.Int32(int32(number)), Label: &label, Type: &kind,
+				Name: new("value"), Number: new(int32(number)), Label: &label, Type: &kind,
 			}},
 		}},
 	}, nil)

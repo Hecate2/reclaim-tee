@@ -19,8 +19,8 @@ func TestTranspose128MatchesDefinition(t *testing.T) {
 	}
 	got := make([]Label, rows)
 	transposeColumns(matrix, byteRows, got)
-	for row := 0; row < rows; row++ {
-		for col := 0; col < BaseOTCount; col++ {
+	for row := range rows {
+		for col := range BaseOTCount {
 			want := matrix[col*byteRows+row/8]>>uint(row&7)&1 != 0
 			if deltaBit(got[row], col) != want {
 				t.Fatalf("row %d column %d: got %t want %t", row, col, deltaBit(got[row], col), want)
@@ -54,7 +54,7 @@ func TestGF128Identities(t *testing.T) {
 
 func TestGF128AcceleratedMatchesGeneric(t *testing.T) {
 	var buf [32]byte
-	for i := 0; i < 1_000; i++ {
+	for i := range 1_000 {
 		if _, err := rand.Read(buf[:]); err != nil {
 			t.Fatal(err)
 		}
@@ -164,7 +164,7 @@ func TestKOS2FormulaMatchesIndependentOracle(t *testing.T) {
 	if got.X != wantX {
 		t.Fatalf("x=%v, oracle=%v", got.X, wantX)
 	}
-	for col := 0; col < BaseOTCount; col++ {
+	for col := range BaseOTCount {
 		column := matrix[col*byteRows : (col+1)*byteRows]
 		wantT := labelFromBytes(column[mainBytes : mainBytes+16])
 		for j := range chi {
@@ -180,7 +180,7 @@ func TestKOS2ChecksEveryColumn(t *testing.T) {
 	var transcript [32]byte
 	transcript[0] = 9
 	proof := &ExtensionProof{Transcript: transcript}
-	for col := 0; col < BaseOTCount; col++ {
+	for col := range BaseOTCount {
 		state := &ExtensionSenderState{
 			commitment:          ExtensionCommitment{Count: 1, PaddedCount: 256},
 			challengeTranscript: transcript,

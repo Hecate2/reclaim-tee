@@ -149,7 +149,7 @@ func StartExtensionReceiver(
 	u := make([]byte, BaseOTCount*byteRows)
 	tmp := make([]byte, byteRows)
 	defer clear(tmp)
-	for col := 0; col < BaseOTCount; col++ {
+	for col := range BaseOTCount {
 		t0 := tMatrix[col*byteRows : (col+1)*byteRows]
 		if err := expandSeed(base[col].Zero, sessionID, col, t0); err != nil {
 			clear(choices)
@@ -214,7 +214,7 @@ func StartExtensionSender(
 	}
 	byteRows := int(commitment.PaddedCount) / 8
 	qMatrix := make([]byte, BaseOTCount*byteRows)
-	for col := 0; col < BaseOTCount; col++ {
+	for col := range BaseOTCount {
 		qcol := qMatrix[col*byteRows : (col+1)*byteRows]
 		if err := expandSeed(selected[col], commitment.SessionID, col, qcol); err != nil {
 			clear(qMatrix)
@@ -295,7 +295,7 @@ func FinishExtensionSender(state *ExtensionSenderState, proof *ExtensionProof) (
 	if len(state.rows) != int(state.commitment.PaddedCount) {
 		return nil, errors.New("mpc: OT extension sender proof state is incomplete")
 	}
-	for col := 0; col < BaseOTCount; col++ {
+	for col := range BaseOTCount {
 		q := state.qChecks[col]
 		want := proof.T[col]
 		if deltaBit(state.delta, col) {
@@ -442,7 +442,7 @@ func repetitionReceiverProof(choices, matrix []byte, padded int, chi []Label) (p
 func repetitionColumnChecks(matrix []byte, padded int, chi []Label) (checks [BaseOTCount]Label) {
 	mainBytes := (padded - KOSCheckOTs) / 8
 	byteRows := padded / 8
-	for col := 0; col < BaseOTCount; col++ {
+	for col := range BaseOTCount {
 		column := matrix[col*byteRows : (col+1)*byteRows]
 		check := labelFromBytes(column[mainBytes : mainBytes+16])
 		for block, coefficient := range chi {
@@ -576,7 +576,7 @@ func expandSeed(seed Label, sessionID [32]byte, column int, dst []byte) error {
 // x^128+x^7+x^2+x+1. It is the constant-time portable fallback.
 func gf128MulGeneric(a, b Label) (z Label) {
 	v := a
-	for i := 0; i < 128; i++ {
+	for i := range 128 {
 		bit := (b.D0 >> uint(i&63)) & 1
 		if i >= 64 {
 			bit = (b.D1 >> uint(i-64)) & 1

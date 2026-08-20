@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"slices"
 	"sort"
 
@@ -282,9 +283,7 @@ func (c *Client) populateOPRFMPCRanges(oprfOutputs []*teeproto.OPRFOutput) error
 	if workingRanges == nil {
 		workingRanges = make(map[int]*OPRFRangeData)
 	}
-	for start, data := range additions {
-		workingRanges[start] = data
-	}
+	maps.Copy(workingRanges, additions)
 	c.oprfRanges = workingRanges
 	c.oprfMutex.Unlock()
 
@@ -873,9 +872,7 @@ func (c *Client) replaceParamValuesWithOPRF(providerParams *providers.HTTPProvid
 		return
 	}
 	updatedValues := make(map[string]string, len(providerParams.ParamValues))
-	for key, value := range providerParams.ParamValues {
-		updatedValues[key] = value
-	}
+	maps.Copy(updatedValues, providerParams.ParamValues)
 
 	c.logger.Info("Replacing ParamValues with OPRF outputs",
 		zap.Int("num_oprf_ranges", len(oprfRanges)),

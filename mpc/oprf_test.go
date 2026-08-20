@@ -12,7 +12,7 @@ import (
 )
 
 func TestAESCMACEndToEnd(t *testing.T) {
-	for test := 0; test < 3; test++ {
+	for test := range 3 {
 		senderOTs, receiverOTs := matchedOTs(t, uint64(test*mpc.InputBits))
 		var garblerInput, evaluatorInput [80]byte
 		mustRead(t, garblerInput[:])
@@ -317,7 +317,7 @@ func expectedCMAC(garblerInput, evaluatorInput [80]byte) [16]byte {
 	block.Encrypt(l[:], zero[:])
 	k1 := leftShift(l)
 	var c [16]byte
-	for blockIndex := 0; blockIndex < 4; blockIndex++ {
+	for blockIndex := range 4 {
 		var m [16]byte
 		copy(m[:], message[blockIndex*16:(blockIndex+1)*16])
 		if blockIndex == 3 {
