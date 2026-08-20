@@ -208,6 +208,7 @@ func GetResponseRedactions(response []byte, rawParams *HTTPProviderParams, ctx *
 		logger.Error("Failed to parse response", zap.String("component", "HTTP"), zap.String("operation", "GetResponseRedactions"), zap.Error(err))
 		return nil, err
 	}
+	logger.Info("Parsed HTTP response content type", zap.String("component", "HTTP"), zap.String("operation", "GetResponseRedactions"), zap.String("requestId", requestId), zap.String("content_type", res.Headers["content-type"]))
 
 	if len(rawParams.ResponseRedactions) == 0 {
 		logger.Info("No redaction rules specified, returning empty redactions", zap.String("component", "HTTP"), zap.String("operation", "GetResponseRedactions"))
