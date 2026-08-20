@@ -13,24 +13,21 @@ import (
 	"go.uber.org/zap"
 )
 
-const defaultHTTPSPort = 443
+const (
+	defaultHTTPSPort = 443
+	minTCPPort       = 1
+	maxTCPPort       = 65535
+)
 
-var supportedHTTPSTargetPorts = [...]int{
-	81, 85, 150, 155, 443, 1006, 2095, 2096, 4430,
-	8079, 8080, 8081, 8084, 8443, 8483, 50001, 50300,
-}
-
-func validateSupportedHTTPSPort(port int) error {
-	for _, supportedPort := range supportedHTTPSTargetPorts {
-		if port == supportedPort {
-			return nil
-		}
+func validateHTTPSPort(port int) error {
+	if port < minTCPPort || port > maxTCPPort {
+		return fmt.Errorf("HTTPS port must be between %d and %d, got port %d", minTCPPort, maxTCPPort, port)
 	}
-	return fmt.Errorf("only HTTPS ports %v are allowed, got port %d", supportedHTTPSTargetPorts, port)
+	return nil
 }
 
 func expectedHTTPRequestAuthority(connData *shared.RequestConnectionData) (string, error) {
-	if err := validateSupportedHTTPSPort(connData.Port); err != nil {
+	if err := validateHTTPSPort(connData.Port); err != nil {
 		return "", err
 	}
 	if connData.Port == defaultHTTPSPort {
@@ -48,8 +45,8 @@ func (t *TEEK) handleRequestConnection(sessionID string, msg *shared.Message) er
 		t.terminateSessionWithError(sessionID, shared.ReasonMessageParsingFailed, err, "Failed to parse connection request")
 		return err
 	}
-	if err := validateSupportedHTTPSPort(reqData.Port); err != nil {
-		t.terminateSessionWithError(sessionID, shared.ReasonProtocolViolation, err, "Unsupported target port")
+	if err := validateHTTPSPort(reqData.Port); err != nil {
+		t.terminateSessionWithError(sessionID, shared.ReasonProtocolViolation, err, "Invalid target port")
 		return err
 	}
 

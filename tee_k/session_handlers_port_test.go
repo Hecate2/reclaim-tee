@@ -8,11 +8,11 @@ import (
 	"github.com/reclaimprotocol/reclaim-tee/shared"
 )
 
-func TestValidateHTTPRequestFormatAcceptsSupportedHTTPSPorts(t *testing.T) {
+func TestValidateHTTPRequestFormatAcceptsAnyValidHTTPSPort(t *testing.T) {
 	t.Parallel()
 
 	teek := &TEEK{logger: shared.NewNopLogger()}
-	ports := []int{81, 85, 150, 155, 443, 1006, 2095, 2096, 4430, 8079, 8080, 8081, 8084, 8443, 8483, 50001, 50300}
+	ports := []int{1, 80, 81, 443, 444, 8443, 9443, 50001, 65535}
 
 	for _, port := range ports {
 		t.Run(fmt.Sprintf("port_%d", port), func(t *testing.T) {
@@ -31,7 +31,7 @@ func TestValidateHTTPRequestFormatAcceptsSupportedHTTPSPorts(t *testing.T) {
 	}
 }
 
-func TestValidateHTTPRequestFormatAcceptsAlternateHTTPSPortIPv6(t *testing.T) {
+func TestValidateHTTPRequestFormatAcceptsNonDefaultHTTPSPortIPv6(t *testing.T) {
 	t.Parallel()
 
 	teek := &TEEK{logger: shared.NewNopLogger()}
@@ -42,25 +42,28 @@ func TestValidateHTTPRequestFormatAcceptsAlternateHTTPSPortIPv6(t *testing.T) {
 	}
 }
 
-func TestValidateHTTPRequestFormatRejectsUnsupportedHTTPSPort(t *testing.T) {
+func TestValidateHTTPRequestFormatRejectsInvalidPortNumber(t *testing.T) {
 	t.Parallel()
 
 	teek := &TEEK{logger: shared.NewNopLogger()}
-	request := []byte("GET / HTTP/1.1\r\nHost: example.com:9443\r\nConnection: close\r\n\r\n")
-	connData := &shared.RequestConnectionData{Hostname: "example.com", Port: 9443}
+	for _, port := range []int{-1, 0, 65536} {
+		t.Run(fmt.Sprintf("port_%d", port), func(t *testing.T) {
+			t.Parallel()
 
-	err := teek.validateHTTPRequestFormat(request, nil, connData)
-	if err == nil {
-		t.Fatal("validateHTTPRequestFormat() error = nil, want unsupported port error")
-	}
-	for _, want := range []string{"81", "50300", "got port 9443"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Fatalf("validateHTTPRequestFormat() error = %q, want %q", err, want)
-		}
+			request := []byte(fmt.Sprintf("GET / HTTP/1.1\r\nHost: example.com:%d\r\nConnection: close\r\n\r\n", port))
+			connData := &shared.RequestConnectionData{Hostname: "example.com", Port: port}
+			err := teek.validateHTTPRequestFormat(request, nil, connData)
+			if err == nil {
+				t.Fatal("validateHTTPRequestFormat() error = nil, want invalid port error")
+			}
+			if !strings.Contains(err.Error(), "between 1 and 65535") {
+				t.Fatalf("validateHTTPRequestFormat() error = %q, want valid port range", err)
+			}
+		})
 	}
 }
 
-func TestValidateHTTPRequestFormatRejectsHostWithoutAlternatePort(t *testing.T) {
+func TestValidateHTTPRequestFormatRejectsHostWithoutNonDefaultPort(t *testing.T) {
 	t.Parallel()
 
 	teek := &TEEK{logger: shared.NewNopLogger()}
