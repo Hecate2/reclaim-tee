@@ -33,8 +33,7 @@ func convertJsNamedGroupsToGo(s string) string {
 
 // processRedactionRequest implements TS semantics for XPath/JSONPath/Regex and hashed groups
 func processRedactionRequest(
-	body string,
-	bodyCharset string,
+	body *decodedResponseBody,
 	rs *ResponseRedaction,
 	bodyStartIdx int,
 	resChunks []shared.ResponseRedactionRange,
@@ -47,28 +46,30 @@ func processRedactionRequest(
 	if rs.XPath != "" {
 		contentsOnly := rs.JSONPath != ""
 
-		locs, err := extractHTMLElementsIndexes([]byte(body), rs.XPath, contentsOnly, bodyCharset)
+		// The response charset was already decoded once. Passing an empty charset
+		// keeps XPath locations in the shared decoded UTF-8 coordinate space.
+		locs, err := extractHTMLElementsIndexes([]byte(body.text), rs.XPath, contentsOnly, "")
 		if err != nil {
 			logger.Error("XPath extraction failed", zap.String("component", "Response"), zap.String("operation", "processRedactionRequest"), zap.Error(err))
 			return nil, err
 		}
 		for _, ix := range locs {
-			startAbs := ix.Start
-			endAbs := ix.End
+			decodedStart := ix.Start
+			decodedEnd := ix.End
 
 			if rs.JSONPath != "" {
 				// run JSONPath within element
-				elem := body[startAbs:endAbs]
+				elem := body.text[decodedStart:decodedEnd]
 				jlocs, err := ExtractJSONValueIndexes([]byte(elem), rs.JSONPath)
 				if err != nil {
 					logger.Error("JSONPath within XPath failed", zap.String("component", "Response"), zap.String("operation", "processRedactionRequest"), zap.Error(err))
 					return nil, err
 				}
 				for j, jsonLoc := range jlocs {
-					jStartAbs := startAbs + jsonLoc.Start
-					jEndAbs := startAbs + jsonLoc.End
-					logger.Debug("Applying regex to JSON value", zap.String("component", "Response"), zap.String("operation", "processRedactionRequest"), zap.String("level", "verbose"), zap.Int("json_value_index", j+1), zap.Int("start", jStartAbs), zap.Int("end", jEndAbs))
-					proc, err := applyRegexWindow(body, *rs, jStartAbs, jEndAbs, bodyStartIdx, resChunks, revealFraming)
+					jsonDecodedStart := decodedStart + jsonLoc.Start
+					jsonDecodedEnd := decodedStart + jsonLoc.End
+					logger.Debug("Applying regex to JSON value", zap.String("component", "Response"), zap.String("operation", "processRedactionRequest"), zap.String("level", "verbose"), zap.Int("json_value_index", j+1), zap.Int("start", jsonDecodedStart), zap.Int("end", jsonDecodedEnd))
+					proc, err := applyRegexWindow(body, *rs, jsonDecodedStart, jsonDecodedEnd, bodyStartIdx, resChunks, revealFraming)
 					if err != nil {
 						logger.Error("Regex application failed", zap.String("component", "Response"), zap.String("operation", "processRedactionRequest"), zap.Error(err))
 						return nil, err
@@ -77,7 +78,7 @@ func processRedactionRequest(
 				}
 				continue
 			}
-			proc, err := applyRegexWindow(body, *rs, startAbs, endAbs, bodyStartIdx, resChunks, revealFraming)
+			proc, err := applyRegexWindow(body, *rs, decodedStart, decodedEnd, bodyStartIdx, resChunks, revealFraming)
 			if err != nil {
 				logger.Error("Regex application failed", zap.String("component", "Response"), zap.String("operation", "processRedactionRequest"), zap.Error(err))
 				return nil, err
@@ -90,17 +91,14 @@ func processRedactionRequest(
 	// 2) JSONPath-only branch
 	if rs.JSONPath != "" {
 
-		locs, err := ExtractJSONValueIndexes([]byte(body), rs.JSONPath)
+		locs, err := ExtractJSONValueIndexes([]byte(body.text), rs.JSONPath)
 		if err != nil {
 			logger.Error("JSONPath extraction failed", zap.String("component", "Response"), zap.String("operation", "processRedactionRequest"), zap.Error(err))
 			return nil, err
 		}
 
 		for _, jsonLoc := range locs {
-			startAbs := jsonLoc.Start
-			endAbs := jsonLoc.End
-
-			proc, err := applyRegexWindow(body, *rs, startAbs, endAbs, bodyStartIdx, resChunks, revealFraming)
+			proc, err := applyRegexWindow(body, *rs, jsonLoc.Start, jsonLoc.End, bodyStartIdx, resChunks, revealFraming)
 			if err != nil {
 				logger.Error("Regex application failed", zap.String("component", "Response"), zap.String("operation", "processRedactionRequest"), zap.Error(err))
 				return nil, err
@@ -113,7 +111,7 @@ func processRedactionRequest(
 	// 3) Regex-only branch
 	if rs.Regex != "" {
 
-		proc, err := applyRegexWindow(body, *rs, 0, len(body), bodyStartIdx, resChunks, revealFraming)
+		proc, err := applyRegexWindow(body, *rs, 0, len(body.text), bodyStartIdx, resChunks, revealFraming)
 		if err != nil {
 			logger.Error("Regex processing failed", zap.String("component", "Response"), zap.String("operation", "processRedactionRequest"), zap.Error(err))
 			return nil, err
@@ -200,24 +198,29 @@ type IndexRange struct {
 }
 
 // applyRegexWindow encapsulates the regex application and hashing semantics
-// over a [startAbs, endAbs) window in the response body, mirroring TS behavior.
+// over a decoded UTF-8 window in the response body, mirroring TS behavior.
+// Every emitted range is mapped back to raw response-body bytes before it is
+// converted to an absolute response position.
 func applyRegexWindow(
-	body string,
+	body *decodedResponseBody,
 	rs ResponseRedaction,
-	startAbs int,
-	endAbs int,
+	decodedStart int,
+	decodedEnd int,
 	bodyStartIdx int,
 	resChunks []shared.ResponseRedactionRange,
 	revealFraming bool,
 ) ([]RedactionItem, error) {
 	items := []RedactionItem{}
 
-	// Helper to add a reveal for [startAbs, endAbs)
-	addRange := func(sAbs, eAbs int) {
-		if sAbs < 0 || eAbs <= sAbs {
-			return
+	addRange := func(rangeDecodedStart, rangeDecodedEnd int) error {
+		if rangeDecodedStart < 0 || rangeDecodedEnd <= rangeDecodedStart {
+			return nil
 		}
-		reveal := getReveal(sAbs, eAbs-sAbs, bodyStartIdx, resChunks, "")
+		rawStart, rawEnd, err := body.rawRange(rangeDecodedStart, rangeDecodedEnd)
+		if err != nil {
+			return err
+		}
+		reveal := getReveal(rawStart, rawEnd-rawStart, bodyStartIdx, resChunks, "")
 		// new clients leave chunk framing revealed (verifier dechunks); older
 		// clients redact framing inside a reveal that spans chunks
 		var reds []shared.ResponseRedactionRange
@@ -225,11 +228,14 @@ func applyRegexWindow(
 			reds = getRedactionsForChunkHeaders(reveal.Start, reveal.Start+reveal.Length, resChunks)
 		}
 		items = append(items, RedactionItem{Reveal: reveal, Redactions: reds})
+		return nil
 	}
 
-	segment := body[startAbs:endAbs]
+	segment := body.text[decodedStart:decodedEnd]
 	if rs.Regex == "" {
-		addRange(startAbs, endAbs)
+		if err := addRange(decodedStart, decodedEnd); err != nil {
+			return nil, err
+		}
 		return items, nil
 	}
 
@@ -244,9 +250,11 @@ func applyRegexWindow(
 			enc := base64.StdEncoding.EncodeToString([]byte(segment))
 			return nil, fmt.Errorf("regexp %s does not match found element '%s'", rs.Regex, enc)
 		}
-		matchStart := startAbs + loc[0]
-		matchEnd := startAbs + loc[1]
-		addRange(matchStart, matchEnd)
+		matchStart := decodedStart + loc[0]
+		matchEnd := decodedStart + loc[1]
+		if err := addRange(matchStart, matchEnd); err != nil {
+			return nil, err
+		}
 		return items, nil
 	}
 
@@ -275,17 +283,23 @@ func applyRegexWindow(
 	if totalNamed != 1 {
 		return nil, fmt.Errorf("exactly one named capture group is needed per hashed redaction")
 	}
-	fullFrom := startAbs + fullFromRel
-	fullTo := startAbs + fullToRel
-	grpFrom := startAbs + grpFromRel
-	grpTo := startAbs + grpToRel
+	fullFrom := decodedStart + fullFromRel
+	fullTo := decodedStart + fullToRel
+	grpFrom := decodedStart + grpFromRel
+	grpTo := decodedStart + grpToRel
 
 	// pre-group (unhashed)
 	if grpFrom > fullFrom {
-		addRange(fullFrom, grpFrom)
+		if err := addRange(fullFrom, grpFrom); err != nil {
+			return nil, err
+		}
 	}
 	// group (hashed) — must not span chunks
-	reveal := getReveal(grpFrom, grpTo-grpFrom, bodyStartIdx, resChunks, *rs.Hash)
+	rawGroupFrom, rawGroupTo, err := body.rawRange(grpFrom, grpTo)
+	if err != nil {
+		return nil, err
+	}
+	reveal := getReveal(rawGroupFrom, rawGroupTo-rawGroupFrom, bodyStartIdx, resChunks, *rs.Hash)
 	chunkReds := getRedactionsForChunkHeaders(reveal.Start, reveal.Start+reveal.Length, resChunks)
 	if len(chunkReds) > 0 {
 		return nil, fmt.Errorf("hash redactions cannot be performed if the redacted string is split between 2 or more HTTP chunks")
@@ -294,7 +308,9 @@ func applyRegexWindow(
 
 	// post-group (unhashed)
 	if grpTo < fullTo {
-		addRange(grpTo, fullTo)
+		if err := addRange(grpTo, fullTo); err != nil {
+			return nil, err
+		}
 	}
 
 	return items, nil
