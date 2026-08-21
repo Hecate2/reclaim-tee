@@ -260,6 +260,11 @@ func GetResponseRedactions(response []byte, rawParams *HTTPProviderParams, ctx *
 		reveals = append(reveals, rng)
 	}
 
+	// reveal content-type so the verifier can decode the response body charset
+	if rng, ok := res.HeaderLowerToRanges["content-type"]; ok && rng.Length > 0 {
+		reveals = append(reveals, rng)
+	}
+
 	// reveal transfer-encoding header so the verifier can dechunk the body
 	if revealFraming {
 		if rng, ok := res.HeaderLowerToRanges["transfer-encoding"]; ok && rng.Length > 0 {

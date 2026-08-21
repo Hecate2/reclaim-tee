@@ -206,9 +206,9 @@ func TestShouldPerformComplexRedactions(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// TS-expected numeric ranges
+	// Expected numeric ranges with the content-type header revealed
 	expected := [][2]int{
-		{15, 81}, {85, 122}, {124, 135}, {137, 148}, {150, 191}, {193, 204}, {206, 217}, {219, 260}, {262, 273}, {275, 286}, {288, 307},
+		{15, 17}, {41, 81}, {85, 122}, {124, 135}, {137, 148}, {150, 191}, {193, 204}, {206, 217}, {219, 260}, {262, 273}, {275, 286}, {288, 307},
 	}
 	if len(redactions) != len(expected) {
 		t.Fatalf("expected %d redactions, got %d", len(expected), len(redactions))
@@ -260,9 +260,9 @@ func TestShouldPerformComplexRedactions2(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// TS-expected numeric ranges
+	// Expected numeric ranges with the content-type header revealed
 	expected := [][2]int{
-		{15, 80}, {84, 101}, {103, 114}, {116, 127}, {129, 135},
+		{15, 17}, {41, 80}, {84, 101}, {103, 114}, {116, 127}, {129, 135},
 	}
 	if len(redactions) != len(expected) {
 		t.Fatalf("expected %d redactions, got %d", len(expected), len(redactions))
@@ -309,9 +309,9 @@ func TestShouldPerformComplexRedactions3(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// TS-expected numeric ranges
+	// Expected numeric ranges with the content-type header revealed
 	expected := [][2]int{
-		{15, 81}, {85, 115}, {125, 184}, {194, 253}, {263, 307},
+		{15, 17}, {41, 81}, {85, 115}, {125, 184}, {194, 253}, {263, 307},
 	}
 	if len(redactions) != len(expected) {
 		t.Fatalf("expected %d redactions, got %d", len(expected), len(redactions))
@@ -349,9 +349,9 @@ func TestShouldHideChunkedPartsFromResponse(t *testing.T) {
 		t.Logf("Got redaction %d: [%d:%d]", i, r.Start, r.Start+r.Length)
 	}
 
-	// TS-expected numeric ranges
+	// Expected numeric ranges with the content-type header revealed
 	expected := [][2]int{
-		{15, 88}, {92, 95}, {104, 109},
+		{15, 17}, {41, 88}, {92, 95}, {104, 109},
 	}
 	if len(redactions) != len(expected) {
 		t.Fatalf("expected %d redactions, got %d", len(expected), len(redactions))
@@ -415,10 +415,11 @@ func TestShouldRevealChunkFramingForNewClients(t *testing.T) {
 	if !strings.Contains(out, "9\r\nchunk 1, \r\n7\r\nchunk 2\r\n0\r\n") {
 		t.Errorf("chunk framing should be revealed, got: %s", out)
 	}
-	// other headers stay redacted
-	if strings.Contains(out, "Content-Type") {
-		t.Errorf("content-type header should be redacted")
+	// content-type is revealed so the verifier can decode the body charset
+	if !strings.Contains(out, "Content-Type: text/plain") {
+		t.Errorf("content-type header should be revealed, got: %s", out)
 	}
+	// unrelated headers stay redacted
 	if strings.Contains(out, "Connection") {
 		t.Errorf("connection header should be redacted")
 	}
@@ -1068,7 +1069,8 @@ Content-Length: 157
 		start  int
 		length int
 	}{
-		{15, 61},   // Headers
+		{15, 2},    // Status-line CRLF
+		{55, 21},   // Headers after Content-Type
 		{80, 37},   // Part before title
 		{146, 125}, // Part after title
 	}
@@ -1148,7 +1150,8 @@ Content-Length: 157
 		start  int
 		length int
 	}{
-		{15, 61},   // Headers
+		{15, 2},    // Status-line CRLF
+		{55, 21},   // Headers after Content-Type
 		{80, 37},   // Part before title
 		{146, 125}, // Part after title
 	}
@@ -3144,8 +3147,8 @@ func TestGetResponseRedactions_BookfaceChunked(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// Expected redaction ranges from TypeScript test
-	expected := [][2]int{{15, 17}, {52, 4290}, {4294, 4760}, {4820, 53268}, {53507, 58705}, {58723, 64093}}
+	// Expected redaction ranges with the content-type header revealed
+	expected := [][2]int{{15, 17}, {52, 54}, {92, 4290}, {4294, 4760}, {4820, 53268}, {53507, 58705}, {58723, 64093}}
 
 	if len(reds) != len(expected) {
 		t.Logf("Got %d redactions:", len(reds))
