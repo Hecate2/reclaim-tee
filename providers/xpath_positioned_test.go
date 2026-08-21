@@ -6,17 +6,22 @@ import (
 )
 
 func TestExtractHTMLElementsIndexesIncludesParserError(t *testing.T) {
-	_, err := ExtractHTMLElementsIndexes("\x1f\x8b", `//span`, false)
-	if err == nil {
-		t.Fatal("Expected binary input error")
-	}
-
-	for _, expected := range []string{
-		`failed to find XPath: "//span"`,
-		"binary input is not supported",
+	for _, input := range []string{
+		"\x1f\x8b",
+		"<p>\x01</p>",
 	} {
-		if !strings.Contains(err.Error(), expected) {
-			t.Errorf("Expected error %q to contain %q", err, expected)
+		_, err := ExtractHTMLElementsIndexes(input, `//span`, false)
+		if err == nil {
+			t.Fatalf("expected binary input error for %q", input)
+		}
+
+		for _, expected := range []string{
+			`failed to find XPath: "//span"`,
+			"binary input is not supported",
+		} {
+			if !strings.Contains(err.Error(), expected) {
+				t.Errorf("expected error %q to contain %q", err, expected)
+			}
 		}
 	}
 }

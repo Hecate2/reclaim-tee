@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"mime"
 	"net"
 	"net/url"
 	"sort"
@@ -267,12 +268,16 @@ func GetResponseRedactions(response []byte, rawParams *HTTPProviderParams, ctx *
 	}
 
 	logger.Info("Step 4/4: Processing redaction requests", zap.String("component", "HTTP"), zap.String("operation", "GetResponseRedactions"), zap.Int("step", 4), zap.Int("total", 4))
-	bodyStr := uint8ArrayToStr(res.Body)
+	// Keep one response-body byte at each string byte offset. XPath and regex
+	// locations are converted directly to raw TLS plaintext positions below, so
+	// replacing malformed UTF-8 would shift every location after that byte.
+	bodyStr := string(res.Body)
+	bodyCharset := responseBodyCharset(res.Headers["content-type"])
 	redactions := []shared.ResponseRedactionRange{}
 
 	for i, rs := range params.ResponseRedactions {
 
-		proc, err := processRedactionRequest(bodyStr, &rs, bodyStartIdx, res.Chunks, revealFraming)
+		proc, err := processRedactionRequest(bodyStr, bodyCharset, &rs, bodyStartIdx, res.Chunks, revealFraming)
 		if err != nil {
 			logger.Error("Redaction failed", zap.String("component", "HTTP"), zap.String("operation", "GetResponseRedactions"), zap.Int("redaction_index", i+1), zap.Error(err))
 			return nil, err
@@ -364,6 +369,14 @@ func GetResponseRedactions(response []byte, rawParams *HTTPProviderParams, ctx *
 	}()))
 
 	return redactions, nil
+}
+
+func responseBodyCharset(contentType string) string {
+	_, params, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		return ""
+	}
+	return params["charset"]
 }
 
 func GetHostPort(params *HTTPProviderParams, secretParams *HTTPProviderSecretParams) (string, int, error) {

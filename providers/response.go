@@ -34,6 +34,7 @@ func convertJsNamedGroupsToGo(s string) string {
 // processRedactionRequest implements TS semantics for XPath/JSONPath/Regex and hashed groups
 func processRedactionRequest(
 	body string,
+	bodyCharset string,
 	rs *ResponseRedaction,
 	bodyStartIdx int,
 	resChunks []shared.ResponseRedactionRange,
@@ -46,7 +47,7 @@ func processRedactionRequest(
 	if rs.XPath != "" {
 		contentsOnly := rs.JSONPath != ""
 
-		locs, err := ExtractHTMLElementsIndexes(body, rs.XPath, contentsOnly)
+		locs, err := extractHTMLElementsIndexes([]byte(body), rs.XPath, contentsOnly, bodyCharset)
 		if err != nil {
 			logger.Error("XPath extraction failed", zap.String("component", "Response"), zap.String("operation", "processRedactionRequest"), zap.Error(err))
 			return nil, err

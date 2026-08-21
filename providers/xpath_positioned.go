@@ -12,15 +12,19 @@ import (
 // ExtractHTMLElementsIndexes extracts the byte positions of HTML elements matching an XPath expression
 // is true, the range covers only the element's inner content if available.
 func ExtractHTMLElementsIndexes(html string, xpathExpression string, contentsOnly bool) ([]IndexRange, error) {
-	logger.Info("Starting extractHTMLElementsIndexes", zap.String("component", "XPath"), zap.String("operation", "extractHTMLElementsIndexes"), zap.String("xpath", xpathExpression), zap.Int("html_size", len(html)), zap.Bool("contents_only", contentsOnly))
+	return extractHTMLElementsIndexes([]byte(html), xpathExpression, contentsOnly, "")
+}
 
-	processedHTML := html
+func extractHTMLElementsIndexes(html []byte, xpathExpression string, contentsOnly bool, charset string) ([]IndexRange, error) {
+	logger.Info("Starting extractHTMLElementsIndexes", zap.String("component", "XPath"), zap.String("operation", "extractHTMLElementsIndexes"), zap.String("xpath", xpathExpression), zap.Int("html_size", len(html)), zap.Bool("contents_only", contentsOnly), zap.String("charset", charset))
+
 	logger.Debug("Executing XPath query with options", zap.String("component", "XPath"), zap.String("operation", "extractHTMLElementsIndexes"))
 
-	matches, err := xp.QueryWithOptions(xpathExpression, processedHTML, xp.Options{
+	matches, err := xp.QueryBytesWithOptions(xpathExpression, html, xp.Options{
 		IncludeLocation: true,
 		OutputFormat:    "nodes",
 		ContentsOnly:    contentsOnly,
+		Charset:         charset,
 	})
 	if err != nil {
 		logger.Error("XPath query failed", zap.String("component", "XPath"), zap.String("operation", "extractHTMLElementsIndexes"), zap.Error(err))
@@ -35,7 +39,7 @@ func ExtractHTMLElementsIndexes(html string, xpathExpression string, contentsOnl
 
 	out := make([]IndexRange, 0, len(matches))
 	for i, m := range matches {
-		logger.Debug("Match found", zap.String("component", "XPath"), zap.String("operation", "extractHTMLElementsIndexes"), zap.String("level", "verbose"), zap.Int("match_index", i+1), zap.Int("start", m.StartLocation), zap.Int("end", m.EndLocation), zap.String("content", html[m.StartLocation:m.EndLocation]))
+		logger.Debug("Match found", zap.String("component", "XPath"), zap.String("operation", "extractHTMLElementsIndexes"), zap.String("level", "verbose"), zap.Int("match_index", i+1), zap.Int("start", m.StartLocation), zap.Int("end", m.EndLocation), zap.ByteString("content", html[m.StartLocation:m.EndLocation]))
 		out = append(out, IndexRange{Start: m.StartLocation, End: m.EndLocation})
 	}
 
