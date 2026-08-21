@@ -129,6 +129,24 @@
       "updateTime": "2026-08-20T19:21:50+05:00",
       "sourceCommit": "3656f983f1e122f7fa48053f7445cd8e6454da22",
       "sourceDateEpoch": 1787235710
+    },
+    {
+      "type": "sev-snp",
+      "role": "k",
+      "version": "snp-app:5b04af6b3b002925a7dbdb51df01dd1ecd572af9cd0a9976425053b826ddef8c",
+      "createTime": "2026-08-21T20:16:28+05:00",
+      "updateTime": "2026-08-21T20:16:28+05:00",
+      "sourceCommit": "3082d12e74e57ec911138f5693f289dfe57abc22",
+      "sourceDateEpoch": 1787325388
+    },
+    {
+      "type": "sev-snp",
+      "role": "t",
+      "version": "snp-app:85f3619c3d81c1af127589580a5ab6095fe6ae556c5565b0247b77d0a65c24ab",
+      "createTime": "2026-08-21T20:16:28+05:00",
+      "updateTime": "2026-08-21T20:16:28+05:00",
+      "sourceCommit": "3082d12e74e57ec911138f5693f289dfe57abc22",
+      "sourceDateEpoch": 1787325388
     }
   ]
 }
