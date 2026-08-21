@@ -25,8 +25,8 @@ rm -rf /tmp/ir; mkdir -p /tmp/ir/proc /tmp/ir/sys /tmp/ir/dev /tmp/ir/run
 cp "${LOADER}" /tmp/ir/init; chmod 0755 /tmp/ir/init
 
 # Bundle cloud-specific non-builtin modules; the loader inserts them at boot.
-# MODULES: "gve" (GCP NIC) or "sev-guest" (AWS — not builtin there). Decompressed
-# for a plain finit_module.
+# MODULES: "gve" (GCP NIC) or "ena tsm_report sev-guest" (AWS NIC + attestation).
+# Decompressed for a plain finit_module.
 mkdir -p /tmp/ir/modules
 KVER="$(ls /usr/lib/modules | head -1)"
 for m in ${MODULES:-gve}; do

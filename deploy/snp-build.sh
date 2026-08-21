@@ -43,7 +43,7 @@ export AWS_MAX_ATTEMPTS="${AWS_MAX_ATTEMPTS:-10}" AWS_RETRY_MODE="${AWS_RETRY_MO
 
 # Per-cloud kernel + modules; versions pinned in snp-image/pins.env.
 kernel_for() { [[ "$1" == aws ]] && echo "${SNP_AWS_KERNEL_PKG}" || echo "${SNP_GCP_KERNEL_PKG}"; }
-modules_for() { [[ "$1" == aws ]] && echo "tsm_report sev-guest" || echo "gve"; }
+modules_for() { [[ "$1" == aws ]] && echo "ena tsm_report sev-guest" || echo "gve"; }
 
 _np() { unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY ftp_proxy FTP_PROXY 2>/dev/null || true; }
 g() { ( _np; gcloud_retry gcloud "$@" --project="${GCP_PROJECT}" ); }

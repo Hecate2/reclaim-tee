@@ -19,6 +19,11 @@
       "cloud": "aws",
       "base": "snp-base:5451db58f0e355b07a81c4b7f0675cc1f2c27d91e82f564837ab92afd2b32c68f190486995677b5162cd7c6f1cade1b5",
       "base_uki_sha256": "77e4e692bdd3396ca486e8194c93b154c91a90879a847b2b2ae8ce5c5f1090fe"
+    },
+    {
+      "cloud": "aws",
+      "base": "snp-base:4d71bf678bf86d7fd81e57f94ecc6203d5c00ab10331e95b7642d5f114606e4a99ba7c1946e18b3726e974a0c8f8f1cb",
+      "base_uki_sha256": "e4e11055ad6870f076490e22a0054cbca5ba6e489aa9c290594e352ae8725502"
     }
   ],
   "app_images": [
