@@ -89,35 +89,29 @@ func NewTEEKConnectionManager(teet *TEET, logger *shared.Logger) *TEEKConnection
 }
 
 // readPairAssignment consumes the first envelope on a router-mode control
-// connection and expects it to be TEEKPairAssignment. The decoded pair_id
-// is stored on TEET and the onPairAssigned hook (set by router_boot) is
-// invoked synchronously — that hook handles router registration and
-// kicks off the heartbeat goroutine.
-func (cm *TEEKConnectionManager) readPairAssignment(conn *websocket.Conn) error {
+// connection and expects it to be TEEKPairAssignment. The decoded pair_id is
+// connection-local handshake input until this exact connection completes
+// mutual attestation and wins control-generation publication.
+func (cm *TEEKConnectionManager) readPairAssignment(conn *websocket.Conn) (string, error) {
 	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	_, msgBytes, err := conn.ReadMessage()
 	conn.SetReadDeadline(time.Time{})
 	if err != nil {
-		return fmt.Errorf("read first envelope: %w", err)
+		return "", fmt.Errorf("read first envelope: %w", err)
 	}
 	var env teeproto.Envelope
 	if err := proto.Unmarshal(msgBytes, &env); err != nil {
-		return fmt.Errorf("parse first envelope: %w", err)
+		return "", fmt.Errorf("parse first envelope: %w", err)
 	}
 	pa, ok := env.Payload.(*teeproto.Envelope_TeekPairAssignment)
 	if !ok {
-		return fmt.Errorf("expected TEEKPairAssignment first, got %T", env.Payload)
+		return "", fmt.Errorf("expected TEEKPairAssignment first, got %T", env.Payload)
 	}
 	pairID := pa.TeekPairAssignment.GetPairId()
 	if pairID == "" {
-		return fmt.Errorf("TEEKPairAssignment carried empty pair_id")
+		return "", fmt.Errorf("TEEKPairAssignment carried empty pair_id")
 	}
-	cm.teet.pairID.Store(&pairID)
-	cm.logger.Info("Received pair_id from TEE_K", zap.String("pair_id", pairID))
-	if cm.teet.onPairAssigned != nil {
-		cm.teet.onPairAssigned(pairID)
-	}
-	return nil
+	return pairID, nil
 }
 
 // HandleControlConnection handles a new control connection from TEE_K
@@ -129,14 +123,17 @@ func (cm *TEEKConnectionManager) HandleControlConnection(conn *websocket.Conn) e
 	conn.SetReadLimit(MaxWebSocketMessageSize)
 
 	// Router mode: the very first envelope on the wire is TEEKPairAssignment,
-	// announcing the pair_id TEE_K generated. Consume it here, store the
-	// pair_id, fire the registration hook, then fall through to the existing
-	// TEEKAttestation read. Detection uses `router != nil` (not ratls) so
+	// announcing the pair_id TEE_K generated. Keep it local to this handshake
+	// until attestation succeeds, the response is sent, and this exact control
+	// generation is still current. Detection uses `router != nil` (not ratls) so
 	// local-dev router mode — which has no RA-TLS — still exchanges pair_id.
 	// Standalone mode (no router) skips this and reads TEEKAttestation as
 	// the first envelope.
+	var pairID string
 	if cm.teet.router != nil {
-		if err := cm.readPairAssignment(conn); err != nil {
+		var err error
+		pairID, err = cm.readPairAssignment(conn)
+		if err != nil {
 			return fmt.Errorf("pair assignment: %w", err)
 		}
 	}
@@ -206,7 +203,7 @@ func (cm *TEEKConnectionManager) HandleControlConnection(conn *websocket.Conn) e
 	controlGeneration, previousControl, previousSessions, previousSessionOwners := cm.activateControlConnection(wsConn)
 	cm.closeSupersededConnections(previousControl, previousSessions, previousSessionOwners)
 
-	if err := cm.completeControlAttestation(wsConn, controlGeneration, func() error {
+	if err := cm.completeControlAttestationForPair(wsConn, controlGeneration, pairID, func() error {
 		return shared.WriteWSBinary(conn, data)
 	}); err != nil {
 		return fmt.Errorf("failed to send attestation response: %v", err)
@@ -310,6 +307,15 @@ func (cm *TEEKConnectionManager) activateControlConnection(conn *shared.WSConnec
 }
 
 func (cm *TEEKConnectionManager) completeControlAttestation(conn *shared.WSConnection, generation uint64, writeResponse func() error) error {
+	return cm.completeControlAttestationForPair(conn, generation, "", writeResponse)
+}
+
+// completeControlAttestationForPair publishes readiness and the router pair
+// identity only after the attestation response is successfully written and
+// only while this exact connection still owns the current control generation.
+// Holding controlStateMu through the callback prevents a replacement handshake
+// from publishing a newer identity before an older callback runs.
+func (cm *TEEKConnectionManager) completeControlAttestationForPair(conn *shared.WSConnection, generation uint64, pairID string, writeResponse func() error) error {
 	if err := writeResponse(); err != nil {
 		cm.tearDownControlConnection(conn, generation)
 		return err
@@ -326,6 +332,13 @@ func (cm *TEEKConnectionManager) completeControlAttestation(conn *shared.WSConne
 	cm.attestationMutex.Unlock()
 	cm.teet.setTEEKConnected(true)
 	cm.teet.controlHealthy.Store(true)
+	if pairID != "" {
+		cm.teet.pairID.Store(&pairID)
+		cm.logger.Info("Committed pair_id from authenticated TEE_K", zap.String("pair_id", pairID))
+		if cm.teet.onPairAssigned != nil {
+			cm.teet.onPairAssigned(pairID)
+		}
+	}
 	return nil
 }
 

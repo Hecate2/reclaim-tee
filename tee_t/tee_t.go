@@ -99,10 +99,10 @@ type TEET struct {
 	// self-resets when the SEV attestation path wedges. Nil-safe.
 	attestHealth *shared.AttestationHealth
 
-	// onPairAssigned is fired by the connection manager when it reads
-	// TEE_K's TEEKPairAssignment envelope. Nil in standalone mode; set by
-	// router_boot to register with the router and spin up the heartbeat
-	// goroutine using the pair_id TEE_K just told us about.
+	// onPairAssigned is fired only after the connection carrying TEE_K's
+	// TEEKPairAssignment completes mutual attestation, sends the response, and
+	// remains the current control generation. Nil in standalone mode; set by
+	// router_boot to register with the router and spin up the heartbeat.
 	onPairAssigned func(pairID string)
 }
 

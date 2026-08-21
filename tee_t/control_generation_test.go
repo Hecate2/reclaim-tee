@@ -114,6 +114,83 @@ func TestFailedAttestationResponseNeverPublishesReadiness(t *testing.T) {
 	}
 }
 
+func TestFailedAttestationResponseNeverPublishesPairAssignment(t *testing.T) {
+	teet := &TEET{logger: shared.NewNopLogger()}
+	initialPair := "pair-a"
+	teet.pairID.Store(&initialPair)
+	var assigned atomic.Int32
+	teet.onPairAssigned = func(string) { assigned.Add(1) }
+	cm := NewTEEKConnectionManager(teet, shared.NewNopLogger())
+	control := shared.NewWSConnection(nil)
+	generation, _, _, _ := cm.activateControlConnection(control)
+	wantErr := errors.New("attestation response write failed")
+
+	err := cm.completeControlAttestationForPair(control, generation, "attacker-pair", func() error {
+		return wantErr
+	})
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("attestation response error = %v, want %v", err, wantErr)
+	}
+	if got := teet.PairID(); got != initialPair {
+		t.Fatalf("failed handshake changed pair ID to %q, want %q", got, initialPair)
+	}
+	if got := assigned.Load(); got != 0 {
+		t.Fatalf("failed handshake invoked pair assignment hook %d times", got)
+	}
+}
+
+func TestSupersededAttestationCannotPublishPairAssignment(t *testing.T) {
+	teet := &TEET{logger: shared.NewNopLogger()}
+	initialPair := "pair-a"
+	teet.pairID.Store(&initialPair)
+	assigned := make(chan string, 2)
+	teet.onPairAssigned = func(pairID string) {
+		if got := teet.PairID(); got != pairID {
+			t.Errorf("hook observed pair ID %q, want %q", got, pairID)
+		}
+		if !teet.isTEEKConnected() || !teet.controlHealthy.Load() {
+			t.Error("hook ran before authenticated control readiness was published")
+		}
+		assigned <- pairID
+	}
+	cm := NewTEEKConnectionManager(teet, shared.NewNopLogger())
+	oldControl := shared.NewWSConnection(nil)
+	replacementControl := shared.NewWSConnection(nil)
+	oldGeneration, _, _, _ := cm.activateControlConnection(oldControl)
+	var replacementGeneration uint64
+
+	err := cm.completeControlAttestationForPair(oldControl, oldGeneration, "stale-pair", func() error {
+		replacementGeneration, _, _, _ = cm.activateControlConnection(replacementControl)
+		return nil
+	})
+	if err == nil {
+		t.Fatal("superseded handshake published its pair assignment")
+	}
+	if got := teet.PairID(); got != initialPair {
+		t.Fatalf("superseded handshake changed pair ID to %q, want %q", got, initialPair)
+	}
+	select {
+	case got := <-assigned:
+		t.Fatalf("superseded handshake invoked pair assignment hook with %q", got)
+	default:
+	}
+
+	if err := cm.completeControlAttestationForPair(replacementControl, replacementGeneration, "pair-b", func() error { return nil }); err != nil {
+		t.Fatalf("complete replacement attestation: %v", err)
+	}
+	if got := teet.PairID(); got != "pair-b" {
+		t.Fatalf("replacement pair ID = %q, want pair-b", got)
+	}
+	select {
+	case got := <-assigned:
+		if got != "pair-b" {
+			t.Fatalf("replacement hook pair ID = %q, want pair-b", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("replacement pair assignment hook was not invoked")
+	}
+}
+
 func TestReplacementDuringAttestationResponseCannotPublishOldReadiness(t *testing.T) {
 	teet := &TEET{logger: shared.NewNopLogger()}
 	cm := NewTEEKConnectionManager(teet, shared.NewNopLogger())
