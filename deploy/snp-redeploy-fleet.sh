@@ -271,11 +271,19 @@ build_and_verify() {
 }
 
 allowlist_add() {
-  log "Allowlisting new app digests + both bases ..."
+  log "Allowlisting new app digests + every recorded base generation ..."
   local d
-  for d in "${NEW_K}" "${NEW_T}" "${SNP_BASE_DIGEST_GCP}" "${SNP_BASE_DIGEST_AWS}"; do
+  for d in "${NEW_K}" "${NEW_T}"; do
     rt -X POST -H "Content-Type: application/json" -d "{\"digest\":\"${d}\"}" "${ROUTER}/allowlist" >/dev/null || die "allowlist ${d} failed"
   done
+  while read -r d; do
+    [[ -n "${d}" ]] || continue
+    rt -X POST -H "Content-Type: application/json" -d "{\"digest\":\"${d}\"}" "${ROUTER}/allowlist" >/dev/null || die "allowlist ${d} failed"
+  done < <(python3 -c "
+import json
+for item in json.load(open('${SCRIPT_DIR}/image-history.json')).get('base_images', []):
+    print(item['base'])
+")
 }
 
 # remove one old half, KEEPING its stable IP (gcp static address / aws EIP).

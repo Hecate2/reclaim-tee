@@ -32,11 +32,9 @@ const (
 	nsmMessageBufferSize    = 8192
 )
 
-// GenerateCombinedAWSAttestation pairs the NitroTPM attestation document
-// (Nitro-rooted code identity) with the AMD SEV-SNP report (AMD-rooted hardware
-// proof), both bound to the RA-TLS key via sha512(SPKI): it goes in the SEV
-// report_data AND the NitroTPM user_data. Returned as the CBOR envelope the
-// verifier expects.
+// GenerateCombinedAWSAttestation returns the AWS combined envelope. New bases
+// use the measured root broker to add the same-guest SEV2 proof; old bases keep
+// producing the legacy envelope until strict verification is enabled.
 func GenerateCombinedAWSAttestation(spkiDER, appHash []byte) ([]byte, error) {
 	return generateCombinedAWS(spkiDER, appHash, nil)
 }
@@ -67,6 +65,23 @@ func generateCombinedAWS(bound, appHash []byte, nonces []string) ([]byte, error)
 // generateCombinedAWSUncached does the NitroTPM + SEV device work; the caller
 // holds snpAttestMu and owns caching + the post-failure cooldown.
 func generateCombinedAWSUncached(bound, appHash []byte, nonces []string) ([]byte, error) {
+	if hasSNPAttestationBroker() {
+		evidence, err := requestAWSBrokerEvidence(bound, appHash)
+		if err != nil {
+			return nil, err
+		}
+		return cbor.Marshal(combinedEnvelope{
+			AppHash:  appHash,
+			NitroTPM: evidence.nitroTPM,
+			SEV:      evidence.legacySEV,
+			SEV2:     evidence.sev2,
+			Nonces:   nonces,
+		})
+	}
+
+	// Legacy bases expose the attestation devices directly to the app. Keep
+	// this producer during expansion so old bases can run upgraded app bundles;
+	// v2-enforcing verifiers reject its envelope because it has no SEV2 field.
 	bind := sha512.Sum512(bound)
 	doc, err := RequestNitroTPMDocument(bind[:], nil, nil)
 	if err != nil {
@@ -415,8 +430,8 @@ func rawStartSaltedHMAC(rwc interface {
 		be16(uint16(len(nonceCaller))), nonceCaller,
 		be16(uint16(len(encryptedSalt))), encryptedSalt,
 		[]byte{sessionTypeHMAC},
-		be16(algNull),    // symmetric.algorithm = NULL
-		be16(algSHA512),  // authHash
+		be16(algNull),   // symmetric.algorithm = NULL
+		be16(algSHA512), // authHash
 	)
 	handles := concat(be32(uint32(saltKey)), be32(0x40000007)) // saltKey, bind=TPM_RH_NULL
 	cmd := buildCommand(stNoSessions, ccStartAuthSession, handles, nil, params)

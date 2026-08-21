@@ -13,6 +13,8 @@ import (
 	"fmt"
 	"hash"
 	"math/big"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/fxamacker/cbor/v2"
@@ -44,12 +46,44 @@ type combinedEnvelope struct {
 	TPM      []byte `cbor:"tpm,omitempty"`
 	NitroTPM []byte `cbor:"nitrotpm,omitempty"`
 	SEV      []byte `cbor:"sev,omitempty"`
+	// SEV2 is the same-guest AWS proof. Its report_data commits to the exact
+	// signed NitroTPM document, AppHash, and caller binding. SEV remains present
+	// during rollout so clients that predate SEV2 can validate the envelope.
+	SEV2 []byte `cbor:"sev2,omitempty"`
 	// Nonces, when present, are the presentable claims the attestation binds
 	// (e.g. the signing-key + SPKI nonces), the SEV-SNP analogue of a CS JWT
 	// eat_nonce. The hardware binding then commits snpNonceCommitment(Nonces)
 	// rather than a raw SPKI. Empty for the RA-TLS cert-extension attestation,
 	// which binds the SPKI directly.
 	Nonces []string `cbor:"nonces,omitempty"`
+}
+
+const awsAttestationV2RequiredEnv = "SNP_AWS_ATTESTATION_V2_REQUIRED"
+
+const awsCombinedV2Domain = "reclaim/aws-combined-attestation/v2\x00"
+
+// awsCombinedV2ReportData binds the AMD report to the exact NitroTPM evidence,
+// rather than only to caller-controlled data that another guest can replay.
+// Length-prefix every variable field so the transcript has one encoding.
+func awsCombinedV2ReportData(bound, appHash, nitroTPM []byte) [sha512.Size]byte {
+	h := sha512.New()
+	h.Write([]byte(awsCombinedV2Domain))
+	var n [8]byte
+	for _, field := range [][]byte{bound, appHash, nitroTPM} {
+		binary.BigEndian.PutUint64(n[:], uint64(len(field)))
+		h.Write(n[:])
+		h.Write(field)
+	}
+	var out [sha512.Size]byte
+	copy(out[:], h.Sum(nil))
+	return out
+}
+
+func requireAWSAttestationV2() bool {
+	value := strings.TrimSpace(os.Getenv(awsAttestationV2RequiredEnv))
+	// Only an absent value or an explicit 0 keeps expansion mode. A typo must
+	// not silently downgrade a verifier that an operator intended to harden.
+	return value != "" && value != "0"
 }
 
 // snpNonceCommitment is the length-prefixed hash of the presentable nonce list.
@@ -78,7 +112,7 @@ const (
 // per-cloud verifier and returns (app, base) code identities: app =
 // snp-app:<sha256(bundle)> (cross-cloud), base = snp-base:<PCR11> (per-cloud).
 func VerifyCombinedSEVSNPAttestation(att, spkiDER []byte) (app, base string, err error) {
-	env, app, base, err := verifyCombined(att, spkiDER)
+	env, app, base, err := verifyCombined(att, spkiDER, requireAWSAttestationV2())
 	if err != nil {
 		return "", "", err
 	}
@@ -105,7 +139,7 @@ func VerifyCombinedSEVSNPNonceAttestation(att []byte) (nonces []string, app, bas
 	if len(peek.Nonces) == 0 {
 		return nil, "", "", fmt.Errorf("nonce attestation carries no nonces")
 	}
-	_, app, base, err = verifyCombined(att, snpNonceCommitment(peek.Nonces))
+	_, app, base, err = verifyCombined(att, snpNonceCommitment(peek.Nonces), requireAWSAttestationV2())
 	if err != nil {
 		return nil, "", "", err
 	}
@@ -129,14 +163,14 @@ func VerifyCombinedAWSAttestation(attBytes, spkiDER []byte) (app, base string, e
 	if e := cbor.Unmarshal(attBytes, &env); e != nil {
 		return "", "", fmt.Errorf("decode AWS envelope: %w", e)
 	}
-	return verifyCombinedAWS(env, spkiDER)
+	return verifyCombinedAWS(env, spkiDER, requireAWSAttestationV2())
 }
 
 // verifyCombined decodes the tagged envelope and runs the per-cloud verifier
 // against the given bound blob (raw SPKI for the cert path, the nonce
 // commitment for the claim path). It returns the decoded envelope so callers
 // can apply path-specific checks (e.g. Nonces presence).
-func verifyCombined(att, bound []byte) (env combinedEnvelope, app, base string, err error) {
+func verifyCombined(att, bound []byte, requireAWSV2 bool) (env combinedEnvelope, app, base string, err error) {
 	if len(att) < 1 {
 		return env, "", "", fmt.Errorf("empty SEV-SNP attestation")
 	}
@@ -147,7 +181,7 @@ func verifyCombined(att, bound []byte) (env combinedEnvelope, app, base string, 
 	case snpAttestTagGCP:
 		app, base, err = verifyCombinedGCP(env, bound)
 	case snpAttestTagAWS:
-		app, base, err = verifyCombinedAWS(env, bound)
+		app, base, err = verifyCombinedAWS(env, bound, requireAWSV2)
 	default:
 		err = fmt.Errorf("unknown SEV-SNP attestation tag 0x%02x", att[0])
 	}
@@ -174,45 +208,39 @@ func appBaseIdentity(appHash, pcr11 []byte) (string, string) {
 	return SEVSNPAppPrefix + hex.EncodeToString(appHash), SEVSNPBasePrefix + hex.EncodeToString(pcr11)
 }
 
-// VerifyCombinedAWSAttestation verifies an AWS combined attestation and returns
-// the PCR code identity. It checks: (1) the SEV-SNP report -> AMD root and
-// report_data == sha512(SPKI); (2) the NitroTPM document's COSE_Sign1 signature
-// + cabundle -> the pinned Nitro root, and its user_data == sha512(SPKI); then
-// pins PCR 8 (app) + PCR 11 (base) from nitrotpm_pcrs. The shared sha512(SPKI)
-// in BOTH report_data and user_data welds the AMD hardware proof to the
-// Nitro-rooted code proof for one key.
-func verifyCombinedAWS(env combinedEnvelope, bound []byte) (app, base string, err error) {
+// verifyCombinedAWS verifies the NitroTPM code identity and the AMD policy.
+// Legacy SEV binds only the caller value and remains for old readers during
+// expansion. SEV2 binds the exact signed NitroTPM document, AppHash, and caller
+// value; strict verifiers require that same-guest proof before trusting PCRs.
+func verifyCombinedAWS(env combinedEnvelope, bound []byte, requireV2 bool) (app, base string, err error) {
 	bind := sha512.Sum512(bound)
 
-	// (1) SEV-SNP report -> AMD root (genuine SEV-SNP hardware), report_data binding.
-	sevAtt := &spb.Attestation{}
-	if err := proto.Unmarshal(env.SEV, sevAtt); err != nil {
-		return "", "", fmt.Errorf("unmarshal SEV report: %w", err)
-	}
-	opts := verify.DefaultOptions()
-	opts.DisableCertFetching = true
-	roots, err := amdTrustedRoots()
-	if err != nil {
-		return "", "", fmt.Errorf("AMD roots: %w", err)
-	}
-	opts.TrustedRoots = roots
-	if err := verify.SnpAttestation(sevAtt, opts); err != nil {
-		return "", "", fmt.Errorf("SEV-SNP chain verification failed: %w", err)
-	}
-	if err := validateSnpAttestationPolicy(sevAtt); err != nil {
-		return "", "", err
-	}
-	if subtle.ConstantTimeCompare(sevAtt.GetReport().GetReportData(), bind[:]) != 1 {
-		return "", "", fmt.Errorf("SEV report_data does not bind the SPKI")
-	}
-
-	// (2) NitroTPM document: COSE_Sign1 -> Nitro root, user_data binding.
+	// (1) NitroTPM document: COSE_Sign1 -> Nitro root, user_data binding.
 	_, pcrs, userData, err := verifyNitroTPMDocument(env.NitroTPM)
 	if err != nil {
 		return "", "", err
 	}
 	if subtle.ConstantTimeCompare(userData, bind[:]) != 1 {
 		return "", "", fmt.Errorf("NitroTPM user_data does not bind the SPKI")
+	}
+
+	// (2) During expansion the producer emits both reports. The legacy report
+	// keeps existing clients working; the v2 report is the same-guest proof.
+	if len(env.SEV) > 0 {
+		if err := verifyAWSSEVBinding(env.SEV, bind[:], "legacy"); err != nil {
+			return "", "", err
+		}
+	}
+	if len(env.SEV2) > 0 {
+		v2 := awsCombinedV2ReportData(bound, env.AppHash, env.NitroTPM)
+		if err := verifyAWSSEVBinding(env.SEV2, v2[:], "v2"); err != nil {
+			return "", "", err
+		}
+	} else if requireV2 {
+		return "", "", fmt.Errorf("AWS combined attestation has no same-guest v2 proof")
+	}
+	if len(env.SEV) == 0 && len(env.SEV2) == 0 {
+		return "", "", fmt.Errorf("AWS combined attestation carries no SEV-SNP report")
 	}
 
 	// (3) Prove the claimed cross-cloud appHash against PCR 8 (SHA-384 bank on
@@ -226,6 +254,30 @@ func verifyCombinedAWS(env combinedEnvelope, bound []byte) (app, base string, er
 	}
 	app, base = appBaseIdentity(env.AppHash, pcr11)
 	return app, base, nil
+}
+
+func verifyAWSSEVBinding(raw, expected []byte, label string) error {
+	sevAtt := &spb.Attestation{}
+	if err := proto.Unmarshal(raw, sevAtt); err != nil {
+		return fmt.Errorf("unmarshal AWS %s SEV report: %w", label, err)
+	}
+	opts := verify.DefaultOptions()
+	opts.DisableCertFetching = true
+	roots, err := amdTrustedRoots()
+	if err != nil {
+		return fmt.Errorf("AMD roots: %w", err)
+	}
+	opts.TrustedRoots = roots
+	if err := verify.SnpAttestation(sevAtt, opts); err != nil {
+		return fmt.Errorf("AWS %s SEV-SNP chain verification failed: %w", label, err)
+	}
+	if err := validateSnpAttestationPolicy(sevAtt); err != nil {
+		return err
+	}
+	if subtle.ConstantTimeCompare(sevAtt.GetReport().GetReportData(), expected) != 1 {
+		return fmt.Errorf("AWS %s SEV report_data binding mismatch", label)
+	}
+	return nil
 }
 
 // coseSign1 is a COSE_Sign1 structure (untagged CBOR 4-array).

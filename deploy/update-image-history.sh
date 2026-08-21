@@ -8,8 +8,9 @@ set -e
 #   ./update-image-history.sh snp    # SEV-SNP: reads deploy/snp-digests.env
 #
 # image-history.json is an object: { base_images, app_images }. base_images
-# (per-cloud SNP base UKIs) are commit-independent and edited by hand when a
-# pin changes; this script only ever touches app_images. The *-digests.env
+# (per-cloud SNP base UKIs) are commit-independent. Append a new record when a
+# pin changes so rollback identities remain available. This script only touches
+# app_images. The *-digests.env
 # source files are local-only (NOT committed); only image-history.json is. We
 # record digest + sourceCommit + sourceDateEpoch so verify.sh can rebuild the
 # exact image from source. Dedupes by version, so re-runs are idempotent.

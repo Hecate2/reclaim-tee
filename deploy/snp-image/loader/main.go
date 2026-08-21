@@ -25,6 +25,8 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -44,6 +46,8 @@ import (
 const appPCR = 8
 
 const bundleDir = "/run/bundle"
+
+const snpAppUID = 65532
 
 func main() {
 	mountPseudo()
@@ -81,6 +85,9 @@ func run(out io.Writer) error {
 	if err := syscall.Mount("tmpfs", "/run", "tmpfs", 0, ""); err != nil {
 		return fmt.Errorf("mount /run: %w", err)
 	}
+	if err := os.Chmod("/run", 0o755); err != nil {
+		return fmt.Errorf("chmod /run: %w", err)
+	}
 	if err := extractTar(blob, bundleDir); err != nil {
 		return fmt.Errorf("extract bundle: %w", err)
 	}
@@ -92,17 +99,149 @@ func run(out io.Writer) error {
 	env = append(env, fetchMetadataEnv(out)...)
 	// Export the cross-cloud app identity (sha256 of the measured bundle) so the
 	// RA-TLS layer can carry it as the PCR-8-proven payload hash.
-	env = append(env, "SNP_APP_HASH="+hex.EncodeToString(sum[:]))
+	env = setEnv(env, "SNP_APP_HASH", hex.EncodeToString(sum[:]))
 	if exists(filepath.Join(bundleDir, "mpcl", "pkg")) {
-		env = append(env, "MPCLDIR="+filepath.Join(bundleDir, "mpcl"))
+		env = setEnv(env, "MPCLDIR", filepath.Join(bundleDir, "mpcl"))
 		fmt.Fprintf(out, "[loader] MPCLDIR=%s\n", filepath.Join(bundleDir, "mpcl"))
 	}
 	if ca := filepath.Join(bundleDir, "etc/ssl/certs/ca-certificates.crt"); exists(ca) {
-		env = append(env, "SSL_CERT_FILE="+ca)
+		env = setEnv(env, "SSL_CERT_FILE", ca)
 		fmt.Fprintf(out, "[loader] SSL_CERT_FILE=%s\n", ca)
+	}
+	if isAWSGuest() {
+		fmt.Fprintln(out, "[loader] starting root attestation broker and unprivileged app")
+		return runAWSIsolated(entry, env, out)
 	}
 	fmt.Fprintf(out, "[loader] exec %s\n", entry)
 	return syscall.Exec(entry, []string{entry}, env)
+}
+
+func isAWSGuest() bool {
+	v, err := os.ReadFile("/sys/class/dmi/id/sys_vendor")
+	return err == nil && strings.Contains(string(v), "Amazon")
+}
+
+func runAWSIsolated(entry string, appEnv []string, out io.Writer) error {
+	if err := os.MkdirAll("/tmp", 0o1777); err != nil {
+		return fmt.Errorf("create /tmp: %w", err)
+	}
+	if err := os.Chmod("/tmp", 0o1777); err != nil {
+		return fmt.Errorf("chmod /tmp: %w", err)
+	}
+	for _, dev := range []string{"/dev/sev-guest", "/dev/tpm0", "/dev/tpmrm0"} {
+		if err := os.Chmod(dev, 0o600); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("restrict %s: %w", dev, err)
+		}
+	}
+
+	fds, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, 0)
+	if err != nil {
+		return fmt.Errorf("attestation broker socketpair: %w", err)
+	}
+	brokerFD := os.NewFile(uintptr(fds[0]), "snp-attestation-broker")
+	appFD := os.NewFile(uintptr(fds[1]), "snp-attestation-client")
+	defer brokerFD.Close()
+	defer appFD.Close()
+
+	broker := exec.Command(entry)
+	broker.Env = append([]string{
+		"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+		"SNP_ATTEST_BROKER_SERVER=1",
+		"SNP_ATTEST_BROKER_FD=3",
+	}, selectedEnv(appEnv, "SSL_CERT_FILE", "http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY", "no_proxy", "NO_PROXY")...)
+	broker.ExtraFiles = []*os.File{brokerFD}
+	broker.Stdout = out
+	broker.Stderr = out
+	broker.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL}
+	if err := broker.Start(); err != nil {
+		return fmt.Errorf("start attestation broker: %w", err)
+	}
+	brokerFD.Close()
+
+	app := exec.Command(entry)
+	app.Env = setEnv(appEnv, "SNP_ATTEST_BROKER_FD", "3")
+	app.Env = setEnv(app.Env, "SNP_ATTEST_BROKER_SERVER", "")
+	app.ExtraFiles = []*os.File{appFD}
+	app.Stdout = out
+	app.Stderr = out
+	app.SysProcAttr = awsAppSysProcAttr()
+	if err := app.Start(); err != nil {
+		_ = broker.Process.Kill()
+		_ = broker.Wait()
+		return fmt.Errorf("start unprivileged app: %w", err)
+	}
+	appFD.Close()
+	fmt.Fprintf(out, "[loader] app pid=%d uid=%d broker pid=%d\n", app.Process.Pid, snpAppUID, broker.Process.Pid)
+
+	appDone := make(chan error, 1)
+	brokerDone := make(chan error, 1)
+	go func() { appDone <- app.Wait() }()
+	go func() { brokerDone <- broker.Wait() }()
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
+	defer signal.Stop(sigCh)
+
+	select {
+	case err := <-appDone:
+		_ = broker.Process.Kill()
+		<-brokerDone
+		return fmt.Errorf("TEE app exited: %w", err)
+	case err := <-brokerDone:
+		_ = app.Process.Kill()
+		<-appDone
+		return fmt.Errorf("attestation broker exited: %w", err)
+	case sig := <-sigCh:
+		_ = app.Process.Signal(sig)
+		select {
+		case <-appDone:
+		case <-time.After(15 * time.Second):
+			_ = app.Process.Kill()
+			<-appDone
+		}
+		_ = broker.Process.Kill()
+		<-brokerDone
+		return fmt.Errorf("TEE app stopped after signal %s", sig)
+	}
+}
+
+func awsAppSysProcAttr() *syscall.SysProcAttr {
+	return &syscall.SysProcAttr{
+		Pdeathsig: syscall.SIGKILL,
+		Credential: &syscall.Credential{
+			Uid:         snpAppUID,
+			Gid:         snpAppUID,
+			NoSetGroups: true,
+		},
+		// Production SNP endpoints bind port 443. Retain only the capability
+		// required for that bind; raw attestation devices stay broker-only.
+		AmbientCaps: []uintptr{unix.CAP_NET_BIND_SERVICE},
+	}
+}
+
+func selectedEnv(env []string, keys ...string) []string {
+	wanted := make(map[string]struct{}, len(keys))
+	for _, key := range keys {
+		wanted[key] = struct{}{}
+	}
+	var result []string
+	for _, item := range env {
+		key, _, ok := strings.Cut(item, "=")
+		if _, include := wanted[key]; ok && include {
+			result = append(result, item)
+		}
+	}
+	return result
+}
+
+func setEnv(env []string, key, value string) []string {
+	prefix := key + "="
+	result := make([]string, 0, len(env)+1)
+	for _, item := range env {
+		if !strings.HasPrefix(item, prefix) {
+			result = append(result, item)
+		}
+	}
+	return append(result, prefix+value)
 }
 
 // readAppPartition reads the length-prefixed app bundle (tar) from the second

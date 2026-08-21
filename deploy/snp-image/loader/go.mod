@@ -1,12 +1,12 @@
 module reclaim-snp-loader
 
-go 1.25.0
+go 1.27
 
 require (
 	github.com/google/go-tpm v0.9.8
-	github.com/insomniacslk/dhcp v0.0.0-20260603135910-a415979eb11e
+	github.com/insomniacslk/dhcp v0.0.0-20260728151720-c308df0fdcef
 	github.com/vishvananda/netlink v1.3.1
-	golang.org/x/sys v0.31.0
+	golang.org/x/sys v0.47.0
 )
 
 require (

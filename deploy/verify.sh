@@ -217,8 +217,13 @@ if [[ -x "${SNP_BUILD}" ]]; then
         else echo "  Result:   MATCH"; fi
     done < <(python3 -c "
 import json
-for b in json.load(open('${HISTORY}')).get('base_images', []):
-    print(b['cloud'], b['base_uki_sha256'])
+bases = json.load(open('${HISTORY}')).get('base_images', [])
+latest = {}
+for b in bases:
+    latest[b['cloud']] = b
+for cloud in ('gcp', 'aws'):
+    if cloud in latest:
+        print(cloud, latest[cloud]['base_uki_sha256'])
 ")
     while read -r ROLE COMMIT EXP_APP; do
         [[ -z "${ROLE}" ]] && continue

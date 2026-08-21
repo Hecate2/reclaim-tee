@@ -15,6 +15,14 @@ import (
 )
 
 func main() {
+	if broker, err := shared.RunSNPAttestationBrokerIfRequested(); broker {
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "SNP attestation broker failed:", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	config := LoadTEETConfig()
 
 	// Get the TEE_T logger for this service

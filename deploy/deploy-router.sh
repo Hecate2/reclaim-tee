@@ -106,7 +106,7 @@ log "Deploying as revision suffix ${SUFFIX}..."
 #
 # The router stores only the admin token's SHA-256; derive it from
 # ROUTER_ADMIN_TOKEN and strip any legacy plaintext ADMIN_TOKEN from the service.
-ENV_VARS="KMS_KEY_NAME=${KMS_KEY_NAME}|FIRESTORE_PROJECT_ID=${PROJECT}"
+ENV_VARS="KMS_KEY_NAME=${KMS_KEY_NAME}|FIRESTORE_PROJECT_ID=${PROJECT}|SNP_AWS_ATTESTATION_V2_REQUIRED=${SNP_AWS_ATTESTATION_V2_REQUIRED:-0}"
 if [[ -n "${ROUTER_ADMIN_TOKEN:-}" ]]; then
     ADMIN_TOKEN_HASH=$(printf %s "${ROUTER_ADMIN_TOKEN}" | sha256sum | cut -d' ' -f1)
     ENV_VARS="${ENV_VARS}|ADMIN_TOKEN_HASH=${ADMIN_TOKEN_HASH}"

@@ -9,6 +9,16 @@
       "cloud": "aws",
       "base": "snp-base:4832908152fc6619b45bdfe6cddb3399c73101cb323983f10923c6c871b19cd92cd08c6d54064840e108566f4d84f6d7",
       "base_uki_sha256": "18a21d844be343785a25840cbe8b3a5a81e80c2b304d8ba10d836658d1ce1fa8"
+    },
+    {
+      "cloud": "gcp",
+      "base": "snp-base:848bc6bf294c76d2002ee313d8994a1601fa4ed478a017d0b3cc7a50a30bfc11",
+      "base_uki_sha256": "2a1063c15dc66c65883f33279a164aa116c386e65694230c31820f6f07b95485"
+    },
+    {
+      "cloud": "aws",
+      "base": "snp-base:5451db58f0e355b07a81c4b7f0675cc1f2c27d91e82f564837ab92afd2b32c68f190486995677b5162cd7c6f1cade1b5",
+      "base_uki_sha256": "77e4e692bdd3396ca486e8194c93b154c91a90879a847b2b2ae8ce5c5f1090fe"
     }
   ],
   "app_images": [

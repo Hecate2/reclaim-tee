@@ -142,6 +142,7 @@ tee-restart-policy=Never|\
 tee-env-ROUTER_URL=${ROUTER_URL}|\
 tee-env-PEER_ADDR=${peer_addr}|\
 tee-env-EXPECTED_PEER_IMAGE_DIGEST=${peer_digest}|\
+tee-env-SNP_AWS_ATTESTATION_V2_REQUIRED=${SNP_AWS_ATTESTATION_V2_REQUIRED:-0}|\
 tee-env-JWT_PUBLIC_KEY=${JWT_PUBKEY}|\
 tee-env-EXPECTED_JWT_ISSUER=${JWT_ISSUER}|\
 tee-env-KMS_ENCLAVE_DOMAIN_KEY=${deployment_key}|\

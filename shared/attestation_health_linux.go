@@ -89,6 +89,12 @@ func attestSelfReset(logger *Logger) {
 	if !IsSEVSNPMode() {
 		return
 	}
+	if handled, err := resetGuestThroughSNPAttestationBroker(); handled {
+		if err != nil && logger != nil {
+			logger.Error("attestation-broker reset failed; staying up (evicted) for manual reset", zap.Error(err))
+		}
+		return
+	}
 	syscall.Sync()
 	if err := syscall.Reboot(syscall.LINUX_REBOOT_CMD_RESTART); err != nil && logger != nil {
 		logger.Error("self-reset reboot failed; staying up (evicted) for manual reset", zap.Error(err))

@@ -4,7 +4,7 @@
 # Base images and the Ubuntu archive snapshot are pinned so a rebuild cannot
 # drift when live APT repositories supersede a package. Defaults match pins.env.
 ARG CA_IMAGE=alpine@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d
-ARG UBUNTU_DIGEST=sha256:786a8b558f7be160c6c8c4a54f9a57274f3b4fb1491cf65146521ae77ff1dc54
+ARG UBUNTU_DIGEST=sha256:33ceb71981b602c1a7443a53469e4dba065f7503eab3078a2d7a57a2ab987517
 
 # Ubuntu's minimal image has no TLS roots, but the official snapshot service
 # uses HTTPS. Bootstrap trust comes from the digest-pinned current base CA that
@@ -17,7 +17,7 @@ COPY --from=apt-tls /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certifi
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-ARG APT_SNAPSHOT=20260616T134440Z
+ARG APT_SNAPSHOT=20260821T133530Z
 
 # Cloud-specific kernel: linux-image-gcp or linux-image-aws. Each ships a few
 # non-builtin modules the loader bundles+inserts (gve on GCP, sev-guest on AWS).
@@ -27,9 +27,9 @@ ARG KERNEL_PKG=linux-image-gcp
 # (snp-image/pins.env -> these build-args): the stub + ukify build it, zstd/cpio
 # compress+archive the initrd, binutils backs ukify's PE assembly, systemd ships
 # systemd-measure. dosfstools/mtools/python3 only touch the unmeasured disk.
-ARG SYSTEMD_BOOT_VER=255.4-1ubuntu8.16
-ARG SYSTEMD_UKIFY_VER=255.4-1ubuntu8.16
-ARG SYSTEMD_VER=255.4-1ubuntu8.16
+ARG SYSTEMD_BOOT_VER=255.4-1ubuntu8.17
+ARG SYSTEMD_UKIFY_VER=255.4-1ubuntu8.17
+ARG SYSTEMD_VER=255.4-1ubuntu8.17
 ARG ZSTD_VER=1.5.5+dfsg2-2build1.1
 ARG CPIO_VER=2.15+dfsg-1ubuntu2
 ARG BINUTILS_VER=2.42-4ubuntu2.10
