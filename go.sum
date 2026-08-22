@@ -158,8 +158,8 @@ github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 h1:Jamvg5psRI
 github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
 github.com/reclaimprotocol/jsonpathplus-go/v2 v2.0.1 h1:Ta8FX0L2I47PzULylS+DaNu+txq9ivmXEYSbLdVQdv8=
 github.com/reclaimprotocol/jsonpathplus-go/v2 v2.0.1/go.mod h1:V+SpXGMNwIyl7GrirT0T4aqJwr11hROji2JHe1Z6fuM=
-github.com/reclaimprotocol/xpath-go v1.6.0 h1:M1j4amDYlNjKt+myTwDxa7sq33aAKlMniek6D7yGhl8=
-github.com/reclaimprotocol/xpath-go v1.6.0/go.mod h1:cv80yvMaVkRBJZVPoTm+72NDAnNOKTEXnNrx6KR3+78=
+github.com/reclaimprotocol/xpath-go v1.7.0 h1:r7PIloV8lCAK3NbWom8VAyRItMVoGz0iZJO0KUWId2M=
+github.com/reclaimprotocol/xpath-go v1.7.0/go.mod h1:AJhZ9m0JV4GygcE/Aa+3nh/lvH3pxshyTuiFl24Z7hU=
 github.com/reclaimprotocol/zk-symmetric-crypto/gnark v0.0.0-20251205140100-6fd752973b8f h1:xsJwM6duRG2HSyXg9vJ5wAsQ1LXV4emPjmcjWun+WH8=
 github.com/reclaimprotocol/zk-symmetric-crypto/gnark v0.0.0-20251205140100-6fd752973b8f/go.mod h1:UWTOeKlujf5BRo6zfHV6rQ4VfmvC2QT478xmfNyF9n0=
 github.com/ronanh/intcomp v1.1.1 h1:+1bGV/wEBiHI0FvzS7RHgzqOpfbBJzLIxkqMJ9e6yxY=
