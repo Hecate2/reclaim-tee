@@ -51,7 +51,6 @@ esac
 PORT="${SNP_PORT:-$([[ "${TARGET}" == prod ]] && echo 443 || echo 8081)}"
 LOG_LEVEL="${SNP_LOG_LEVEL:-$([[ "${TARGET}" == prod ]] && echo info || echo debug)}"
 STATIC_OPRF="${SNP_TEST_STATIC_OPRF:-1}"
-AWS_ATTESTATION_V2_REQUIRED="${SNP_AWS_ATTESTATION_V2_REQUIRED:-0}"
 AWS_TYPE="${SNP_PAIR_AWS_TYPE:-c6a.large}"
 AWS_IAM_PROFILE="${SNP_AWS_IAM_PROFILE:-snp-tee-logger}"
 GCP_MACHINE="${SNP_GCP_MACHINE:-n2d-standard-2}"
@@ -137,9 +136,8 @@ write_env() {
         echo "PEER_ADDR=${peer_ip}:${PORT}"
         echo "EXPECTED_PEER_IMAGE_DIGEST=${peer_digest}"
         # Both clouds' bases; the peer's must match one (no per-side mapping).
-        # Keep every recorded base generation during expansion and rollback.
+        # Keep every recorded base generation for controlled rollback.
         echo "EXPECTED_PEER_BASE_DIGEST=${EXPECTED_BASE_DIGESTS}"
-        echo "SNP_AWS_ATTESTATION_V2_REQUIRED=${AWS_ATTESTATION_V2_REQUIRED}"
         echo "JWT_PUBLIC_KEY=${JWT}"
         echo "EXPECTED_JWT_ISSUER=${JWT_ISSUER}"
         echo "PORT=${PORT}"

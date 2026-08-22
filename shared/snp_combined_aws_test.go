@@ -4,70 +4,20 @@ package shared
 
 import (
 	"bytes"
-	"os"
 	"strings"
 	"testing"
 
 	"github.com/fxamacker/cbor/v2"
 )
 
-// TestVerifyCombinedAWSAttestation drives the AWS verifier against a real
-// combined attestation (NitroTPM doc + SEV report) captured from an AWS
-// SEV-SNP + NitroTPM instance via the nitroprobe.
-func TestVerifyCombinedAWSAttestation(t *testing.T) {
-	env, err := os.ReadFile("testdata/aws_combined_attestation.bin")
+func TestVerifyCombinedAWSAttestationRejectsLegacy(t *testing.T) {
+	env := combinedEnvelope{SEV: []byte("legacy report")}
+	raw, err := cbor.Marshal(env)
 	if err != nil {
-		t.Skipf("no AWS combined fixture: %v", err)
+		t.Fatal(err)
 	}
-	spki, err := os.ReadFile("testdata/aws_combined_attestation.spki")
-	if err != nil {
-		t.Fatalf("read spki: %v", err)
-	}
-	app, base, err := VerifyCombinedAWSAttestation(env, spki)
-	if err != nil {
-		t.Fatalf("verify: %v", err)
-	}
-	if !strings.HasPrefix(app, SEVSNPAppPrefix) || !strings.HasPrefix(base, SEVSNPBasePrefix) {
-		t.Fatalf("bad identities app=%q base=%q", app, base)
-	}
-	if _, _, err := VerifyCombinedAWSAttestation(env, []byte("wrong spki")); err == nil {
-		t.Fatal("expected binding failure with wrong SPKI")
-	}
-	t.Logf("verified AWS combined: app=%s base=%s", app, base)
-}
-
-func TestVerifyCombinedAWSAttestationV2PolicyRejectsLegacy(t *testing.T) {
-	env, err := os.ReadFile("testdata/aws_combined_attestation.bin")
-	if err != nil {
-		t.Skipf("no AWS combined fixture: %v", err)
-	}
-	spki, err := os.ReadFile("testdata/aws_combined_attestation.spki")
-	if err != nil {
-		t.Fatalf("read spki: %v", err)
-	}
-	t.Setenv(awsAttestationV2RequiredEnv, "1")
-	if _, _, err := VerifyCombinedAWSAttestation(env, spki); err == nil || !strings.Contains(err.Error(), "no same-guest v2 proof") {
-		t.Fatalf("legacy evidence under v2 policy: %v", err)
-	}
-}
-
-func TestAWSAttestationV2PolicyFailsSecureOnTypos(t *testing.T) {
-	for _, tc := range []struct {
-		value string
-		want  bool
-	}{
-		{"", false},
-		{"0", false},
-		{"1", true},
-		{"true", true},
-		{"typo", true},
-	} {
-		t.Run(tc.value, func(t *testing.T) {
-			t.Setenv(awsAttestationV2RequiredEnv, tc.value)
-			if got := requireAWSAttestationV2(); got != tc.want {
-				t.Fatalf("requireAWSAttestationV2() = %v, want %v", got, tc.want)
-			}
-		})
+	if _, _, err := VerifyCombinedAWSAttestation(raw, []byte("spki")); err == nil || !strings.Contains(err.Error(), "no same-guest v2 proof") {
+		t.Fatalf("legacy evidence accepted: %v", err)
 	}
 }
 

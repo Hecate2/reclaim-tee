@@ -108,27 +108,18 @@ Both TEEs include their TLS certificate hash in GCP attestation nonces (`eat_non
 
 The client verifies these hashes match the TLS certificates on its WebSocket connections before submitting the verification bundle.
 
-### AWS same-guest evidence migration
+### AWS same-guest evidence
 
 New AWS bases run the network process as UID 65532. A measured root broker owns the NitroTPM and SEV-SNP devices.
 
-The broker emits two SEV-SNP reports during expansion:
+The broker emits two SEV-SNP reports:
 
-- `sev` keeps the previous caller binding for current clients.
+- `sev` keeps the previous caller binding for clients released before SEV2.
 - `sev2` binds the caller value, app hash, and exact signed NitroTPM document.
 
-Old CBOR readers ignore `sev2` and continue to verify `sev`. Strict services set `SNP_AWS_ATTESTATION_V2_REQUIRED=1`.
+Current clients, TEEs, and the router require and verify `sev2`. They ignore `sev`, and reject a `sev`-only AWS envelope. The legacy field remains in newly produced envelopes only so clients released before SEV2 can decode and verify them.
 
-Use this deployment sequence:
-
-1. Deploy readers with `SNP_AWS_ATTESTATION_V2_REQUIRED=0`.
-2. Allowlist the new base identities.
-3. Deploy the new GCP and AWS bases.
-4. Make sure that every AWS report contains `sev2`.
-5. Set `SNP_AWS_ATTESTATION_V2_REQUIRED=1` on central services and TEEs.
-6. Remove legacy `sev` only after all client libraries verify `sev2`.
-
-For rollback, set the flag to `0` before you restore an old base. Keep old base identities in `deploy/image-history.json` during migration.
+An AWS base without the measured attestation broker cannot produce `sev2` and is incompatible with current binaries. Restoring such a base also requires restoring a verifier version that predates mandatory SEV2. Keep the legacy `sev` producer until support for clients released before SEV2 is explicitly retired.
 
 ## Debugging
 
