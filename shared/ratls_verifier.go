@@ -40,7 +40,7 @@ type RATLSVerifyOptions struct {
 //
 // Standalone certs (no attestation extension) are rejected. Local-dev
 // flows must avoid this verifier.
-func validateRATLSCertStructure(rawCerts [][]byte, peerRole string, logger *Logger) (app, base string, err error) {
+func validateRATLSCertStructure(rawCerts [][]byte, peerRole string, logger *Logger, requireLocalSNPGeneration bool) (app, base string, err error) {
 	if len(rawCerts) == 0 {
 		return "", "", errors.New("ratls: no peer certificate")
 	}
@@ -56,6 +56,11 @@ func validateRATLSCertStructure(rawCerts [][]byte, peerRole string, logger *Logg
 	actualHash := spkiSha256(spkiDER)
 
 	if snp := findExtension(leaf, AttestationOIDSEVSNP); snp != nil {
+		if requireLocalSNPGeneration {
+			if err := validatePeerSNPAttestationType(snp); err != nil {
+				return "", "", err
+			}
+		}
 		return validateSEVSNP(snp, spkiDER)
 	}
 	if jwt := findExtension(leaf, AttestationOID); jwt != nil {
@@ -98,9 +103,6 @@ func validateGCPCS(attestation []byte, peerRole string, actualHash [32]byte, log
 // AK to this cert's SPKI (anti-splice), and the AK-signed quote pins PCR 8 (app)
 // + PCR 11 (base). Returns the app (payload) identity "snp-app:<hex(appHash)>".
 func validateSEVSNP(attestation, spkiDER []byte) (string, string, error) {
-	if err := validatePeerSNPAttestationType(attestation); err != nil {
-		return "", "", err
-	}
 	if IsSecureBootAttestation(attestation) {
 		app, _, err := VerifyCombinedSecureBootAttestation(attestation, spkiDER)
 		if err != nil {
@@ -144,7 +146,7 @@ func findExtension(cert *x509.Certificate, oid asn1.ObjectIdentifier) []byte {
 // to opts.ExpectedImageDigest. Any failure aborts the TLS handshake.
 func VerifyRATLSPeer(opts RATLSVerifyOptions) func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
 	return func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
-		gotDigest, gotBase, err := validateRATLSCertStructure(rawCerts, opts.PeerRole, opts.Logger)
+		gotDigest, gotBase, err := validateRATLSCertStructure(rawCerts, opts.PeerRole, opts.Logger, true)
 		if err != nil {
 			return err
 		}
@@ -184,7 +186,7 @@ func baseAccepted(expected, gotBase string) bool {
 // binding). What's INSIDE the attestation is decided downstream.
 func VerifyRATLSAttestation(peerRole string, logger *Logger) func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
 	return func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
-		_, _, err := validateRATLSCertStructure(rawCerts, peerRole, logger)
+		_, _, err := validateRATLSCertStructure(rawCerts, peerRole, logger, false)
 		return err
 	}
 }

@@ -1,6 +1,9 @@
 package shared
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestCurrentSNPAttestationType(t *testing.T) {
 	t.Setenv(snpAttestationTypeEnv, "")
@@ -60,5 +63,18 @@ func TestPeerAttestationGenerationMustMatchLocalMode(t *testing.T) {
 	}
 	if err := validatePeerSNPAttestationType(legacy); err == nil {
 		t.Fatal("legacy peer accepted in Secure Boot mode")
+	}
+}
+
+func TestClientSecureBootVerificationDoesNotRequireLocalTEEMode(t *testing.T) {
+	t.Setenv(snpAttestationTypeEnv, AttestationTypeSEVSNP)
+	secure := []byte{snpAttestTagSecureBootGCP}
+
+	_, _, err := validateSEVSNP(secure, nil)
+	if err == nil {
+		t.Fatal("malformed Secure Boot evidence accepted")
+	}
+	if strings.Contains(err.Error(), "generation does not match") {
+		t.Fatalf("client-style validation applied TEE-only generation policy: %v", err)
 	}
 }
