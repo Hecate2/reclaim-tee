@@ -301,9 +301,10 @@ func (m *RATLSManager) acquireAttestationExts(ctx context.Context, priv *ecdsa.P
 	if IsSEVSNPMode() {
 		// Combined attestation: AMD SEV-SNP report + vTPM AK/PCR quotes, with the
 		// SEV report_data committing to the vTPM AK and this cert's SPKI. Code
-		// identity lives in PCR 8 (app) / PCR 11 (base); the SEV measurement is
-		// firmware-only, so the binding to the AK is what makes the PCR quote
-		// trustworthy without splicing.
+		// identity lives in PCR 8 (app) and the measured boot PCRs. The SEV
+		// measurement is firmware-only, so the binding to the AK is what makes the
+		// PCR quote trustworthy without splicing. Legacy SEV2 pins PCR 11; Secure
+		// Boot instead replays PCR 4/7/11 and pins release key R.
 		spkiDER, err := x509.MarshalPKIXPublicKey(&priv.PublicKey)
 		if err != nil {
 			return nil, fmt.Errorf("ra-tls SPKI: %w", err)
@@ -324,6 +325,13 @@ func (m *RATLSManager) acquireAttestationExts(ctx context.Context, priv *ecdsa.P
 		}
 		if err != nil {
 			return nil, err
+		}
+		if secureBootAttestationEnabled() {
+			if tag == snpAttestTagAWS {
+				tag = snpAttestTagSecureBootAWS
+			} else {
+				tag = snpAttestTagSecureBootGCP
+			}
 		}
 		// Tag the payload so the verifier dispatches to the right per-cloud path.
 		return []pkix.Extension{{Id: AttestationOIDSEVSNP, Critical: false, Value: append([]byte{tag}, att...)}}, nil

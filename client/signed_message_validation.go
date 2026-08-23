@@ -154,6 +154,14 @@ func (c *Client) signedMessageAddress(role string, signed *teeproto.SignedMessag
 		return verifiedSigningAddress(role, func(prefix string) (string, error) {
 			return shared.FindNonceInList(nonces, prefix)
 		})
+	case "secure-boot":
+		nonces, err := c.validateSecureBootAttestation(report.GetReport())
+		if err != nil {
+			return shared.Address{}, fmt.Errorf("validate %s Secure Boot attestation: %w", role, err)
+		}
+		return verifiedSigningAddress(role, func(prefix string) (string, error) {
+			return shared.FindNonceInList(nonces, prefix)
+		})
 	default:
 		return shared.Address{}, fmt.Errorf("unsupported %s attestation type %q", role, report.GetType())
 	}
@@ -176,6 +184,14 @@ func (c *Client) validateSEVAttestation(raw []byte) ([]string, error) {
 		return c.verifySEVAttestation(raw)
 	}
 	nonces, _, _, err := shared.VerifyCombinedSEVSNPNonceAttestation(raw)
+	return nonces, err
+}
+
+func (c *Client) validateSecureBootAttestation(raw []byte) ([]string, error) {
+	if c.verifySEVAttestation != nil {
+		return c.verifySEVAttestation(raw)
+	}
+	nonces, _, _, err := shared.VerifyCombinedSecureBootNonceAttestation(raw)
 	return nonces, err
 }
 

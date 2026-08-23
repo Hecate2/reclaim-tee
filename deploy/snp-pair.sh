@@ -16,17 +16,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [[ -f "${SCRIPT_DIR}/.env" ]]; then set -a; source "${SCRIPT_DIR}/.env"; set +a; fi
 source "${SCRIPT_DIR}/_lib.sh"
-# Per-cloud base UKI identities (SNP_BASE_DIGEST_GCP/AWS) for EXPECTED_PEER_BASE_DIGEST.
+# Legacy base identities remain in image-history.json for the router's existing
+# sev-snp pool. Newly deployed pairs use Secure Boot R and do not pin PCR 11.
 set -a; source "${SCRIPT_DIR}/snp-image/pins.env"; set +a
-EXPECTED_BASE_DIGESTS="$(python3 -c "
-import json
-items = json.load(open('${SCRIPT_DIR}/image-history.json')).get('base_images', [])
-print(','.join(dict.fromkeys(x['base'] for x in items)))
-")"
-[[ -n "${EXPECTED_BASE_DIGESTS}" ]] || {
-    echo "deploy/image-history.json contains no SNP base identities" >&2
-    exit 1
-}
 
 GCP_PROJECT="${GCP_PROJECT:?set GCP_PROJECT in deploy/.env}"
 PAIR_NAME="${SNP_PAIR_NAME:-snp-pair}"
@@ -135,9 +127,6 @@ write_env() {
         echo "SELF_ADDR=${self_ip}:${PORT}"
         echo "PEER_ADDR=${peer_ip}:${PORT}"
         echo "EXPECTED_PEER_IMAGE_DIGEST=${peer_digest}"
-        # Both clouds' bases; the peer's must match one (no per-side mapping).
-        # Keep every recorded base generation for controlled rollback.
-        echo "EXPECTED_PEER_BASE_DIGEST=${EXPECTED_BASE_DIGESTS}"
         echo "JWT_PUBLIC_KEY=${JWT}"
         echo "EXPECTED_JWT_ISSUER=${JWT_ISSUER}"
         echo "PORT=${PORT}"
@@ -181,7 +170,7 @@ create_half() {
         fi
         g compute instances create "$vm" --zone="$loc" --machine-type="${GCP_MACHINE}" \
             --confidential-compute-type=SEV_SNP --min-cpu-platform="AMD Milan" --maintenance-policy=TERMINATE \
-            --no-shielded-secure-boot --shielded-vtpm --shielded-integrity-monitoring \
+            --shielded-secure-boot --shielded-vtpm --shielded-integrity-monitoring \
             "${sa_flags[@]}" \
             --image="$img" --image-project="${GCP_PROJECT}" --address="${self_ip}" \
             --metadata-from-file "tee-env=${envf}" --quiet >/dev/null

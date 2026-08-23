@@ -37,7 +37,7 @@ func (t *TEET) generateAttestationDocRaw(ctx context.Context, nonces ...string) 
 // peer verifier picks the right validation path.
 func attestationReportType() string {
 	if shared.IsSEVSNPMode() {
-		return "sev-snp"
+		return shared.CurrentSNPAttestationType()
 	}
 	return "gcp"
 }

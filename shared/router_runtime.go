@@ -250,12 +250,20 @@ func ExtractIdentityFromRATLS(snap RATLSSnapshot, logger *Logger) (imageDigest, 
 		if serr != nil {
 			return "", "", nil, fmt.Errorf("marshal SPKI: %w", serr)
 		}
-		app, _, verr := VerifyCombinedSEVSNPAttestation(report, spki)
+		attestationType := AttestationTypeSEVSNP
+		var app string
+		var verr error
+		if IsSecureBootAttestation(report) {
+			attestationType = AttestationTypeSecureBoot
+			app, _, verr = VerifyCombinedSecureBootAttestation(report, spki)
+		} else {
+			app, _, verr = VerifyCombinedSEVSNPAttestation(report, spki)
+		}
 		if verr != nil {
-			return "", "", nil, fmt.Errorf("verify SEV-SNP attestation: %w", verr)
+			return "", "", nil, fmt.Errorf("verify %s attestation: %w", attestationType, verr)
 		}
 		enc := base64.StdEncoding.EncodeToString(report)
-		return app, AttestationTypeSEVSNP, []byte(enc), nil
+		return app, attestationType, []byte(enc), nil
 	}
 	attestation, err = ExtractAttestationFromCert(leaf)
 	if err != nil {

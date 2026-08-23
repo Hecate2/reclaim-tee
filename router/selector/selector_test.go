@@ -17,9 +17,8 @@ const (
 
 var now = time.Now()
 
-// acceptAll = a client that can verify both types; existing tests use CS-typed
-// pairs (no AttestationType set), so accepting both keeps their intent.
-var acceptAll = []string{"cs", "sev-snp"}
+// acceptAll = a current client that can verify every migration generation.
+var acceptAll = []string{"cs", "sev-snp", "secure-boot"}
 
 func readyPair(id string) *store.Pair {
 	return &store.Pair{
@@ -216,6 +215,39 @@ func TestPickReadyPair_PrefersSNPWhenClientSupportsIt(t *testing.T) {
 		if picked.ID != "farSNP" {
 			t.Fatalf("SNP-capable Asia client got %q, want farSNP (SNP preference must beat geo)", picked.ID)
 		}
+	}
+}
+
+func TestPickReadyPair_PrefersSecureBootThenFallsBack(t *testing.T) {
+	secure := readyPairTyped("secure", "secure-boot")
+	sev2 := readyPairTyped("sev2", "sev-snp")
+	cs := readyPairTyped("cs", "cs")
+
+	for range 50 {
+		picked, err := PickReadyPair([]*store.Pair{cs, sev2, secure}, acceptAll, now, staleness, controlUnhealthy, otNotReady, nil)
+		if err != nil {
+			t.Fatalf("pick: %v", err)
+		}
+		if picked.ID != "secure" {
+			t.Fatalf("current client got %q, want secure", picked.ID)
+		}
+	}
+
+	oldClient := []string{"cs", "sev-snp"}
+	for range 50 {
+		picked, err := PickReadyPair([]*store.Pair{cs, sev2, secure}, oldClient, now, staleness, controlUnhealthy, otNotReady, nil)
+		if err != nil {
+			t.Fatalf("old-client pick: %v", err)
+		}
+		if picked.ID != "sev2" {
+			t.Fatalf("old client got %q, want sev2", picked.ID)
+		}
+	}
+
+	secureOnly := []string{"secure-boot"}
+	picked, err := PickReadyPair([]*store.Pair{cs, sev2, secure}, secureOnly, now, staleness, controlUnhealthy, otNotReady, nil)
+	if err != nil || picked.ID != "secure" {
+		t.Fatalf("secure-only pick = %v, %v; want secure", picked, err)
 	}
 }
 

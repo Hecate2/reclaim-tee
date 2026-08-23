@@ -2,16 +2,18 @@
 set -euo pipefail
 unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY 2>/dev/null || true
 
-# Two-tier image (in container): a STABLE base UKI (kernel + loader init) whose
-# measurement (PCR 11) never changes per app release, plus the app binary on a
-# SEPARATE raw partition. The loader measures the app into PCR 9 and execs it.
-# So PCR 11 = stable base (hardcode), PCR 9 = sha256-derived app id (changeable,
-# cross-cloud-stable) — the Confidential-Space image_digest equivalent.
+# Two-tier image (in container): an R-signed base UKI (kernel + loader init)
+# plus the app bundle on a separate raw partition. The loader measures the app
+# into PCR 8 and executes it. Verifiers prove R authorized the loader from the
+# replayed Secure Boot log, then use PCR 8 as the cross-cloud app identity.
 
 export SOURCE_DATE_EPOCH=1735689600
 cd /work
 
 LOADER=/work/mkosi.extra/usr/local/bin/snp-loader
+if [[ "${SNP_SECUREBOOT_PROBE:-0}" == 1 ]]; then
+    LOADER=/work/mkosi.extra/usr/local/bin/snp-prober
+fi
 # APP defaults to the prober; the `tee` build sets APP_BIN to the real tee_t.
 APP="${APP_BIN:-/work/mkosi.extra/usr/local/bin/snp-prober}"
 [[ -f "${LOADER}" && -f "${APP}" ]] || { echo "loader/app binary missing: ${LOADER} / ${APP}" >&2; exit 1; }
@@ -20,7 +22,7 @@ STUB=/usr/lib/systemd/boot/efi/linuxx64.efi.stub
 CMDLINE="${SNP_CMDLINE:-console=ttyS0,115200}"
 SEED=b5f8a3c2-1d4e-4a6b-9c8d-7e0f1a2b3c4d
 
-# 1) STABLE base initrd: loader as /init (no app code -> base never changes per release).
+# 1) Base initrd: loader as /init (no app code, so app releases do not alter it).
 rm -rf /tmp/ir; mkdir -p /tmp/ir/proc /tmp/ir/sys /tmp/ir/dev /tmp/ir/run
 cp "${LOADER}" /tmp/ir/init; chmod 0755 /tmp/ir/init
 
@@ -45,9 +47,22 @@ find /tmp/ir -exec touch -h -d "@${SOURCE_DATE_EPOCH}" {} +
 ( cd /tmp/ir && find . -mindepth 1 -printf '%P\n' | LC_ALL=C sort \
     | cpio --reproducible --quiet -o -H newc -R 0:0 ) | zstd -q -19 -f -o /work/base-initrd.zst
 
-# 2) STABLE base UKI -> PCR 11.
-ukify build --linux="${KERNEL}" --initrd=/work/base-initrd.zst \
-    --cmdline="${CMDLINE}" --stub "${STUB}" --output /work/snp-base.efi
+# 2) R-signed base UKI. The firmware and sd-stub also measure it into PCRs.
+UKIFY_ARGS=(build --linux="${KERNEL}" --initrd=/work/base-initrd.zst
+    --cmdline="${CMDLINE}" --stub "${STUB}" --output /work/snp-base.efi)
+if [[ -n "${SNP_SECUREBOOT_KEY:-}" || -n "${SNP_SECUREBOOT_CERT:-}" ]]; then
+    [[ -n "${SNP_SECUREBOOT_KEY:-}" && -n "${SNP_SECUREBOOT_CERT:-}" ]] || {
+        echo "SNP_SECUREBOOT_KEY and SNP_SECUREBOOT_CERT must be set together" >&2
+        exit 1
+    }
+    UKIFY_ARGS+=(--signtool=sbsign --secureboot-private-key="${SNP_SECUREBOOT_KEY}"
+        --secureboot-certificate="${SNP_SECUREBOOT_CERT}")
+fi
+ukify "${UKIFY_ARGS[@]}"
+if [[ -n "${SNP_SECUREBOOT_CERT:-}" ]]; then
+    sbverify --cert "${SNP_SECUREBOOT_CERT}" /work/snp-base.efi >/dev/null
+    echo "[tier] verified UKI signature against release key R"
+fi
 
 # Disk assembly (steps 3-4) uses systemd-repart -> loop devices + --privileged.
 # Identity-only mode (verify) skips it: the UKI + app digest are the measured

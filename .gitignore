@@ -59,6 +59,7 @@ snp-poc/snp-poc
 deploy/.test-router-admin-token
 deploy/.test-router-signing-key
 deploy/.test-router-signing-key.pem
+deploy/secure-boot/*.key
 deploy/snp-img-key*
 deploy/snp-digests.env
 deploy/snp-fleet-digests.env

@@ -113,21 +113,30 @@ func verifyCombinedGCP(env combinedEnvelope, bound []byte) (app, base string, er
 // digest under akPub (via go-tpm-tools' quote.Verify), and returns the trusted
 // PCR 8 and PCR 11 values.
 func verifiedPCRs(att *tpmpb.Attestation, akPub any, nonce []byte) (pcr8, pcr11 []byte, err error) {
+	m, err := verifiedPCRValues(att, akPub, nonce)
+	if err != nil {
+		return nil, nil, err
+	}
+	pcr8, pcr11 = m[combinedAppPCR], m[combinedBasePCR]
+	if len(pcr8) == 0 || len(pcr11) == 0 {
+		return nil, nil, fmt.Errorf("quote missing PCR %d/%d", combinedAppPCR, combinedBasePCR)
+	}
+	return pcr8, pcr11, nil
+}
+
+// verifiedPCRValues returns the full trusted SHA-256 PCR map. The legacy SEV2
+// path reads PCR 8/11 from it; Secure Boot additionally replays PCR 4/7/11.
+func verifiedPCRValues(att *tpmpb.Attestation, akPub any, nonce []byte) (map[uint32][]byte, error) {
 	for _, q := range att.GetQuotes() {
 		if q.GetPcrs().GetHash() != tpmprotopb.HashAlgo_SHA256 {
 			continue
 		}
 		if err := gquote.Verify(q, akPub, nonce); err != nil {
-			return nil, nil, fmt.Errorf("quote verification failed: %w", err)
+			return nil, fmt.Errorf("quote verification failed: %w", err)
 		}
-		m := q.GetPcrs().GetPcrs()
-		pcr8, pcr11 = m[combinedAppPCR], m[combinedBasePCR]
-		if len(pcr8) == 0 || len(pcr11) == 0 {
-			return nil, nil, fmt.Errorf("quote missing PCR %d/%d", combinedAppPCR, combinedBasePCR)
-		}
-		return pcr8, pcr11, nil
+		return q.GetPcrs().GetPcrs(), nil
 	}
-	return nil, nil, fmt.Errorf("no SHA-256 vTPM quote in attestation")
+	return nil, fmt.Errorf("no SHA-256 vTPM quote in attestation")
 }
 
 // verifyAKCertChain checks akCert chains to the embedded Google vTPM root, using

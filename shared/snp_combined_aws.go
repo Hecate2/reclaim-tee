@@ -25,8 +25,10 @@ import (
 // per cloud (GCP carries a go-tpm-tools Attestation proto; AWS carries a CBOR
 // envelope of the NitroTPM document + the SEV report).
 const (
-	snpAttestTagGCP = 0x01
-	snpAttestTagAWS = 0x02
+	snpAttestTagGCP           = 0x01
+	snpAttestTagAWS           = 0x02
+	snpAttestTagSecureBootGCP = 0x03
+	snpAttestTagSecureBootAWS = 0x04
 )
 
 // AWS Nitro Enclaves root CA (pinned trust anchor for the NitroTPM attestation
@@ -44,6 +46,10 @@ type combinedEnvelope struct {
 	TPM      []byte `cbor:"tpm,omitempty"`
 	NitroTPM []byte `cbor:"nitrotpm,omitempty"`
 	SEV      []byte `cbor:"sev,omitempty"`
+	// EventLog is the uncompressed raw TCG firmware event log on AWS. GCP
+	// carries the same bytes in the standard go-tpm-tools Attestation.event_log
+	// field. It is required only by the distinct Secure Boot wire tags.
+	EventLog []byte `cbor:"eventlog,omitempty"`
 	// SEV2 is the same-guest AWS proof. Its report_data commits to the exact
 	// signed NitroTPM document, AppHash, and caller binding. SEV remains present
 	// for clients released before SEV2, but current verifiers require SEV2.
@@ -277,7 +283,7 @@ type coseSign1 struct {
 // attestations (no short-lived leaf). No signature/chain check — this only reads
 // the expiry of a doc the caller just generated, never to trust it.
 func SNPNitroLeafNotAfter(attestation []byte) (time.Time, bool) {
-	if len(attestation) < 1 || attestation[0] != snpAttestTagAWS {
+	if len(attestation) < 1 || (attestation[0] != snpAttestTagAWS && attestation[0] != snpAttestTagSecureBootAWS) {
 		return time.Time{}, false
 	}
 	var env combinedEnvelope

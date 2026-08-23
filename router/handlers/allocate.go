@@ -21,8 +21,8 @@ import (
 type allocateRequest struct {
 	ClientNonce string `json:"client_nonce"`
 	// Accepts lists the attestation types the client can verify ("cs",
-	// "sev-snp"). Empty/absent (legacy clients) => CS only, so an old client is
-	// never handed an SEV-SNP pair it cannot verify.
+	// "sev-snp", "secure-boot"). Empty/absent (legacy clients) => CS only, so
+	// an old client is never handed a pair it cannot verify.
 	Accepts []string `json:"accepts,omitempty"`
 }
 
@@ -66,7 +66,7 @@ func (s *Server) HandleAllocate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Default a missing/empty accepts to CS only: a client that doesn't announce
-	// SEV-SNP support must never be allocated an SEV-SNP pair.
+	// provider-attestation support must never be allocated such a pair.
 	accepts := req.Accepts
 	if len(accepts) == 0 {
 		accepts = []string{shared.AttestationTypeCS}
@@ -127,7 +127,8 @@ func (s *Server) HandleAllocate(w http.ResponseWriter, r *http.Request) {
 		zap.String("teek_region", picked.TEEKRegion),
 		zap.String("teet_region", picked.TEETRegion),
 		zap.String("attestation_type", selector.PairAttestationType(picked)),
-		zap.Bool("snp_capable", slices.Contains(accepts, shared.AttestationTypeSEVSNP)))
+		zap.Bool("snp_capable", slices.Contains(accepts, shared.AttestationTypeSEVSNP) ||
+			slices.Contains(accepts, shared.AttestationTypeSecureBoot)))
 
 	writeJSON(w, http.StatusOK, allocateResponse{
 		PairID:   picked.ID,

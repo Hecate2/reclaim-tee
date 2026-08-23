@@ -31,11 +31,19 @@ SNP_BASE_CA_IMAGE="${SNP_CA_IMAGE:?set SNP_CA_IMAGE in snp-image/pins.env}"
 
 GCP_PROJECT="${GCP_PROJECT:?set GCP_PROJECT in deploy/.env}"
 IMG_DIR="${SCRIPT_DIR}/snp-image"
+SECURE_BOOT_DIR="${SCRIPT_DIR}/secure-boot"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 RAW="${IMG_DIR}/snp-tier.raw"
 BUNDLE_HOST="${IMG_DIR}/app-bundle.tar"
 DOCKER="${DOCKER:-docker}"
 AWS_TYPE="${AWS_SNP_TYPE:-c6a.large}"
+
+for required in PK.crt.der KEK.crt.der R.crt.der R.crt.pem R.pub.pem R.key aws-uefi-data.b64; do
+    [[ -f "${SECURE_BOOT_DIR}/${required}" ]] || {
+        echo "[build] missing Secure Boot artifact ${SECURE_BOOT_DIR}/${required}" >&2
+        exit 1
+    }
+done
 
 # The AWS steps go through a flaky local proxy; let the CLI retry dropped
 # connections itself so one blip doesn't kill a 10-min VM-import build.
@@ -50,10 +58,10 @@ g() { ( _np; gcloud_retry gcloud "$@" --project="${GCP_PROJECT}" ); }
 
 build_loader() {
     local dst="${IMG_DIR}/mkosi.extra/usr/local/bin/snp-loader"
-    echo "[build] compiling loader (stable base init)..."
+    echo "[build] compiling Secure Boot loader..."
     mkdir -p "$(dirname "${dst}")"
-    # -buildvcs=false: the loader (and thus the base UKI / PCR 11) must NOT embed
-    # the repo commit, so the base is reproducible regardless of commit.
+    # -buildvcs=false keeps the loader independent of the app commit. The UKI is
+    # authorized by R; its PCR 11 value is diagnostic rather than allowlisted.
     ( _np; cd "${IMG_DIR}/loader" && GOTOOLCHAIN="${SNP_LOADER_GO_TOOLCHAIN}" GOFLAGS=-mod=readonly GOOS=linux GOARCH=amd64 CGO_ENABLED=0 \
         go build -trimpath -buildvcs=false -ldflags "-buildid=" -o "${dst}" . )
     chmod 0755 "${dst}"
@@ -106,8 +114,9 @@ build_raw() {
       ${DOCKER} run --rm ${priv} \
         -e http_proxy= -e https_proxy= -e HTTP_PROXY= -e HTTPS_PROXY= \
         -e APP_BIN=/work/app-bundle.tar -e MODULES="$(modules_for "$cloud")" -e SNP_CMDLINE="${SNP_CMDLINE:-}" \
+        -e SNP_SECUREBOOT_KEY=/secure-boot/R.key -e SNP_SECUREBOOT_CERT=/secure-boot/R.crt.pem \
         -e SNP_PCR_BANK="$([[ "${cloud}" == aws ]] && echo sha384 || echo sha256)" ${idonly} \
-        -v "${IMG_DIR}:/work" "${img}" bash /work/tier-build.sh )
+        -v "${IMG_DIR}:/work" -v "${SECURE_BOOT_DIR}:/secure-boot:ro" "${img}" bash /work/tier-build.sh )
 }
 
 package_gcp() {
@@ -121,6 +130,9 @@ package_gcp() {
     ( _np; gsutil -q cp "${tmp}/${image}.tar.gz" "${bucket}/${image}.tar.gz" )
     g compute images delete "${image}" --quiet >/dev/null 2>&1 || true
     g compute images create "${image}" --source-uri="${bucket}/${image}.tar.gz" \
+        --platform-key-file="${SECURE_BOOT_DIR}/PK.crt.der" \
+        --key-exchange-key-file="${SECURE_BOOT_DIR}/KEK.crt.der" \
+        --signature-database-file="${SECURE_BOOT_DIR}/R.crt.der" \
         --guest-os-features=UEFI_COMPATIBLE,SEV_SNP_CAPABLE,VIRTIO_SCSI_MULTIQUEUE
     rm -rf "${tmp}"
     echo "[image] GCP image ${image} created -> snp-pair.sh SNP_K_IMAGE/SNP_T_IMAGE=${image}"
@@ -168,9 +180,11 @@ PY
     done
     [[ -n "${snap}" && "${snap}" != None ]] || { echo "[image] no snapshot produced" >&2; exit 1; }
     aws --region "${region}" ec2 deregister-image --image-id "$(aws --region "${region}" ec2 describe-images --owners self --filters "Name=name,Values=${image}" --query 'Images[-1].ImageId' --output text 2>/dev/null)" >/dev/null 2>&1 || true
+    local uefi_data; uefi_data="$(tr -d '\n' < "${SECURE_BOOT_DIR}/aws-uefi-data.b64")"
     local ami; ami="$(aws --region "${region}" ec2 register-image --name "${image}" \
         --architecture x86_64 --virtualization-type hvm --boot-mode uefi --ena-support --sriov-net-support simple \
         --tpm-support v2.0 --root-device-name /dev/xvda \
+        --uefi-data="${uefi_data}" \
         --block-device-mappings "DeviceName=/dev/xvda,Ebs={SnapshotId=${snap},DeleteOnTermination=true,VolumeType=gp3}" \
         --query 'ImageId' --output text)"
     echo "[image] AMI ${ami} (${image}) registered -> snp-pair.sh SNP_T_IMAGE/SNP_K_IMAGE tag = ${tag}"
@@ -208,7 +222,7 @@ TAG="${3:-tee${ROLE}-${CLOUD}}"
 # commit recorded in image-history.json (i.e. what's allowlisted), override with
 # SNP_BUILD_COMMIT. Build the app from a clean clone at that commit (like
 # verify.sh — clone NOT worktree so buildvcs stamps the commit), sidestepping the
-# working tree entirely. The loader/base (PCR 11) stay commit-independent.
+# working tree entirely. The loader/base stay commit-independent.
 BUILD_COMMIT="${SNP_BUILD_COMMIT:-}"
 if [[ -z "${BUILD_COMMIT}" && -f "${SCRIPT_DIR}/image-history.json" ]]; then
     BUILD_COMMIT="$(python3 -c "import json; a=[x for x in json.load(open('${SCRIPT_DIR}/image-history.json')).get('app_images',[]) if x.get('role')=='${ROLE}']; print(a[-1]['sourceCommit'] if a else '')" 2>/dev/null || true)"
@@ -223,6 +237,14 @@ if [[ -n "${BUILD_COMMIT}" ]]; then
     # current values loaded before the clone.
     snp_load_app_pins "${REPO_ROOT}/deploy/snp-image/pins.env"
 fi
+
+# Check the selected app source, not only the deployment worktree. This rejects
+# an old SEV2-only commit or a verifier pinned to a different R before the image
+# is signed. Certificate reissuance remains safe because the SPKI file is stable.
+cmp -s "${SECURE_BOOT_DIR}/R.pub.pem" "${REPO_ROOT}/shared/secure_boot_release_pub.pem" || {
+    echo "[build] selected app source does not contain the deployed Secure Boot R public key" >&2
+    exit 1
+}
 
 # The app digest is VCS-stamped (tracks the commit), so a dirty tree yields a
 # vcs.modified artifact, not the clean-commit value. Refuse unless overridden.
@@ -239,15 +261,9 @@ build_loader
 build_bundle "${ROLE}"
 build_raw "${CLOUD}"
 
-# Base UKI (PCR 11) is commit-independent -> assert it matches the pin so any
-# unexpected base drift (kernel/loader/systemd/cmdline) fails the build loudly.
+# The base UKI is R-signed and verified through Secure Boot. Its hash is printed
+# for diagnostics only; it is no longer a production pin or rollout dependency.
 BASE_UKI="$(sha256sum "${IMG_DIR}/snp-base.efi" | cut -d' ' -f1)"
-BASE_VAR="SNP_BASE_UKI_${CLOUD^^}"
-if [[ -n "${!BASE_VAR}" && "${!BASE_VAR}" != "${BASE_UKI}" ]]; then
-    echo "[build] BASE UKI DRIFT: built ${BASE_UKI}, pins.env ${BASE_VAR}=${!BASE_VAR}" >&2
-    echo "[build] the base changed unexpectedly; investigate or bump ${BASE_VAR} in deploy/snp-image/pins.env." >&2
-    exit 1
-fi
 
 # App bundle (PCR 8) tracks the commit -> compute + report; operator allowlists.
 DIGEST="snp-app:$(sha256sum "${BUNDLE_HOST}" | cut -d' ' -f1)"
@@ -263,6 +279,6 @@ if [[ "${SNP_BUILD_ONLY:-0}" != 1 ]]; then
     record_digest_env "${ROLE}" "${DIGEST}"
 fi
 echo "[build] DONE tee_${ROLE}@${CLOUD}"
-echo "[build]   base UKI   = ${BASE_UKI}  (${BASE_VAR}, commit-independent)"
+echo "[build]   base UKI   = ${BASE_UKI}  (diagnostic only; trust root is Secure Boot R)"
 echo "[build]   app digest = ${DIGEST}  (commit $(git -C "${REPO_ROOT}" rev-parse --short HEAD))"
 echo "[build]   -> record in deploy/image-history.json + allowlist on the router; pass to snp-pair.sh via SNP_${ROLE^^}_DIGEST"

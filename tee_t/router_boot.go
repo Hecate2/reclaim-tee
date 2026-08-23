@@ -44,6 +44,9 @@ func startRouterMode(parent context.Context, config *TEETConfig, logger *shared.
 	if err := validateRouterConfig(config); err != nil {
 		return fmt.Errorf("router-mode config invalid: %w", err)
 	}
+	if err := shared.ValidateSNPAttestationType(); err != nil {
+		return fmt.Errorf("router-mode attestation config invalid: %w", err)
+	}
 
 	// Discover own external IP from GCE metadata if SELF_ADDR was not
 	// explicitly set. Same reasoning as TEE_K.

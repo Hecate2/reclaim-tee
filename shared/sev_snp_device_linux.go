@@ -157,7 +157,7 @@ func generateCombinedGCP(bound, appHash []byte, nonces []string) ([]byte, error)
 	snpAttestMu.Lock()
 	defer snpAttestMu.Unlock()
 
-	cacheKey := snpAttestCacheKey("gcp", bound, appHash, nonces)
+	cacheKey := snpAttestCacheKey("gcp:"+CurrentSNPAttestationType(), bound, appHash, nonces)
 	if att, ok := snpAttestCacheGet(cacheKey); ok {
 		return att, nil
 	}
@@ -201,16 +201,24 @@ func generateCombinedGCPUncached(bound, appHash []byte, nonces []string) ([]byte
 	}
 	defer sev.Close()
 
-	// TCGEventLog set to empty (non-nil) to skip reading the firmware event log
-	// (our minimal UKI has no standard log); the verifier pins PCRs from the quote.
+	// Legacy SEV2 deliberately carries an empty event log. Secure Boot carries
+	// the raw, uncompressed firmware log in the standard Attestation field so
+	// verifiers can replay PCR 4/7/11 from this same AK-signed quote.
 	// CertChainFetcher embeds the AK cert's issuing chain (GCE intermediates are
 	// regionalized + rotated, so the verifier can't hardcode them) — it fetches
 	// once here so the verifier stays offline, trusting only the stable root.
+	eventLog := []byte{}
+	if secureBootAttestationEnabled() {
+		eventLog, err = readSecureBootEventLog()
+		if err != nil {
+			return nil, err
+		}
+	}
 	att, err := ak.Attest(tpmclient.AttestOpts{
 		Nonce:            nonce[:],
 		TEENonce:         rd[:],
 		TEEDevice:        sev,
-		TCGEventLog:      []byte{},
+		TCGEventLog:      eventLog,
 		CertChainFetcher: certChainHTTPClient,
 	})
 	if err != nil {
@@ -243,13 +251,35 @@ func GenerateSEVSNPNonceAttestation(nonces []string) ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
-		return append([]byte{snpAttestTagAWS}, att...), nil
+		tag := byte(snpAttestTagAWS)
+		if secureBootAttestationEnabled() {
+			tag = snpAttestTagSecureBootAWS
+		}
+		return append([]byte{tag}, att...), nil
 	}
 	att, err := generateCombinedGCP(commitment, appHash, nonces)
 	if err != nil {
 		return nil, err
 	}
-	return append([]byte{snpAttestTagGCP}, att...), nil
+	tag := byte(snpAttestTagGCP)
+	if secureBootAttestationEnabled() {
+		tag = snpAttestTagSecureBootGCP
+	}
+	return append([]byte{tag}, att...), nil
+}
+
+func readSecureBootEventLog() ([]byte, error) {
+	raw, err := os.ReadFile(secureBootEventLogPath)
+	if err != nil {
+		return nil, fmt.Errorf("read Secure Boot event log: %w", err)
+	}
+	if len(raw) == 0 {
+		return nil, fmt.Errorf("Secure Boot event log is empty")
+	}
+	if len(raw) > maxSecureBootEventLog {
+		return nil, fmt.Errorf("Secure Boot event log is %d bytes; maximum is %d", len(raw), maxSecureBootEventLog)
+	}
+	return raw, nil
 }
 
 // sevGuestDevice is where the SEV-SNP guest driver exposes the report ioctl.

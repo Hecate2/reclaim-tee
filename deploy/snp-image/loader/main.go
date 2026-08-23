@@ -1,10 +1,9 @@
-// loader is the init of the STABLE base UKI. It never changes per app release,
-// so the base UKI's measurement (PCR 11) is constant and hardcodable. Its job:
-// read the app BUNDLE (a tar of the app binary + its runtime files) from a
-// separate partition, measure the bundle into a dedicated PCR (the cross-cloud
-// "image digest"), extract it, and exec the app. Trust: the loader is itself
-// measured into PCR 11, so a verifier trusting the known base knows the app
-// PCR was extended honestly.
+// loader is the init in the R-signed base UKI. It reads the app BUNDLE (a tar
+// of the app binary + its runtime files) from a separate partition, measures
+// the bundle into a dedicated PCR (the cross-cloud "image digest"), extracts
+// it, and executes the app. Secure Boot evidence proves that R authorized this
+// loader; the loader's PCR 8 extension then binds the app identity. Legacy SEV2
+// deployments still use their recorded PCR 11 base allowlist.
 //
 // Bundle layout (tar): ./app (entrypoint), optionally ./mpcl/pkg (MPC circuit
 // stdlib) and ./etc/ssl/certs/ca-certificates.crt — the loader points the app
@@ -47,6 +46,11 @@ const appPCR = 8
 
 const bundleDir = "/run/bundle"
 
+const (
+	firmwareEventLogPath = "/sys/kernel/security/tpm0/binary_bios_measurements"
+	appEventLogPath      = "/run/reclaim-secure-boot-eventlog"
+)
+
 const snpAppUID = 65532
 
 func main() {
@@ -88,6 +92,9 @@ func run(out io.Writer) error {
 	if err := os.Chmod("/run", 0o755); err != nil {
 		return fmt.Errorf("chmod /run: %w", err)
 	}
+	if err := stageSecureBootEventLog(); err != nil {
+		return err
+	}
 	if err := extractTar(blob, bundleDir); err != nil {
 		return fmt.Errorf("extract bundle: %w", err)
 	}
@@ -100,6 +107,9 @@ func run(out io.Writer) error {
 	// Export the cross-cloud app identity (sha256 of the measured bundle) so the
 	// RA-TLS layer can carry it as the PCR-8-proven payload hash.
 	env = setEnv(env, "SNP_APP_HASH", hex.EncodeToString(sum[:]))
+	// This value is set by the R-signed loader after untrusted metadata is read.
+	// Old deployed loaders omit it and therefore remain on the SEV2 wire format.
+	env = setEnv(env, "SNP_ATTESTATION_TYPE", "secure-boot")
 	if exists(filepath.Join(bundleDir, "mpcl", "pkg")) {
 		env = setEnv(env, "MPCLDIR", filepath.Join(bundleDir, "mpcl"))
 		fmt.Fprintf(out, "[loader] MPCLDIR=%s\n", filepath.Join(bundleDir, "mpcl"))
@@ -148,6 +158,7 @@ func runAWSIsolated(entry string, appEnv []string, out io.Writer) error {
 		"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
 		"SNP_ATTEST_BROKER_SERVER=1",
 		"SNP_ATTEST_BROKER_FD=3",
+		"SNP_ATTESTATION_TYPE=secure-boot",
 	}, selectedEnv(appEnv, "SSL_CERT_FILE", "http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY", "no_proxy", "NO_PROXY")...)
 	broker.ExtraFiles = []*os.File{brokerFD}
 	broker.Stdout = out
@@ -161,6 +172,7 @@ func runAWSIsolated(entry string, appEnv []string, out io.Writer) error {
 	app := exec.Command(entry)
 	app.Env = setEnv(appEnv, "SNP_ATTEST_BROKER_FD", "3")
 	app.Env = setEnv(app.Env, "SNP_ATTEST_BROKER_SERVER", "")
+	app.Env = setEnv(app.Env, "SNP_ATTESTATION_TYPE", "secure-boot")
 	app.ExtraFiles = []*os.File{appFD}
 	app.Stdout = out
 	app.Stderr = out
@@ -577,10 +589,28 @@ func mountPseudo() {
 		{"proc", "/proc", "proc"},
 		{"sysfs", "/sys", "sysfs"},
 		{"devtmpfs", "/dev", "devtmpfs"},
+		{"securityfs", "/sys/kernel/security", "securityfs"},
 	} {
 		_ = os.MkdirAll(m.tgt, 0o555)
 		_ = syscall.Mount(m.src, m.tgt, m.fs, 0, "")
 	}
+}
+
+func stageSecureBootEventLog() error {
+	raw, err := os.ReadFile(firmwareEventLogPath)
+	if err != nil {
+		return fmt.Errorf("read firmware event log: %w", err)
+	}
+	if len(raw) == 0 {
+		return fmt.Errorf("firmware event log is empty")
+	}
+	if err := os.WriteFile(appEventLogPath, raw, 0o444); err != nil {
+		return fmt.Errorf("stage firmware event log: %w", err)
+	}
+	if err := os.Chmod(appEventLogPath, 0o444); err != nil {
+		return fmt.Errorf("protect staged firmware event log: %w", err)
+	}
+	return nil
 }
 
 func console() io.Writer {

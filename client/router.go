@@ -25,13 +25,13 @@ type AllocationResponse struct {
 func AllocatePair(routerURL, clientNonce string) (*AllocationResponse, error) {
 	// Announce the attestation types this client can verify so the router never
 	// allocates a pair we can't check. Wire values mirror shared.AttestationType*
-	// ("cs","sev-snp"); the client package cannot import shared.
+	// ("cs","sev-snp","secure-boot"); the client package cannot import shared.
 	body, err := json.Marshal(struct {
 		ClientNonce string   `json:"client_nonce"`
 		Accepts     []string `json:"accepts"`
 	}{
 		ClientNonce: clientNonce,
-		Accepts:     []string{"cs", "sev-snp"},
+		Accepts:     []string{"cs", "sev-snp", "secure-boot"},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("marshal request: %w", err)

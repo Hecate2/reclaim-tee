@@ -46,7 +46,7 @@ func generateCombinedAWS(bound, appHash []byte, nonces []string) ([]byte, error)
 	snpAttestMu.Lock()
 	defer snpAttestMu.Unlock()
 
-	cacheKey := snpAttestCacheKey("aws", bound, appHash, nonces)
+	cacheKey := snpAttestCacheKey("aws:"+CurrentSNPAttestationType(), bound, appHash, nonces)
 	if att, ok := snpAttestCacheGet(cacheKey); ok {
 		return att, nil
 	}
@@ -65,6 +65,14 @@ func generateCombinedAWS(bound, appHash []byte, nonces []string) ([]byte, error)
 // generateCombinedAWSUncached does the NitroTPM + SEV device work; the caller
 // holds snpAttestMu and owns caching + the post-failure cooldown.
 func generateCombinedAWSUncached(bound, appHash []byte, nonces []string) ([]byte, error) {
+	var eventLog []byte
+	var err error
+	if secureBootAttestationEnabled() {
+		eventLog, err = readSecureBootEventLog()
+		if err != nil {
+			return nil, err
+		}
+	}
 	if hasSNPAttestationBroker() {
 		evidence, err := requestAWSBrokerEvidence(bound, appHash)
 		if err != nil {
@@ -75,6 +83,7 @@ func generateCombinedAWSUncached(bound, appHash []byte, nonces []string) ([]byte
 			NitroTPM: evidence.nitroTPM,
 			SEV:      evidence.legacySEV,
 			SEV2:     evidence.sev2,
+			EventLog: eventLog,
 			Nonces:   nonces,
 		})
 	}
@@ -91,7 +100,7 @@ func generateCombinedAWSUncached(bound, appHash []byte, nonces []string) ([]byte
 	if err != nil {
 		return nil, fmt.Errorf("sev report: %w", err)
 	}
-	envBytes, err := cbor.Marshal(combinedEnvelope{AppHash: appHash, NitroTPM: doc, SEV: report, Nonces: nonces})
+	envBytes, err := cbor.Marshal(combinedEnvelope{AppHash: appHash, NitroTPM: doc, SEV: report, EventLog: eventLog, Nonces: nonces})
 	if err != nil {
 		return nil, err
 	}

@@ -47,9 +47,9 @@ type Pair struct {
 	TEEKRegion string
 	TEETRegion string
 
-	// AttestationType is "cs" or "sev-snp", set at /register. Empty on pairs
-	// registered before the field existed -> treated as CS. Used by /allocate
-	// to match a pair only to clients that can verify its attestation.
+	// AttestationType is "cs", "sev-snp", or "secure-boot", set at /register.
+	// Empty on pairs registered before the field existed means CS. /allocate uses
+	// it to match a pair only to clients that can verify its attestation.
 	AttestationType string
 
 	// Per-side observations updated by /heartbeat (and seeded by /register).

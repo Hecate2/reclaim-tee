@@ -33,6 +33,8 @@ ARG SYSTEMD_VER=255.4-1ubuntu8.17
 ARG ZSTD_VER=1.5.5+dfsg2-2build1.1
 ARG CPIO_VER=2.15+dfsg-1ubuntu2
 ARG BINUTILS_VER=2.42-4ubuntu2.10
+ARG SBSIGNTOOL_VER=0.9.4-3.1ubuntu7
+ARG EFITOOLS_VER=1.9.2-3ubuntu3
 RUN sed -i \
         -e "s#http://archive.ubuntu.com/ubuntu/#https://snapshot.ubuntu.com/ubuntu/${APT_SNAPSHOT}/#" \
         -e "s#http://security.ubuntu.com/ubuntu/#https://snapshot.ubuntu.com/ubuntu/${APT_SNAPSHOT}/#" \
@@ -43,6 +45,7 @@ RUN sed -i \
         "systemd-boot-efi=${SYSTEMD_BOOT_VER}" "systemd-ukify=${SYSTEMD_UKIFY_VER}" \
         dosfstools mtools \
         "zstd=${ZSTD_VER}" "cpio=${CPIO_VER}" "binutils=${BINUTILS_VER}" \
+        "sbsigntool=${SBSIGNTOOL_VER}" "efitools=${EFITOOLS_VER}" \
         "${KERNEL_PKG}" ca-certificates \
         python3 \
     && rm -rf /var/lib/apt/lists/*

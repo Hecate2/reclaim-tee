@@ -124,7 +124,7 @@ func (c *Client) ConnectToTEEK() error {
 // be attributed to a specific client build (empty on pre-versioning builds).
 // Bump on material client changes; override at build time with
 // -ldflags "-X github.com/reclaimprotocol/reclaim-tee/client.ClientBuildVersion=<ver>".
-var ClientBuildVersion = "recordbuf-fix"
+var ClientBuildVersion = "secure-boot"
 
 // sendClientAuth writes the ClientAuth(jwt) envelope as the very first
 // frame on a TEE-bound WebSocket. Used in router mode so the TEE can

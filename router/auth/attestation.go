@@ -17,17 +17,16 @@ import (
 // Empty defaults to CS so existing Confidential Space TEEs need no change.
 // Sourced from shared so the TEE and router agree on the wire value.
 const (
-	AttestationTypeCS     = shared.AttestationTypeCS
-	AttestationTypeSEVSNP = shared.AttestationTypeSEVSNP
+	AttestationTypeCS         = shared.AttestationTypeCS
+	AttestationTypeSEVSNP     = shared.AttestationTypeSEVSNP
+	AttestationTypeSecureBoot = shared.AttestationTypeSecureBoot
 )
 
 // AttestationValidator validates a TEE attestation and returns the image
 // identity to pin (sha256:<digest> for Confidential Space, snp-app:<hex> for
-// SEV-SNP) plus the SPKI hash the attestation commits to. spkiDER is the
-// registering key; the SEV-SNP path needs it to check report_data binds the
-// vTPM AK to this exact key. The caller binds the returned hash to the key.
-// baseIdentity is the per-cloud base UKI (snp-base:<PCR11>) for SEV-SNP, empty
-// for Confidential Space. The caller pins it against the base allowlist too.
+// SNP) plus the SPKI hash the attestation commits to. spkiDER is the registering
+// key; SNP evidence binds it to the provider TPM. baseIdentity is set only by
+// legacy SEV2, whose per-cloud PCR 11 value remains allowlisted during migration.
 type AttestationValidator interface {
 	Validate(attType, role string, token, spkiDER []byte) (imageIdentity, baseIdentity string, spkiHash [32]byte, err error)
 }
@@ -46,6 +45,8 @@ func (v *DispatchingValidator) Validate(attType, role string, token, spkiDER []b
 	switch attType {
 	case AttestationTypeSEVSNP:
 		return validateSEVSNP(token, spkiDER)
+	case AttestationTypeSecureBoot:
+		return validateSecureBoot(token, spkiDER)
 	case AttestationTypeCS, "":
 		return validateCS(token, role, v.logger)
 	default:
@@ -99,4 +100,19 @@ func validateSEVSNP(token, spkiDER []byte) (string, string, [32]byte, error) {
 	// Both the app (payload, cross-cloud) and the per-cloud base UKI are pinned
 	// against the allowlist by the register handler.
 	return appID, baseID, sha256.Sum256(spkiDER), nil
+}
+
+func validateSecureBoot(token, spkiDER []byte) (string, string, [32]byte, error) {
+	var spki [32]byte
+	raw, err := base64.StdEncoding.DecodeString(string(token))
+	if err != nil {
+		return "", "", spki, fmt.Errorf("decode Secure Boot attestation base64: %w", err)
+	}
+	appID, _, err := shared.VerifyCombinedSecureBootAttestation(raw, spkiDER)
+	if err != nil {
+		return "", "", spki, fmt.Errorf("validate Secure Boot attestation: %w", err)
+	}
+	// R replaces the per-cloud PCR 11 allowlist. The app identity remains the
+	// cross-cloud allowlist key and the registration body remains SPKI-bound.
+	return appID, "", sha256.Sum256(spkiDER), nil
 }

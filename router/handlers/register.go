@@ -39,9 +39,9 @@ type registerResponse struct {
 }
 
 // HandleRegister implements the /register endpoint. Identity is established
-// by two signals: SA identity token (caller proves it holds an approved SA
-// SA credential) + Confidential Space attestation (image_digest matches the
-// router's APPROVED_IMAGE_DIGESTS allowlist).
+// by provider attestation bound to the registration key. Confidential Space
+// also supplies an approved service-account identity. Every path must return an
+// app identity in the router's APPROVED_IMAGE_DIGESTS allowlist.
 //
 // A source-IP cross-check used to live here but was removed: the router runs
 // behind a GCP global HTTPS LB, where X-Forwarded-For's leftmost entry is
@@ -67,15 +67,14 @@ func (s *Server) HandleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// SEV-SNP TEEs (e.g. on AWS) hold no GCP service account, so they can't mint
-	// an SA identity token. For them the AMD-rooted attestation + allowlisted
-	// measurement + SPKI body-binding IS the credential, so the SA token is
-	// skipped. Confidential Space TEEs still present one. Setting
-	// attestation_type=sev-snp can't downgrade-bypass: the attestation must
-	// then verify as a real SEV-SNP report bound to the body-signing key.
-	isSEVSNP := req.AttestationType == auth.AttestationTypeSEVSNP
+	// SNP TEEs hold no GCP service account. Their hardware attestation,
+	// allowlisted app measurement, and SPKI body binding are the credential.
+	// Confidential Space TEEs still present an SA token. Setting either SNP
+	// attestation type cannot bypass verification: dispatch requires matching
+	// evidence bound to the body-signing key.
+	isProviderAttested := req.AttestationType == auth.AttestationTypeSEVSNP || req.AttestationType == auth.AttestationTypeSecureBoot
 	var saEmail string
-	if !s.Config.Standalone && !isSEVSNP {
+	if !s.Config.Standalone && !isProviderAttested {
 		saClaims, err := s.authenticateSA(r)
 		if err != nil {
 			log.Warn("register: SA token invalid", zap.Error(err))
@@ -103,10 +102,10 @@ func (s *Server) HandleRegister(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusForbidden, "image digest not in allowlist")
 			return
 		}
-		// SEV-SNP: the per-cloud base UKI (PCR 11) is the measured-boot TCB that
-		// extends PCR 8 (the app). Pin it too, fail-closed, so a rogue base can't
-		// forge the app measurement. CS attestations report no base (empty).
-		if validatedBase != "" && !s.Allowlist.Contains(validatedBase) {
+		// Legacy SEV2 pins PCR 11 because that loader extends PCR 8. Secure Boot
+		// instead proves an R-authorized loader and returns no base identity. CS
+		// attestations also return no separate base identity.
+		if req.AttestationType == auth.AttestationTypeSEVSNP && validatedBase != "" && !s.Allowlist.Contains(validatedBase) {
 			writeErr(w, http.StatusForbidden, "base UKI not in allowlist")
 			return
 		}
@@ -137,9 +136,9 @@ func (s *Server) HandleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Per-role SA binding: each role has one expected SA email (config-pinned).
-	// SEV-SNP has no SA to pin; role/identity binding for those comes from the
-	// attestation + allowlisted measurement instead.
-	if !s.Config.Standalone && !isSEVSNP {
+	// SNP has no SA to pin; role/identity binding comes from the attestation and
+	// allowlisted app measurement instead.
+	if !s.Config.Standalone && !isProviderAttested {
 		expected := s.Config.TEEKSAEmail
 		if store.Role(req.Role) == store.RoleT {
 			expected = s.Config.TEETSAEmail
@@ -164,13 +163,22 @@ func (s *Server) HandleRegister(w http.ResponseWriter, r *http.Request) {
 			p.LastHeartbeatK = now
 			p.LastHeartbeatT = now
 		}
-		// Record the pair's attestation type (idempotent across both halves) so
-		// /allocate matches it only to clients that can verify it.
-		if isSEVSNP {
-			p.AttestationType = auth.AttestationTypeSEVSNP
-		} else {
-			p.AttestationType = auth.AttestationTypeCS
+		// Both halves must use the same attestation generation. This prevents a
+		// mixed SEV2/Secure Boot row from inheriting whichever type registered last.
+		requestedType := req.AttestationType
+		if requestedType == "" {
+			requestedType = auth.AttestationTypeCS
 		}
+		if exists && (p.TEEKAddr != "" || p.TEETAddr != "") {
+			storedType := p.AttestationType
+			if storedType == "" {
+				storedType = auth.AttestationTypeCS
+			}
+			if storedType != requestedType {
+				return errPairAttestationTypeMismatch
+			}
+		}
+		p.AttestationType = requestedType
 		switch store.Role(req.Role) {
 		case store.RoleK:
 			p.TEEKAddr = req.SelfAddr
@@ -190,6 +198,10 @@ func (s *Server) HandleRegister(w http.ResponseWriter, r *http.Request) {
 		return nil
 	})
 	if err != nil {
+		if errors.Is(err, errPairAttestationTypeMismatch) {
+			writeErr(w, http.StatusConflict, "pair halves use different attestation types")
+			return
+		}
 		log.Error("register: store mutate failed", zap.Error(err))
 		writeErr(w, http.StatusInternalServerError, "store error")
 		return
@@ -214,6 +226,8 @@ func (s *Server) HandleRegister(w http.ResponseWriter, r *http.Request) {
 			s.Config.ControlUnhealthy, s.Config.OTNotReady),
 	})
 }
+
+var errPairAttestationTypeMismatch = errors.New("pair attestation type mismatch")
 
 // errOrphanPreconditionMissed is returned by the DeletePairIf precondition
 // when the orphan row's address changed between list and delete — another

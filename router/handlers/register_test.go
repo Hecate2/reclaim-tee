@@ -347,6 +347,52 @@ func TestRegisterRejectsBaseNotInAllowlist(t *testing.T) {
 	}
 }
 
+func TestRegisterSecureBootSkipsLegacyBaseAllowlist(t *testing.T) {
+	s := newTestServer(t)
+	appID := "snp-app:" + strings.Repeat("12", 32)
+	legacyBase := "snp-base:" + strings.Repeat("34", 32)
+	if err := s.Allowlist.Add(t.Context(), appID); err != nil {
+		t.Fatalf("seed app allowlist: %v", err)
+	}
+	s.AttestValidator = &fakeAttestValidator{digest: appID, base: legacyBase, spkiHash: testRegSPKIHash}
+
+	body := registerRequest{
+		PairID: pairID, Role: "K", SelfAddr: teekIP + ":443", PeerAddrClaim: teetIP + ":443",
+		ImageDigest: appID, AttestationType: "secure-boot",
+	}
+	signRegisterBody(&body)
+	if w := doRegister(t, s, body, teekIP+":12345", ""); w.Code != http.StatusOK {
+		t.Fatalf("expected Secure Boot registration without base allowlist, got %d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestRegisterRejectsMixedPairAttestationTypes(t *testing.T) {
+	s := newTestServer(t)
+	appID := "snp-app:" + strings.Repeat("56", 32)
+	if err := s.Allowlist.Add(t.Context(), appID); err != nil {
+		t.Fatalf("seed app allowlist: %v", err)
+	}
+	s.AttestValidator = &fakeAttestValidator{digest: appID, spkiHash: testRegSPKIHash}
+
+	k := registerRequest{
+		PairID: pairID, Role: "K", SelfAddr: teekIP + ":443", PeerAddrClaim: teetIP + ":443",
+		ImageDigest: appID, AttestationType: "secure-boot",
+	}
+	signRegisterBody(&k)
+	if w := doRegister(t, s, k, teekIP+":12345", ""); w.Code != http.StatusOK {
+		t.Fatalf("register K: %d body=%s", w.Code, w.Body.String())
+	}
+
+	tSide := registerRequest{
+		PairID: pairID, Role: "T", SelfAddr: teetIP + ":443", PeerAddrClaim: teekIP + ":443",
+		ImageDigest: appID, AttestationType: "sev-snp",
+	}
+	signRegisterBody(&tSide)
+	if w := doRegister(t, s, tSide, teetIP+":12345", ""); w.Code != http.StatusConflict {
+		t.Fatalf("mixed pair: got %d body=%s, want 409", w.Code, w.Body.String())
+	}
+}
+
 // TEE_T's SA presenting role=K is rejected by per-role config pinning.
 func TestRegisterRejectsCrossRoleSA(t *testing.T) {
 	s := newTestServer(t)

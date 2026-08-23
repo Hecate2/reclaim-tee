@@ -46,8 +46,9 @@ func NewRouterClient(baseURL string, tokens TokenSource) *RouterClient {
 // Attestation types carried in the /register body. The router dispatches its
 // validator on this; empty means CS for backward compatibility.
 const (
-	AttestationTypeCS     = "cs"
-	AttestationTypeSEVSNP = "sev-snp"
+	AttestationTypeCS         = "cs"
+	AttestationTypeSEVSNP     = "sev-snp"
+	AttestationTypeSecureBoot = "secure-boot"
 )
 
 // RegisterRequest is the body of POST /register. SPKIDer + BodySignature

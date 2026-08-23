@@ -98,11 +98,34 @@ func validateGCPCS(attestation []byte, peerRole string, actualHash [32]byte, log
 // AK to this cert's SPKI (anti-splice), and the AK-signed quote pins PCR 8 (app)
 // + PCR 11 (base). Returns the app (payload) identity "snp-app:<hex(appHash)>".
 func validateSEVSNP(attestation, spkiDER []byte) (string, string, error) {
+	if err := validatePeerSNPAttestationType(attestation); err != nil {
+		return "", "", err
+	}
+	if IsSecureBootAttestation(attestation) {
+		app, _, err := VerifyCombinedSecureBootAttestation(attestation, spkiDER)
+		if err != nil {
+			return "", "", fmt.Errorf("ratls: %w", err)
+		}
+		// Secure Boot replaces the per-base PCR 11 pin with the embedded R key.
+		return app, "", nil
+	}
 	app, base, err := VerifyCombinedSEVSNPAttestation(attestation, spkiDER)
 	if err != nil {
 		return "", "", fmt.Errorf("ratls: %w", err)
 	}
 	return app, base, nil
+}
+
+// New R-signed loaders must not form a pair with a legacy SEV2 half. Old
+// loaders leave SNP_ATTESTATION_TYPE unset and continue to require SEV2. This
+// makes the TEE-to-TEE trust boundary match the router's same-generation rule.
+func validatePeerSNPAttestationType(attestation []byte) error {
+	wantSecureBoot := CurrentSNPAttestationType() == AttestationTypeSecureBoot
+	gotSecureBoot := IsSecureBootAttestation(attestation)
+	if wantSecureBoot != gotSecureBoot {
+		return fmt.Errorf("ratls: peer attestation generation does not match local %s mode", CurrentSNPAttestationType())
+	}
+	return nil
 }
 
 // findExtension returns the value of the first cert extension matching oid, or
