@@ -127,11 +127,16 @@ func (t *TEET) checkFinishedCondition(identity *teetSessionIdentity) error {
 		// teetState already obtained above for consolidated ciphertext check
 
 		timestampMs := time.Now().UnixMilli()
+		signedAttestationType := ""
+		if t.ratls != nil {
+			signedAttestationType = attestationReportType()
+		}
 		tOutput := &teeproto.TOutputPayload{
 			SessionId:                      sessionID,                     // Bind to session for cross-TEE verification
 			ConsolidatedResponseCiphertext: ciphertext,                    // Consolidated response ciphertext (locked snapshot)
 			RequestProofStreams:            teetState.RequestProofStreams, // TEE_T signs R_SP streams
 			TimestampMs:                    uint64(timestampMs),           // Include signed timestamp
+			AttestationType:                signedAttestationType,
 		}
 
 		// Include OPRF outputs in signed payload

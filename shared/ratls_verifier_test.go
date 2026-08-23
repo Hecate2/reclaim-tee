@@ -218,6 +218,34 @@ func TestVerifyRATLSPeer_DispatchesToSEVSNP(t *testing.T) {
 	}
 }
 
+func TestVerifyRATLSPeer_PrefersSecureBootExtension(t *testing.T) {
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("gen key: %v", err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "tee_k"},
+		NotBefore:    time.Now(),
+		NotAfter:     time.Now().Add(time.Hour),
+		ExtraExtensions: []pkix.Extension{
+			{Id: AttestationOIDSEVSNP, Critical: false, Value: []byte{snpAttestTagGCP}},
+			// An unknown marker version must fail before the legacy proof. The
+			// specific failure proves the updated verifier selected it first.
+			{Id: AttestationOIDSecureBoot, Critical: false, Value: []byte{0xff}},
+		},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &priv.PublicKey, priv)
+	if err != nil {
+		t.Fatalf("create cert: %v", err)
+	}
+
+	err = VerifyRATLSAttestation("tee_k", nil)([][]byte{der}, nil)
+	if err == nil || !strings.Contains(err.Error(), "Secure Boot extension version") {
+		t.Fatalf("Secure Boot extension was not preferred: %v", err)
+	}
+}
+
 func TestBaseAccepted(t *testing.T) {
 	const gcp, aws = "snp-base:e51ea77d", "snp-base:48329081"
 	set := gcp + "," + aws

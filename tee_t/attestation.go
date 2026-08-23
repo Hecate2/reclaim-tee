@@ -68,8 +68,15 @@ func (t *TEET) refreshAttestation() error {
 	if err != nil {
 		return fmt.Errorf("failed to generate attestation: %v", err)
 	}
+	reportType := attestationReportType()
+	if shared.IsSEVSNPMode() {
+		reportType, raw, err = shared.ClientCompatibleSNPAttestation(reportType, raw)
+		if err != nil {
+			return fmt.Errorf("build client-compatible SNP attestation: %v", err)
+		}
+	}
 
-	attestationReport := &teeproto.AttestationReport{Type: attestationReportType(), Report: raw}
+	attestationReport := &teeproto.AttestationReport{Type: reportType, Report: raw}
 	// Publish the new signing key + its attestation atomically.
 	t.attestationMutex.Lock()
 	t.signingKeyPair = newKeyPair
@@ -248,7 +255,7 @@ func (t *TEET) verifyTEEKAttestation(req *teeproto.TEEKAttestationRequest, peerC
 	// SNP: the attestation binds a presentable nonce list; verify the generation
 	// named by the protocol type, then bind the result to the mTLS peer SPKI.
 	if attestation.Type == shared.AttestationTypeSEVSNP || attestation.Type == shared.AttestationTypeSecureBoot {
-		nonces, _, err := shared.VerifyTypedSNPNonceAttestation(attestation.Type, attestation.Report)
+		nonces, _, err := shared.VerifyPeerSNPNonceAttestation(attestation.Type, attestation.Report)
 		if err != nil {
 			return fmt.Errorf("validate TEE_K %s attestation: %w", attestation.Type, err)
 		}

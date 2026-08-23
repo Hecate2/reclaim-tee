@@ -117,9 +117,14 @@ func (t *TEEK) generateComprehensiveSignatureForSession(session *shared.Session,
 	ethAddress := keyPair.GetEthAddress()
 
 	timestampMs := time.Now().UnixMilli()
+	signedAttestationType := ""
+	if t.ratls != nil {
+		signedAttestationType = attestationReportType()
+	}
 	kPayload := &teeproto.KOutputPayload{
-		SessionId:   sessionID,           // Bind to session for cross-TEE verification
-		TimestampMs: uint64(timestampMs), // Include signed timestamp
+		SessionId:       sessionID,           // Bind to session for cross-TEE verification
+		TimestampMs:     uint64(timestampMs), // Include signed timestamp
+		AttestationType: signedAttestationType,
 	}
 	if requestMetadata != nil {
 		kPayload.RedactedRequest = requestMetadata.RedactedRequest

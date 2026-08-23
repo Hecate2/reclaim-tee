@@ -55,6 +55,81 @@ func IsSecureBootAttestation(att []byte) bool {
 	return len(att) != 0 && (att[0] == snpAttestTagSecureBootGCP || att[0] == snpAttestTagSecureBootAWS)
 }
 
+// LegacyCompatibleSNPAttestation changes only the wire tag of a Secure Boot
+// envelope. The provider evidence and event log stay intact. This lets old
+// clients run their SEV2 prerequisite while updated verifiers use the signed
+// payload generation marker to require the additional Secure Boot checks.
+func LegacyCompatibleSNPAttestation(att []byte) ([]byte, error) {
+	if len(att) == 0 {
+		return nil, fmt.Errorf("empty SNP attestation")
+	}
+	out := append([]byte(nil), att...)
+	switch out[0] {
+	case snpAttestTagGCP, snpAttestTagAWS:
+		return out, nil
+	case snpAttestTagSecureBootGCP:
+		out[0] = snpAttestTagGCP
+	case snpAttestTagSecureBootAWS:
+		out[0] = snpAttestTagAWS
+	default:
+		return nil, fmt.Errorf("unknown SNP attestation tag 0x%02x", out[0])
+	}
+	return out, nil
+}
+
+// ClientCompatibleSNPAttestation returns the report type and bytes exposed to
+// clients. Secure Boot evidence uses the legacy SEV-SNP outer type and tag;
+// its generation is asserted separately inside the signed TEE output body.
+func ClientCompatibleSNPAttestation(attestationType string, att []byte) (string, []byte, error) {
+	switch attestationType {
+	case AttestationTypeSEVSNP:
+		if IsSecureBootAttestation(att) {
+			return "", nil, fmt.Errorf("SEV-SNP client report carries a Secure Boot tag")
+		}
+		wire, err := LegacyCompatibleSNPAttestation(att)
+		return AttestationTypeSEVSNP, wire, err
+	case AttestationTypeSecureBoot:
+		wire, err := LegacyCompatibleSNPAttestation(att)
+		return AttestationTypeSEVSNP, wire, err
+	default:
+		return "", nil, fmt.Errorf("unsupported SNP attestation type: %s", attestationType)
+	}
+}
+
+// SecureBootAttestationFromCompatibleWire restores the Secure Boot tag on a
+// legacy-compatible envelope. Callers must invoke this only when an
+// authenticated protocol value requires Secure Boot; the legacy tag alone is
+// intentionally not a generation signal.
+func SecureBootAttestationFromCompatibleWire(att []byte) ([]byte, error) {
+	if len(att) == 0 {
+		return nil, fmt.Errorf("empty SNP attestation")
+	}
+	out := append([]byte(nil), att...)
+	switch out[0] {
+	case snpAttestTagSecureBootGCP, snpAttestTagSecureBootAWS:
+		return out, nil
+	case snpAttestTagGCP:
+		out[0] = snpAttestTagSecureBootGCP
+	case snpAttestTagAWS:
+		out[0] = snpAttestTagSecureBootAWS
+	default:
+		return nil, fmt.Errorf("unknown SNP attestation tag 0x%02x", out[0])
+	}
+	return out, nil
+}
+
+// VerifyCompatibleSecureBootNonceAttestation verifies Secure Boot evidence
+// carried under either the new tag or the legacy-compatible tag. The caller is
+// responsible for authenticating the Secure Boot generation marker first or
+// verifying the signature that covers it immediately afterward.
+func VerifyCompatibleSecureBootNonceAttestation(att []byte) (nonces []string, app string, result *SecureBootResult, err error) {
+	secure, err := SecureBootAttestationFromCompatibleWire(att)
+	if err != nil {
+		return nil, "", nil, err
+	}
+	return VerifyCombinedSecureBootNonceAttestation(secure)
+}
+
 // VerifyCombinedSecureBootAttestation verifies the existing SPKI-bound SEV2
 // proof first, then replays the raw firmware event log against provider-quoted
 // PCR 4/7/11 values and requires an R-only Secure Boot policy.
@@ -109,6 +184,18 @@ func VerifyTypedSNPNonceAttestation(attestationType string, att []byte) (nonces 
 	default:
 		return nil, "", fmt.Errorf("unsupported attestation type: %s", attestationType)
 	}
+}
+
+// VerifyPeerSNPNonceAttestation additionally requires the control peer to use
+// the local TEE generation. Client-facing certificates deliberately use the
+// legacy-compatible tag, so the control attestation is the generation boundary
+// that prevents a Secure Boot half from pairing with an SEV2 half.
+func VerifyPeerSNPNonceAttestation(attestationType string, att []byte) (nonces []string, app string, err error) {
+	want := CurrentSNPAttestationType()
+	if attestationType != want {
+		return nil, "", fmt.Errorf("peer attestation generation %q does not match local %q mode", attestationType, want)
+	}
+	return VerifyTypedSNPNonceAttestation(attestationType, att)
 }
 
 // verifyCombinedSecureBoot preserves the current SEV2 verifier as the first

@@ -102,11 +102,46 @@ Current production digests: [`deploy/image-history.json`](deploy/image-history.j
 
 ## Attestation & Certificate Verification
 
-Both TEEs include their TLS certificate hash in GCP attestation nonces (`eat_nonce` array):
-- `nonces[0]`: `tee_k_public_key:0x...` or `tee_t_public_key:0x...`
-- `nonces[1]`: `tee_k_cert_hash:<sha256>` or `tee_t_cert_hash:<sha256>`
+Each RA-TLS certificate contains provider evidence. This evidence binds the TLS public key (SPKI) to a hardware report.
 
-The client verifies these hashes match the TLS certificates on its WebSocket connections before submitting the verification bundle.
+The client verifies this evidence but does not pin an app hash or a base hash. The external attestor applies the code-identity policy later.
+
+Each signed TEE result contains a second attestation. This attestation binds the TEE signing key and the app hash to hardware evidence.
+
+The signed result contains these nonces:
+
+- `tee_k_public_key:0x...` or `tee_t_public_key:0x...`
+- `tee_k_spki_hash:<sha256>` or `tee_t_spki_hash:<sha256>`
+
+The attestor returns both app hashes in the claim context. The claim consumer compares these hashes with its app policy.
+
+### Secure Boot trust and client compatibility
+
+Secure Boot adds a release-key check to the SEV2 checks. It does not make the AMD launch measurement identify the base image.
+
+The provider TPM signs the measured PCR values. The AMD report binds the TPM evidence to the confidential VM.
+
+The verifier replays the firmware event log against PCR 4, PCR 7, and PCR 11. The replay must prove an enabled `R`-only policy.
+
+The app loader is part of an `R`-signed UKI. The loader measures the app bundle into PCR 8 before it runs the app.
+
+The secure path trusts the stable public key `R` and the app hash. It does not use the PCR 11 base allowlist.
+
+Secure RA-TLS certificates keep the full evidence in the legacy `.2` extension. They add a one-byte, non-critical `.3` Secure Boot marker.
+
+Old clients ignore the `.3` marker and verify the unchanged SEV2 prerequisite. Updated clients use it to verify `R` during the TLS handshake.
+
+Signed claim reports keep the legacy `sev-snp` report type and cloud tag for old clients. The evidence still contains the Secure Boot event log.
+
+The signed TEE payload contains `attestation_type = "secure-boot"`. A change to this marker makes the TEE signature invalid.
+
+Old `recordbuf-fix` clients ignore the new payload field. They preserve the original signed body when they create the verification bundle.
+
+Updated clients and attestors read the signed marker. They require the event-log and `R` checks when the marker is `secure-boot`.
+
+The native Secure Boot type remains on the TEE control channel. This rule prevents a Secure Boot half from pairing with an SEV2 half.
+
+The secure base hashes do not belong in the legacy base allowlist. The signed marker selects the secure trust path instead.
 
 ### AWS same-guest evidence
 

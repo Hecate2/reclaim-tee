@@ -1,6 +1,6 @@
 // Package selector picks a ready pair to allocate to a new client session:
-// ready + attestation-type-accepted, preferring Secure Boot then SEV-SNP for
-// capable clients (so older capacity is reserved for legacy clients), then geo-nearest
+// ready + wire-compatible, preferring Secure Boot then SEV-SNP for current
+// clients (so older capacity is reserved during migration), then geo-nearest
 // to the client (falling back to uniform random when geo is unavailable).
 package selector
 
@@ -30,10 +30,9 @@ func PairAttestationType(p *store.Pair) string {
 }
 
 // PickReadyPair filters pairs to those whose EffectiveStatus is Ready AND whose
-// attestation type the client accepts, then returns one chosen uniformly at
-// random. accepts must be non-empty: the handler defaults a missing list to
-// {cs} so a legacy (CS-only) client is never handed an SEV-SNP pair it can't
-// verify.
+// client-facing evidence the client accepts, then returns one chosen uniformly
+// at random. Secure Boot pairs have an SEV-SNP-compatible client view, while CS
+// remains compatible only with clients that explicitly accept CS.
 // clientLoc is the client's location from the LB geo header; nil (unknown)
 // keeps the prior uniform-random behavior. When known, pairs whose TEEs we can
 // geo-locate are preferred nearest-first (max-distance bottleneck), with a
@@ -51,7 +50,7 @@ func PickReadyPair(
 		if p.EffectiveStatus(now, heartbeatStaleness, controlUnhealthy, otNotReady) != store.StatusReady {
 			continue
 		}
-		if !accepted(accepts, PairAttestationType(p)) {
+		if !pairAccepted(accepts, PairAttestationType(p)) {
 			continue
 		}
 		ready = append(ready, p)
@@ -60,13 +59,21 @@ func PickReadyPair(
 		return nil, ErrNoReadyPairs
 	}
 
-	// Prefer the newest mutually supported generation. During expansion a new
-	// client chooses Secure Boot, falls back to SEV2, then CS. Old clients never
-	// list Secure Boot, so they cannot be allocated a pair they cannot verify.
-	for _, preferred := range []string{shared.AttestationTypeSecureBoot, shared.AttestationTypeSEVSNP} {
-		if !accepted(accepts, preferred) {
-			continue
+	// Prefer the newest explicitly supported generation. During expansion a new
+	// client chooses Secure Boot, then SEV2, then CS. A pre-Secure-Boot client
+	// prefers SEV2 while it exists, then its compatible Secure Boot wire view,
+	// then CS.
+	preferredTypes := make([]string, 0, 3)
+	if accepted(accepts, shared.AttestationTypeSecureBoot) {
+		preferredTypes = append(preferredTypes, shared.AttestationTypeSecureBoot)
+	}
+	if accepted(accepts, shared.AttestationTypeSEVSNP) {
+		preferredTypes = append(preferredTypes, shared.AttestationTypeSEVSNP)
+		if !accepted(accepts, shared.AttestationTypeSecureBoot) {
+			preferredTypes = append(preferredTypes, shared.AttestationTypeSecureBoot)
 		}
+	}
+	for _, preferred := range preferredTypes {
 		only := make([]*store.Pair, 0, len(ready))
 		for _, p := range ready {
 			if PairAttestationType(p) == preferred {
@@ -125,4 +132,15 @@ func pickRandom(pairs []*store.Pair) (*store.Pair, error) {
 
 func accepted(accepts []string, t string) bool {
 	return slices.Contains(accepts, t)
+}
+
+// pairAccepted models wire compatibility, not only the pair's internal trust
+// generation. A Secure Boot pair exposes legacy-compatible SEV-SNP evidence to
+// old clients while its signed outputs require updated verifiers to apply the
+// additional Secure Boot policy.
+func pairAccepted(accepts []string, pairType string) bool {
+	if accepted(accepts, pairType) {
+		return true
+	}
+	return pairType == shared.AttestationTypeSecureBoot && accepted(accepts, shared.AttestationTypeSEVSNP)
 }

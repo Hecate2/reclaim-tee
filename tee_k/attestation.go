@@ -73,10 +73,17 @@ func (t *TEEK) refreshAttestation() error {
 	if err != nil {
 		return fmt.Errorf("failed to generate attestation: %v", err)
 	}
+	reportType := attestationReportType()
+	if shared.IsSEVSNPMode() {
+		reportType, attestationDoc, err = shared.ClientCompatibleSNPAttestation(reportType, attestationDoc)
+		if err != nil {
+			return fmt.Errorf("build client-compatible SNP attestation: %v", err)
+		}
+	}
 
 	// Create structured report
 	attestationReport := &teeproto.AttestationReport{
-		Type:   attestationReportType(),
+		Type:   reportType,
 		Report: attestationDoc,
 	}
 
@@ -245,7 +252,7 @@ func (t *TEEK) verifyTEETAttestation(msgBytes []byte, tlsCert []byte) error {
 	// SNP: the attestation binds a presentable nonce list; verify the generation
 	// named by the protocol type, then bind the result to the mTLS peer SPKI.
 	if attestation.Type == shared.AttestationTypeSEVSNP || attestation.Type == shared.AttestationTypeSecureBoot {
-		nonces, _, err := shared.VerifyTypedSNPNonceAttestation(attestation.Type, attestation.Report)
+		nonces, _, err := shared.VerifyPeerSNPNonceAttestation(attestation.Type, attestation.Report)
 		if err != nil {
 			return fmt.Errorf("validate TEE_T %s attestation: %w", attestation.Type, err)
 		}

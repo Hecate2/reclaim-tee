@@ -58,10 +58,9 @@ func (c *Client) ConnectToTEEK() error {
 				return fmt.Errorf("native WebSocket connect failed: %w", err)
 			}
 		} else if strings.HasPrefix(c.teekURL, "wss://") {
-			// Router-allocated wss:// — TEE serves an RA-TLS cert; the dialer
-			// verifies the embedded attestation but doesn't inspect what's
-			// inside it (the TEE's signed bundles carry the full attestation
-			// downstream).
+			// Router-allocated wss:// — TEE serves an RA-TLS cert. The dialer
+			// verifies the provider evidence, SPKI binding, and Secure Boot
+			// release key when the additive certificate extension is present.
 			c.logger.Info("Using RA-TLS dialer for TEE_K")
 			dialer := newRATLSWebSocketDialer("tee_k", c.logger)
 			conn, _, err = dialer.Dial(u.String(), nil)
@@ -187,9 +186,8 @@ func (c *Client) ConnectToTEET() error {
 				return fmt.Errorf("native WebSocket connect failed: %w", err)
 			}
 		} else if strings.HasPrefix(c.teetURL, "wss://") {
-			// Router-allocated wss:// — RA-TLS verification only; the TEE's
-			// signed bundles carry the attestation contents for downstream
-			// verification.
+			// Router-allocated wss:// — verify provider evidence, SPKI binding,
+			// and the Secure Boot release key when its extension is present.
 			c.logger.Info("Using RA-TLS dialer for TEE_T")
 			dialer := newRATLSWebSocketDialer("tee_t", c.logger)
 			conn, _, err = dialer.Dial(u.String(), nil)

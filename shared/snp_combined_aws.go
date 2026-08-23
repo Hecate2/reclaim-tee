@@ -48,7 +48,7 @@ type combinedEnvelope struct {
 	SEV      []byte `cbor:"sev,omitempty"`
 	// EventLog is the uncompressed raw TCG firmware event log on AWS. GCP
 	// carries the same bytes in the standard go-tpm-tools Attestation.event_log
-	// field. It is required only by the distinct Secure Boot wire tags.
+	// field. The Secure Boot verifier requires it; legacy SEV2 readers ignore it.
 	EventLog []byte `cbor:"eventlog,omitempty"`
 	// SEV2 is the same-guest AWS proof. Its report_data commits to the exact
 	// signed NitroTPM document, AppHash, and caller binding. SEV remains present

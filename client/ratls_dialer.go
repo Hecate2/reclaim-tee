@@ -11,12 +11,11 @@ import (
 // newRATLSWebSocketDialer builds a WebSocket dialer wired for RA-TLS.
 // The TEE's self-signed cert can't be verified through the usual CA
 // chain (InsecureSkipVerify), so VerifyPeerCertificate runs the
-// attestation check instead: confirms the GCP attestation JWT is signed
-// by Google and that the SPKI nonce inside the JWT binds to the cert's
-// actual public key. Does NOT pin image_digest — the TEEs embed their
-// full attestation reports into the signed claim bundles the attestor
-// inspects downstream, so the client doesn't need to look at what's
-// inside the attestation.
+// attestation check instead. For Secure Boot certificates, updated clients
+// prefer the additive proof and verify the release key R before sending
+// application data. Old clients use the retained legacy SNP extension. The
+// client does not pin app identity; the attestor returns it to the external
+// verifier as before.
 //
 // peerRole is "tee_k" or "tee_t" — picks the right SPKI nonce prefix
 // for the binding check.

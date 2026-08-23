@@ -244,8 +244,15 @@ func TestPickReadyPair_PrefersSecureBootThenFallsBack(t *testing.T) {
 		}
 	}
 
+	// Once legacy pairs are gone, the same old client must still be eligible
+	// for a Secure Boot pair's legacy-compatible wire view.
+	picked, err := PickReadyPair([]*store.Pair{cs, secure}, oldClient, now, staleness, controlUnhealthy, otNotReady, nil)
+	if err != nil || picked.ID != "secure" {
+		t.Fatalf("old-client Secure Boot fallback = %v, %v; want secure", picked, err)
+	}
+
 	secureOnly := []string{"secure-boot"}
-	picked, err := PickReadyPair([]*store.Pair{cs, sev2, secure}, secureOnly, now, staleness, controlUnhealthy, otNotReady, nil)
+	picked, err = PickReadyPair([]*store.Pair{cs, sev2, secure}, secureOnly, now, staleness, controlUnhealthy, otNotReady, nil)
 	if err != nil || picked.ID != "secure" {
 		t.Fatalf("secure-only pick = %v, %v; want secure", picked, err)
 	}

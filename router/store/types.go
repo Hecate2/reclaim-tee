@@ -49,7 +49,7 @@ type Pair struct {
 
 	// AttestationType is "cs", "sev-snp", or "secure-boot", set at /register.
 	// Empty on pairs registered before the field existed means CS. /allocate uses
-	// it to match a pair only to clients that can verify its attestation.
+	// it together with the pair's client-wire compatibility rules.
 	AttestationType string
 
 	// Per-side observations updated by /heartbeat (and seeded by /register).

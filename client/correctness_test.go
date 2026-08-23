@@ -1,6 +1,7 @@
 package client
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"net/http"
@@ -75,6 +76,68 @@ func TestSignedMessagesAreVerifiedBeforePublication(t *testing.T) {
 	}
 	if !validation.AllValidationsPassed || !validation.TranscriptValidation.OverallValid {
 		t.Fatalf("valid messages failed validation: %+v", validation)
+	}
+}
+
+func TestSecureBootGenerationIsSignedWhileReportStaysLegacyCompatible(t *testing.T) {
+	pair, err := shared.GenerateSigningKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := proto.Marshal(&teeproto.KOutputPayload{
+		SessionId:                     "session-1",
+		ConsolidatedResponseKeystream: []byte("k-stream"),
+		AttestationType:               shared.AttestationTypeSecureBoot,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	signature, err := pair.SignData(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signed := &teeproto.SignedMessage{
+		BodyType:  teeproto.BodyType_BODY_TYPE_K_OUTPUT,
+		Body:      body,
+		Signature: signature,
+		AttestationReport: &teeproto.AttestationReport{
+			Type:   shared.AttestationTypeSEVSNP,
+			Report: []byte("legacy-tagged-secure-evidence"),
+		},
+	}
+
+	c := NewClient("wss://tee-k.example/ws")
+	c.SetTEETURL("wss://tee-t.example/ws")
+	c.SetMode(ModeEnclave)
+	c.sessionID = "session-1"
+	c.verifySEVAttestation = func([]byte) ([]string, error) {
+		return []string{"tee_k_public_key:" + pair.GetEthAddress().Hex()}, nil
+	}
+	if err := c.acceptTEEKSignedMessage("session-1", signed); err != nil {
+		t.Fatalf("secure marker with legacy-compatible report rejected: %v", err)
+	}
+	if got := stripUnsignedFields(signed).GetBody(); !bytes.Equal(got, body) {
+		t.Fatal("verification-bundle filtering changed the signed body marker")
+	}
+
+	var downgraded teeproto.KOutputPayload
+	if err := proto.Unmarshal(body, &downgraded); err != nil {
+		t.Fatal(err)
+	}
+	downgraded.AttestationType = shared.AttestationTypeSEVSNP
+	downgradedBody, err := proto.Marshal(&downgraded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tampered := proto.Clone(signed).(*teeproto.SignedMessage)
+	tampered.Body = downgradedBody
+	c2 := NewClient("wss://tee-k.example/ws")
+	c2.SetTEETURL("wss://tee-t.example/ws")
+	c2.SetMode(ModeEnclave)
+	c2.sessionID = "session-1"
+	c2.verifySEVAttestation = c.verifySEVAttestation
+	if err := c2.acceptTEEKSignedMessage("session-1", tampered); err == nil || !strings.Contains(err.Error(), "signature") {
+		t.Fatalf("signed generation downgrade result = %v, want signature failure", err)
 	}
 }
 

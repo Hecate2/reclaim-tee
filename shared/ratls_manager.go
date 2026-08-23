@@ -280,7 +280,8 @@ func IsProductionTEE() bool {
 //     AttestationOID. This is the deployed v2 path and takes priority.
 //   - Plain SEV-SNP CVM (/dev/sev-guest present): emit a marshaled SEV-SNP
 //     report under AttestationOIDSEVSNP, with report_data binding the SPKI
-//     hash and the self binary hash.
+//     hash and the self binary hash. Secure Boot images also emit a small
+//     AttestationOIDSecureBoot marker that makes updated verifiers apply R.
 //   - Standalone dev (neither present): no extension. Peers using
 //     VerifyRATLSPeer will reject such certs; standalone TEE↔TEE comms must
 //     use a different verifier path.
@@ -303,8 +304,9 @@ func (m *RATLSManager) acquireAttestationExts(ctx context.Context, priv *ecdsa.P
 		// SEV report_data committing to the vTPM AK and this cert's SPKI. Code
 		// identity lives in PCR 8 (app) and the measured boot PCRs. The SEV
 		// measurement is firmware-only, so the binding to the AK is what makes the
-		// PCR quote trustworthy without splicing. Legacy SEV2 pins PCR 11; Secure
-		// Boot instead replays PCR 4/7/11 and pins release key R.
+		// PCR quote trustworthy without splicing. Secure Boot certificates retain a
+		// legacy extension for old clients and add a separate extension for updated
+		// clients to verify the event log and release key R during the TLS handshake.
 		spkiDER, err := x509.MarshalPKIXPublicKey(&priv.PublicKey)
 		if err != nil {
 			return nil, fmt.Errorf("ra-tls SPKI: %w", err)
@@ -326,16 +328,27 @@ func (m *RATLSManager) acquireAttestationExts(ctx context.Context, priv *ecdsa.P
 		if err != nil {
 			return nil, err
 		}
-		if secureBootAttestationEnabled() {
-			if tag == snpAttestTagAWS {
-				tag = snpAttestTagSecureBootAWS
-			} else {
-				tag = snpAttestTagSecureBootGCP
-			}
-		}
-		// Tag the payload so the verifier dispatches to the right per-cloud path.
-		return []pkix.Extension{{Id: AttestationOIDSEVSNP, Critical: false, Value: append([]byte{tag}, att...)}}, nil
+		return snpRATLSExtensions(tag, att, secureBootAttestationEnabled()), nil
 	}
 
 	return nil, nil
+}
+
+func snpRATLSExtensions(legacyTag byte, att []byte, secureBoot bool) []pkix.Extension {
+	// Keep the legacy extension byte-for-byte compatible with old clients.
+	legacy := pkix.Extension{
+		Id:       AttestationOIDSEVSNP,
+		Critical: false,
+		Value:    append([]byte{legacyTag}, att...),
+	}
+	if !secureBoot {
+		return []pkix.Extension{legacy}
+	}
+
+	secure := pkix.Extension{
+		Id:       AttestationOIDSecureBoot,
+		Critical: false,
+		Value:    []byte{secureBootRATLSExtensionVersion},
+	}
+	return []pkix.Extension{legacy, secure}
 }

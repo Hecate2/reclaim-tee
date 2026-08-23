@@ -210,7 +210,7 @@ func TestSignedMessageAttestationEnvelopeRejectsAmbiguousAndMalformedIdentity(t 
 		{"empty report", &teeproto.SignedMessage{AttestationReport: &teeproto.AttestationReport{Type: "gcp"}}, "attestation is empty"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := c.signedMessageAddress("tee_k", tc.signed); err == nil || !strings.Contains(err.Error(), tc.want) {
+			if _, err := c.signedMessageAddress("tee_k", tc.signed, ""); err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("identity result = %v, want %q", err, tc.want)
 			}
 		})

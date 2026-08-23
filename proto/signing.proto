@@ -25,6 +25,10 @@ message KOutputPayload {
 
   // MPC OPRF outputs
   repeated OPRFOutput oprf_outputs = 10;
+
+  // Attestation generation asserted by the TEE and covered by this signature.
+  // Old clients ignore this field but preserve the original body bytes.
+  string attestation_type = 11;
 }
 
 message TOutputPayload {
@@ -40,6 +44,10 @@ message TOutputPayload {
 
   // MPC OPRF outputs
   repeated OPRFOutput oprf_outputs = 10;
+
+  // Attestation generation asserted by the TEE and covered by this signature.
+  // Old clients ignore this field but preserve the original body bytes.
+  string attestation_type = 11;
 }
 
 // Attestation report with structured data
@@ -82,5 +90,4 @@ message SignedMessage {
   bytes server_app_key = 7;
   uint32 cipher_suite = 8;
 }
-
 

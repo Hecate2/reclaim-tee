@@ -40,7 +40,7 @@ type RATLSVerifyOptions struct {
 //
 // Standalone certs (no attestation extension) are rejected. Local-dev
 // flows must avoid this verifier.
-func validateRATLSCertStructure(rawCerts [][]byte, peerRole string, logger *Logger, requireLocalSNPGeneration bool) (app, base string, err error) {
+func validateRATLSCertStructure(rawCerts [][]byte, peerRole string, logger *Logger) (app, base string, err error) {
 	if len(rawCerts) == 0 {
 		return "", "", errors.New("ratls: no peer certificate")
 	}
@@ -55,12 +55,11 @@ func validateRATLSCertStructure(rawCerts [][]byte, peerRole string, logger *Logg
 	}
 	actualHash := spkiSha256(spkiDER)
 
-	if snp := findExtension(leaf, AttestationOIDSEVSNP); snp != nil {
-		if requireLocalSNPGeneration {
-			if err := validatePeerSNPAttestationType(snp); err != nil {
-				return "", "", err
-			}
-		}
+	_, snp, err := snpAttestationFromCert(leaf)
+	if err != nil {
+		return "", "", err
+	}
+	if snp != nil {
 		return validateSEVSNP(snp, spkiDER)
 	}
 	if jwt := findExtension(leaf, AttestationOID); jwt != nil {
@@ -68,6 +67,34 @@ func validateRATLSCertStructure(rawCerts [][]byte, peerRole string, logger *Logg
 		return app, "", err // CS has no separate base
 	}
 	return "", "", errors.New("ratls: attestation extension not present on certificate")
+}
+
+// snpAttestationFromCert returns the effective SNP generation and evidence.
+// Secure Boot certificates keep their evidence under the legacy .2 OID and add
+// a small .3 marker. Native-tag .2 certificates from the initial deployment
+// remain accepted during migration.
+func snpAttestationFromCert(cert *x509.Certificate) (string, []byte, error) {
+	legacy := findExtension(cert, AttestationOIDSEVSNP)
+	if marker := findExtension(cert, AttestationOIDSecureBoot); marker != nil {
+		if len(marker) != 1 || marker[0] != secureBootRATLSExtensionVersion {
+			return "", nil, errors.New("ratls: unsupported Secure Boot extension version")
+		}
+		if legacy == nil {
+			return "", nil, errors.New("ratls: Secure Boot marker has no SNP evidence")
+		}
+		secure, err := SecureBootAttestationFromCompatibleWire(legacy)
+		if err != nil {
+			return "", nil, fmt.Errorf("ratls: Secure Boot evidence: %w", err)
+		}
+		return AttestationTypeSecureBoot, secure, nil
+	}
+	if legacy == nil {
+		return "", nil, nil
+	}
+	if IsSecureBootAttestation(legacy) {
+		return AttestationTypeSecureBoot, legacy, nil
+	}
+	return AttestationTypeSEVSNP, legacy, nil
 }
 
 // validateGCPCS verifies a Confidential Space attestation JWT, binds the SPKI
@@ -118,18 +145,6 @@ func validateSEVSNP(attestation, spkiDER []byte) (string, string, error) {
 	return app, base, nil
 }
 
-// New R-signed loaders must not form a pair with a legacy SEV2 half. Old
-// loaders leave SNP_ATTESTATION_TYPE unset and continue to require SEV2. This
-// makes the TEE-to-TEE trust boundary match the router's same-generation rule.
-func validatePeerSNPAttestationType(attestation []byte) error {
-	wantSecureBoot := CurrentSNPAttestationType() == AttestationTypeSecureBoot
-	gotSecureBoot := IsSecureBootAttestation(attestation)
-	if wantSecureBoot != gotSecureBoot {
-		return fmt.Errorf("ratls: peer attestation generation does not match local %s mode", CurrentSNPAttestationType())
-	}
-	return nil
-}
-
 // findExtension returns the value of the first cert extension matching oid, or
 // nil if absent.
 func findExtension(cert *x509.Certificate, oid asn1.ObjectIdentifier) []byte {
@@ -146,7 +161,7 @@ func findExtension(cert *x509.Certificate, oid asn1.ObjectIdentifier) []byte {
 // to opts.ExpectedImageDigest. Any failure aborts the TLS handshake.
 func VerifyRATLSPeer(opts RATLSVerifyOptions) func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
 	return func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
-		gotDigest, gotBase, err := validateRATLSCertStructure(rawCerts, opts.PeerRole, opts.Logger, true)
+		gotDigest, gotBase, err := validateRATLSCertStructure(rawCerts, opts.PeerRole, opts.Logger)
 		if err != nil {
 			return err
 		}
@@ -186,7 +201,7 @@ func baseAccepted(expected, gotBase string) bool {
 // binding). What's INSIDE the attestation is decided downstream.
 func VerifyRATLSAttestation(peerRole string, logger *Logger) func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
 	return func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
-		_, _, err := validateRATLSCertStructure(rawCerts, peerRole, logger, false)
+		_, _, err := validateRATLSCertStructure(rawCerts, peerRole, logger)
 		return err
 	}
 }

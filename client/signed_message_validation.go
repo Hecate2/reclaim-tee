@@ -19,7 +19,7 @@ func (c *Client) validateTEEKSignedMessage(envelopeSession string, signed *teepr
 	if err := c.validateSignedSession(envelopeSession, body.GetSessionId()); err != nil {
 		return nil, err
 	}
-	if err := c.validateSignedMessageSignature("tee_k", signed); err != nil {
+	if err := c.validateSignedMessageSignature("tee_k", signed, body.GetAttestationType()); err != nil {
 		return nil, err
 	}
 	return &body, nil
@@ -53,7 +53,7 @@ func (c *Client) validateTEETSignedMessage(envelopeSession string, signed *teepr
 	if err := c.validateSignedSession(envelopeSession, body.GetSessionId()); err != nil {
 		return nil, err
 	}
-	if err := c.validateSignedMessageSignature("tee_t", signed); err != nil {
+	if err := c.validateSignedMessageSignature("tee_t", signed, body.GetAttestationType()); err != nil {
 		return nil, err
 	}
 	return &body, nil
@@ -93,8 +93,8 @@ func (c *Client) validateSignedMessageEnvelope(role string, expectedType teeprot
 	return nil
 }
 
-func (c *Client) validateSignedMessageSignature(role string, signed *teeproto.SignedMessage) error {
-	address, err := c.signedMessageAddress(role, signed)
+func (c *Client) validateSignedMessageSignature(role string, signed *teeproto.SignedMessage, signedAttestationType string) error {
+	address, err := c.signedMessageAddress(role, signed, signedAttestationType)
 	if err != nil {
 		return err
 	}
@@ -120,11 +120,14 @@ func (c *Client) validateSignedSession(envelopeSession, bodySession string) erro
 	return nil
 }
 
-func (c *Client) signedMessageAddress(role string, signed *teeproto.SignedMessage) (shared.Address, error) {
+func (c *Client) signedMessageAddress(role string, signed *teeproto.SignedMessage, signedAttestationType string) (shared.Address, error) {
 	report := signed.GetAttestationReport()
 	if report == nil {
 		if c.resolveClientMode() != ModeStandalone {
 			return shared.Address{}, fmt.Errorf("%s signed message requires verified attestation outside standalone mode", role)
+		}
+		if signedAttestationType != "" && signedAttestationType != "standalone" {
+			return shared.Address{}, fmt.Errorf("%s signed body claims attestation type %q without a report", role, signedAttestationType)
 		}
 		return standaloneSignedMessageAddress(role, signed.GetEthAddress())
 	}
@@ -134,9 +137,17 @@ func (c *Client) signedMessageAddress(role string, signed *teeproto.SignedMessag
 	if len(report.GetReport()) == 0 {
 		return shared.Address{}, fmt.Errorf("%s signed message attestation is empty", role)
 	}
+	if signedAttestationType == "" {
+		// Bundles created before the signed generation marker use the report's
+		// outer type. This fallback can be removed after that migration closes.
+		signedAttestationType = report.GetType()
+	}
 
-	switch report.GetType() {
+	switch signedAttestationType {
 	case "gcp":
+		if report.GetType() != "gcp" {
+			return shared.Address{}, fmt.Errorf("%s signed body claims GCP but report type is %q", role, report.GetType())
+		}
 		if err := c.validateGCPAttestation(report.GetReport()); err != nil {
 			return shared.Address{}, fmt.Errorf("validate %s GCP attestation: %w", role, err)
 		}
@@ -147,6 +158,9 @@ func (c *Client) signedMessageAddress(role string, signed *teeproto.SignedMessag
 			return shared.FindNonceValue(report.GetReport(), prefix)
 		})
 	case "sev-snp":
+		if report.GetType() != "sev-snp" {
+			return shared.Address{}, fmt.Errorf("%s signed body claims SEV-SNP but report type is %q", role, report.GetType())
+		}
 		nonces, err := c.validateSEVAttestation(report.GetReport())
 		if err != nil {
 			return shared.Address{}, fmt.Errorf("validate %s SEV-SNP attestation: %w", role, err)
@@ -155,6 +169,9 @@ func (c *Client) signedMessageAddress(role string, signed *teeproto.SignedMessag
 			return shared.FindNonceInList(nonces, prefix)
 		})
 	case "secure-boot":
+		if report.GetType() != "sev-snp" && report.GetType() != "secure-boot" {
+			return shared.Address{}, fmt.Errorf("%s signed body claims Secure Boot but report type is %q", role, report.GetType())
+		}
 		nonces, err := c.validateSecureBootAttestation(report.GetReport())
 		if err != nil {
 			return shared.Address{}, fmt.Errorf("validate %s Secure Boot attestation: %w", role, err)
@@ -163,7 +180,7 @@ func (c *Client) signedMessageAddress(role string, signed *teeproto.SignedMessag
 			return shared.FindNonceInList(nonces, prefix)
 		})
 	default:
-		return shared.Address{}, fmt.Errorf("unsupported %s attestation type %q", role, report.GetType())
+		return shared.Address{}, fmt.Errorf("unsupported %s signed attestation type %q", role, signedAttestationType)
 	}
 
 }
@@ -191,7 +208,7 @@ func (c *Client) validateSecureBootAttestation(raw []byte) ([]string, error) {
 	if c.verifySEVAttestation != nil {
 		return c.verifySEVAttestation(raw)
 	}
-	nonces, _, _, err := shared.VerifyCombinedSecureBootNonceAttestation(raw)
+	nonces, _, _, err := shared.VerifyCompatibleSecureBootNonceAttestation(raw)
 	return nonces, err
 }
 

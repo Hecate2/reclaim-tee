@@ -243,27 +243,31 @@ func ExtractIdentityFromRATLS(snap RATLSSnapshot, logger *Logger) (imageDigest, 
 		return "", "", nil, errors.New("RA-TLS manager has no current cert")
 	}
 	leaf := cert.Leaf
-	// SEV-SNP (OID .2) takes precedence when present. The report is binary, so
-	// it travels base64-encoded in the JSON register body; the router decodes it.
-	if report := findExtension(leaf, AttestationOIDSEVSNP); report != nil {
+	// SNP evidence takes precedence when present. The report is binary, so it
+	// travels base64-encoded in the JSON register body; the router decodes it.
+	// A Secure Boot .3 marker upgrades the legacy-compatible .2 evidence before
+	// registration, so the router records the correct internal generation.
+	snpType, report, rerr := snpAttestationFromCert(leaf)
+	if rerr != nil {
+		return "", "", nil, rerr
+	}
+	if report != nil {
 		spki, serr := snap.PublicKeyDER()
 		if serr != nil {
 			return "", "", nil, fmt.Errorf("marshal SPKI: %w", serr)
 		}
-		attestationType := AttestationTypeSEVSNP
 		var app string
 		var verr error
-		if IsSecureBootAttestation(report) {
-			attestationType = AttestationTypeSecureBoot
+		if snpType == AttestationTypeSecureBoot {
 			app, _, verr = VerifyCombinedSecureBootAttestation(report, spki)
 		} else {
 			app, _, verr = VerifyCombinedSEVSNPAttestation(report, spki)
 		}
 		if verr != nil {
-			return "", "", nil, fmt.Errorf("verify %s attestation: %w", attestationType, verr)
+			return "", "", nil, fmt.Errorf("verify %s attestation: %w", snpType, verr)
 		}
 		enc := base64.StdEncoding.EncodeToString(report)
-		return app, attestationType, []byte(enc), nil
+		return app, snpType, []byte(enc), nil
 	}
 	attestation, err = ExtractAttestationFromCert(leaf)
 	if err != nil {

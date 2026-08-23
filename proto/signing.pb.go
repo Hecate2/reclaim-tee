@@ -86,9 +86,12 @@ type KOutputPayload struct {
 	ResponseRedactionRanges       []*ResponseRedactionRange `protobuf:"bytes,5,rep,name=response_redaction_ranges,json=responseRedactionRanges,proto3" json:"response_redaction_ranges,omitempty"`
 	TimestampMs                   uint64                    `protobuf:"varint,6,opt,name=timestamp_ms,json=timestampMs,proto3" json:"timestamp_ms,omitempty"` // Unix timestamp in milliseconds when payload was created (SIGNED)
 	// MPC OPRF outputs
-	OprfOutputs   []*OPRFOutput `protobuf:"bytes,10,rep,name=oprf_outputs,json=oprfOutputs,proto3" json:"oprf_outputs,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	OprfOutputs []*OPRFOutput `protobuf:"bytes,10,rep,name=oprf_outputs,json=oprfOutputs,proto3" json:"oprf_outputs,omitempty"`
+	// Attestation generation asserted by the TEE and covered by this signature.
+	// Old clients ignore this field but preserve the original body bytes.
+	AttestationType string `protobuf:"bytes,11,opt,name=attestation_type,json=attestationType,proto3" json:"attestation_type,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *KOutputPayload) Reset() {
@@ -177,6 +180,13 @@ func (x *KOutputPayload) GetOprfOutputs() []*OPRFOutput {
 	return nil
 }
 
+func (x *KOutputPayload) GetAttestationType() string {
+	if x != nil {
+		return x.AttestationType
+	}
+	return ""
+}
+
 type TOutputPayload struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Session binding - cryptographically links TEE_K and TEE_T outputs
@@ -187,9 +197,12 @@ type TOutputPayload struct {
 	RequestProofStreams [][]byte `protobuf:"bytes,2,rep,name=request_proof_streams,json=requestProofStreams,proto3" json:"request_proof_streams,omitempty"` // UNCHANGED: Individual R_SP streams for revealing sensitive_proof ranges
 	TimestampMs         uint64   `protobuf:"varint,3,opt,name=timestamp_ms,json=timestampMs,proto3" json:"timestamp_ms,omitempty"`                          // UNCHANGED
 	// MPC OPRF outputs
-	OprfOutputs   []*OPRFOutput `protobuf:"bytes,10,rep,name=oprf_outputs,json=oprfOutputs,proto3" json:"oprf_outputs,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	OprfOutputs []*OPRFOutput `protobuf:"bytes,10,rep,name=oprf_outputs,json=oprfOutputs,proto3" json:"oprf_outputs,omitempty"`
+	// Attestation generation asserted by the TEE and covered by this signature.
+	// Old clients ignore this field but preserve the original body bytes.
+	AttestationType string `protobuf:"bytes,11,opt,name=attestation_type,json=attestationType,proto3" json:"attestation_type,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *TOutputPayload) Reset() {
@@ -255,6 +268,13 @@ func (x *TOutputPayload) GetOprfOutputs() []*OPRFOutput {
 		return x.OprfOutputs
 	}
 	return nil
+}
+
+func (x *TOutputPayload) GetAttestationType() string {
+	if x != nil {
+		return x.AttestationType
+	}
+	return ""
 }
 
 // Attestation report with structured data
@@ -545,7 +565,7 @@ var File_signing_proto protoreflect.FileDescriptor
 
 const file_signing_proto_rawDesc = "" +
 	"\n" +
-	"\rsigning.proto\x12\bteeproto\x1a\fcommon.proto\"\xfd\x03\n" +
+	"\rsigning.proto\x12\bteeproto\x1a\fcommon.proto\"\xa8\x04\n" +
 	"\x0eKOutputPayload\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\a \x01(\tR\tsessionId\x12)\n" +
@@ -556,7 +576,8 @@ const file_signing_proto_rawDesc = "" +
 	"\x19response_redaction_ranges\x18\x05 \x03(\v2 .teeproto.ResponseRedactionRangeR\x17responseRedactionRanges\x12!\n" +
 	"\ftimestamp_ms\x18\x06 \x01(\x04R\vtimestampMs\x127\n" +
 	"\foprf_outputs\x18\n" +
-	" \x03(\v2\x14.teeproto.OPRFOutputR\voprfOutputs\"\x89\x02\n" +
+	" \x03(\v2\x14.teeproto.OPRFOutputR\voprfOutputs\x12)\n" +
+	"\x10attestation_type\x18\v \x01(\tR\x0fattestationType\"\xb4\x02\n" +
 	"\x0eTOutputPayload\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x04 \x01(\tR\tsessionId\x12H\n" +
@@ -564,7 +585,8 @@ const file_signing_proto_rawDesc = "" +
 	"\x15request_proof_streams\x18\x02 \x03(\fR\x13requestProofStreams\x12!\n" +
 	"\ftimestamp_ms\x18\x03 \x01(\x04R\vtimestampMs\x127\n" +
 	"\foprf_outputs\x18\n" +
-	" \x03(\v2\x14.teeproto.OPRFOutputR\voprfOutputs\"?\n" +
+	" \x03(\v2\x14.teeproto.OPRFOutputR\voprfOutputs\x12)\n" +
+	"\x10attestation_type\x18\v \x01(\tR\x0fattestationType\"?\n" +
 	"\x11AttestationReport\x12\x12\n" +
 	"\x04type\x18\x01 \x01(\tR\x04type\x12\x16\n" +
 	"\x06report\x18\x02 \x01(\fR\x06report\"r\n" +

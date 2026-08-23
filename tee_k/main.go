@@ -150,26 +150,15 @@ func dumpSEVSNPAttestation(logger *shared.Logger) {
 		logger.Critical("SNP-ATTEST-DUMP ratls init failed", zap.Error(err))
 		select {}
 	}
-	cert := ratls.Certificate()
-	if cert == nil || cert.Leaf == nil {
-		logger.Critical("SNP-ATTEST-DUMP no RA-TLS cert")
-		select {}
-	}
-	var ext []byte
-	for _, e := range cert.Leaf.Extensions {
-		if e.Id.Equal(shared.AttestationOIDSEVSNP) {
-			ext = e.Value
-		}
-	}
-	spki, _ := ratls.PublicKeyDER()
+	app, attestationType, attestation, verr := shared.ExtractIdentityFromRATLS(ratls.Snapshot(), logger)
 	logger.Info("SNP-ATTEST-DUMP",
-		zap.Int("ext_len", len(ext)),
+		zap.Int("ext_len", len(attestation)),
+		zap.String("attestation_type", attestationType),
 		zap.String("app_hash_env", os.Getenv("SNP_APP_HASH")))
-	app, base, verr := shared.VerifyCombinedSEVSNPAttestation(ext, spki)
 	if verr != nil {
 		logger.Critical("SNP-ATTEST-VERIFY FAILED", zap.Error(verr))
 	} else {
-		logger.Info("SNP-ATTEST-VERIFY OK", zap.String("app", app), zap.String("base", base))
+		logger.Info("SNP-ATTEST-VERIFY OK", zap.String("app", app), zap.String("attestation_type", attestationType))
 	}
 	select {}
 }

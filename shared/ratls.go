@@ -18,6 +18,14 @@ var AttestationOID = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 65998, 1}
 // verifying unchanged.
 var AttestationOIDSEVSNP = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 65998, 2}
 
+// AttestationOIDSecureBoot marks the legacy-compatible SNP envelope as Secure
+// Boot evidence. The large evidence stays only in .2. Updated verifiers use
+// this marker to retag that evidence and verify the release key R. Old clients
+// ignore this non-critical extension and verify the unchanged SEV2 prerequisite.
+var AttestationOIDSecureBoot = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 65998, 3}
+
+const secureBootRATLSExtensionVersion byte = 1
+
 // SPKINoncePrefix returns the eat_nonce prefix used to bind the TLS public
 // key hash into the attestation report. role is "tee_k" or "tee_t".
 func SPKINoncePrefix(role string) string {

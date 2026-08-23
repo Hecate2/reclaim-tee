@@ -66,7 +66,7 @@ func (s *Server) HandleAllocate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Default a missing/empty accepts to CS only: a client that doesn't announce
-	// provider-attestation support must never be allocated such a pair.
+	// SNP attestation support must never be allocated an SNP pair.
 	accepts := req.Accepts
 	if len(accepts) == 0 {
 		accepts = []string{shared.AttestationTypeCS}
