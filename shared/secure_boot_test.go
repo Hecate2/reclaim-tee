@@ -1,6 +1,9 @@
 package shared
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestSecureBootAuthorityPolicy(t *testing.T) {
 	valid := secureBootAuthorityPolicy{
@@ -27,6 +30,53 @@ func TestSecureBootAuthorityPolicy(t *testing.T) {
 			mutate(&policy)
 			if secureBootAuthorityPolicyOK(policy) {
 				t.Fatal("invalid policy accepted")
+			}
+		})
+	}
+}
+
+func TestVerifyTypedSNPNonceAttestationDispatch(t *testing.T) {
+	tests := []struct {
+		name            string
+		attestationType string
+		report          []byte
+		want            string
+	}{
+		{
+			name:            "unknown type",
+			attestationType: "future-type",
+			want:            "unsupported attestation type",
+		},
+		{
+			name:            "secure type requires secure evidence tag",
+			attestationType: AttestationTypeSecureBoot,
+			report:          []byte{snpAttestTagGCP},
+			want:            "does not carry Secure Boot evidence",
+		},
+		{
+			name:            "legacy type rejects secure evidence tag",
+			attestationType: AttestationTypeSEVSNP,
+			report:          []byte{snpAttestTagSecureBootGCP},
+			want:            "carries Secure Boot evidence",
+		},
+		{
+			name:            "secure type reaches secure verifier",
+			attestationType: AttestationTypeSecureBoot,
+			report:          []byte{snpAttestTagSecureBootGCP},
+			want:            "decode Secure Boot envelope",
+		},
+		{
+			name:            "legacy type reaches legacy verifier",
+			attestationType: AttestationTypeSEVSNP,
+			report:          []byte{snpAttestTagGCP},
+			want:            "decode SEV-SNP envelope",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, _, err := VerifyTypedSNPNonceAttestation(test.attestationType, test.report)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("verification error = %v, want %q", err, test.want)
 			}
 		})
 	}

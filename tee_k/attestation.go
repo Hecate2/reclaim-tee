@@ -242,12 +242,12 @@ func (t *TEEK) verifyTEETAttestation(msgBytes []byte, tlsCert []byte) error {
 	}
 	expectedSPKIHex := fmt.Sprintf("%x", expectedSPKI[:])
 
-	// SEV-SNP: the attestation binds a presentable nonce list; verify it against
-	// AMD+vTPM hardware, then confirm the tee_t SPKI nonce matches the mTLS peer.
-	if attestation.Type == "sev-snp" {
-		nonces, _, _, err := shared.VerifyCombinedSEVSNPNonceAttestation(attestation.Report)
+	// SNP: the attestation binds a presentable nonce list; verify the generation
+	// named by the protocol type, then bind the result to the mTLS peer SPKI.
+	if attestation.Type == shared.AttestationTypeSEVSNP || attestation.Type == shared.AttestationTypeSecureBoot {
+		nonces, _, err := shared.VerifyTypedSNPNonceAttestation(attestation.Type, attestation.Report)
 		if err != nil {
-			return fmt.Errorf("validate TEE_T SEV-SNP attestation: %w", err)
+			return fmt.Errorf("validate TEE_T %s attestation: %w", attestation.Type, err)
 		}
 		gotHex, err := shared.FindNonceInList(nonces, shared.SPKINoncePrefix("tee_t"))
 		if err != nil {
@@ -257,7 +257,7 @@ func (t *TEEK) verifyTEETAttestation(msgBytes []byte, tlsCert []byte) error {
 			t.logger.Error("SPKI hash mismatch", zap.String("expected", expectedSPKIHex), zap.String("got", gotHex))
 			return fmt.Errorf("TEE_T SPKI hash mismatch")
 		}
-		t.logger.Debug("TEE_T SEV-SNP attestation verified")
+		t.logger.Debug("TEE_T SNP attestation verified", zap.String("type", attestation.Type))
 		return nil
 	}
 

@@ -224,7 +224,9 @@ func (t *TEET) verifyTEEKAttestation(req *teeproto.TEEKAttestationRequest, peerC
 		}
 		return fmt.Errorf("mode mismatch: received standalone but in router mode")
 	}
-	if attestation.Type != "sev-snp" && attestation.Type != "gcp" {
+	if attestation.Type != shared.AttestationTypeSEVSNP &&
+		attestation.Type != shared.AttestationTypeSecureBoot &&
+		attestation.Type != "gcp" {
 		return fmt.Errorf("unsupported attestation type: %s", attestation.Type)
 	}
 
@@ -243,12 +245,12 @@ func (t *TEET) verifyTEEKAttestation(req *teeproto.TEEKAttestationRequest, peerC
 	}
 	expectedSPKIHex := fmt.Sprintf("%x", expectedSPKI[:])
 
-	// SEV-SNP: the attestation binds a presentable nonce list; verify it against
-	// AMD+vTPM hardware, then confirm the tee_k SPKI nonce matches the mTLS peer.
-	if attestation.Type == "sev-snp" {
-		nonces, _, _, err := shared.VerifyCombinedSEVSNPNonceAttestation(attestation.Report)
+	// SNP: the attestation binds a presentable nonce list; verify the generation
+	// named by the protocol type, then bind the result to the mTLS peer SPKI.
+	if attestation.Type == shared.AttestationTypeSEVSNP || attestation.Type == shared.AttestationTypeSecureBoot {
+		nonces, _, err := shared.VerifyTypedSNPNonceAttestation(attestation.Type, attestation.Report)
 		if err != nil {
-			return fmt.Errorf("validate TEE_K SEV-SNP attestation: %w", err)
+			return fmt.Errorf("validate TEE_K %s attestation: %w", attestation.Type, err)
 		}
 		gotHex, err := shared.FindNonceInList(nonces, shared.SPKINoncePrefix("tee_k"))
 		if err != nil {
@@ -257,7 +259,7 @@ func (t *TEET) verifyTEEKAttestation(req *teeproto.TEEKAttestationRequest, peerC
 		if gotHex != expectedSPKIHex {
 			return fmt.Errorf("TEE_K SPKI mismatch: attestation says %q, peer cert SPKI hashes to %q", gotHex, expectedSPKIHex)
 		}
-		t.logger.Debug("TEE_K SEV-SNP attestation verified")
+		t.logger.Debug("TEE_K SNP attestation verified", zap.String("type", attestation.Type))
 		return nil
 	}
 

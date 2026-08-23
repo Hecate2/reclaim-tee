@@ -89,6 +89,28 @@ func VerifyCombinedSecureBootNonceAttestation(att []byte) (nonces []string, app 
 	return peek.Nonces, app, result, nil
 }
 
+// VerifyTypedSNPNonceAttestation dispatches an app-layer claim proof by its
+// protocol type. Keep this dispatch shared by TEE_K and TEE_T so a new SNP
+// generation cannot be enabled for one peer-verification direction only.
+func VerifyTypedSNPNonceAttestation(attestationType string, att []byte) (nonces []string, app string, err error) {
+	switch attestationType {
+	case AttestationTypeSEVSNP:
+		if IsSecureBootAttestation(att) {
+			return nil, "", fmt.Errorf("attestation type %q carries Secure Boot evidence", attestationType)
+		}
+		nonces, app, _, err = VerifyCombinedSEVSNPNonceAttestation(att)
+		return nonces, app, err
+	case AttestationTypeSecureBoot:
+		if !IsSecureBootAttestation(att) {
+			return nil, "", fmt.Errorf("attestation type %q does not carry Secure Boot evidence", attestationType)
+		}
+		nonces, app, _, err = VerifyCombinedSecureBootNonceAttestation(att)
+		return nonces, app, err
+	default:
+		return nil, "", fmt.Errorf("unsupported attestation type: %s", attestationType)
+	}
+}
+
 // verifyCombinedSecureBoot preserves the current SEV2 verifier as the first
 // gate by translating only the new tag to its legacy cloud tag. It then obtains
 // the PCR values from the already-authenticated provider evidence and verifies
