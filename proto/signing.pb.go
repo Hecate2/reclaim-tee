@@ -372,6 +372,7 @@ type TLS12CBCTOutput struct {
 	ResponseRecordsSha256         []byte                    `protobuf:"bytes,3,opt,name=response_records_sha256,json=responseRecordsSha256,proto3" json:"response_records_sha256,omitempty"`
 	ResponseRedactionRanges       []*ResponseRedactionRange `protobuf:"bytes,4,rep,name=response_redaction_ranges,json=responseRedactionRanges,proto3" json:"response_redaction_ranges,omitempty"`
 	PlaintextRecordLengths        []uint32                  `protobuf:"varint,5,rep,packed,name=plaintext_record_lengths,json=plaintextRecordLengths,proto3" json:"plaintext_record_lengths,omitempty"`
+	CloseNotify                   bool                      `protobuf:"varint,6,opt,name=close_notify,json=closeNotify,proto3" json:"close_notify,omitempty"`
 	unknownFields                 protoimpl.UnknownFields
 	sizeCache                     protoimpl.SizeCache
 }
@@ -439,6 +440,13 @@ func (x *TLS12CBCTOutput) GetPlaintextRecordLengths() []uint32 {
 		return x.PlaintextRecordLengths
 	}
 	return nil
+}
+
+func (x *TLS12CBCTOutput) GetCloseNotify() bool {
+	if x != nil {
+		return x.CloseNotify
+	}
+	return false
 }
 
 // Attestation report with structured data
@@ -757,13 +765,14 @@ const file_signing_proto_rawDesc = "" +
 	"\abinding\x18\x01 \x01(\v2 .teeproto.TLS12CBCSessionBindingR\abinding\x12D\n" +
 	"\x1eauthenticated_redacted_request\x18\x02 \x01(\fR\x1cauthenticatedRedactedRequest\x124\n" +
 	"\x16request_records_sha256\x18\x03 \x01(\fR\x14requestRecordsSha256\x12Y\n" +
-	"\x18request_redaction_ranges\x18\x04 \x03(\v2\x1f.teeproto.RequestRedactionRangeR\x16requestRedactionRanges\"\xe5\x02\n" +
+	"\x18request_redaction_ranges\x18\x04 \x03(\v2\x1f.teeproto.RequestRedactionRangeR\x16requestRedactionRanges\"\x88\x03\n" +
 	"\x0fTLS12CBCTOutput\x12:\n" +
 	"\abinding\x18\x01 \x01(\v2 .teeproto.TLS12CBCSessionBindingR\abinding\x12F\n" +
 	"\x1fauthenticated_redacted_response\x18\x02 \x01(\fR\x1dauthenticatedRedactedResponse\x126\n" +
 	"\x17response_records_sha256\x18\x03 \x01(\fR\x15responseRecordsSha256\x12\\\n" +
 	"\x19response_redaction_ranges\x18\x04 \x03(\v2 .teeproto.ResponseRedactionRangeR\x17responseRedactionRanges\x128\n" +
-	"\x18plaintext_record_lengths\x18\x05 \x03(\rR\x16plaintextRecordLengths\"?\n" +
+	"\x18plaintext_record_lengths\x18\x05 \x03(\rR\x16plaintextRecordLengths\x12!\n" +
+	"\fclose_notify\x18\x06 \x01(\bR\vcloseNotify\"?\n" +
 	"\x11AttestationReport\x12\x12\n" +
 	"\x04type\x18\x01 \x01(\tR\x04type\x12\x16\n" +
 	"\x06report\x18\x02 \x01(\fR\x06report\"r\n" +

@@ -71,7 +71,8 @@ const (
 )
 
 type ProviderCtx struct {
-	Version AttestorVersion `json:"version"`
+	Version  AttestorVersion `json:"version"`
+	TLS12CBC bool            `json:"-"`
 }
 
 func shouldRevealCrlf(ctx *ProviderCtx) bool {

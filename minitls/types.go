@@ -50,6 +50,11 @@ type Config struct {
 	// If nil, a default safe list is used.
 	CipherSuites []uint16
 
+	// EnableTLS12CBC appends the TLS 1.2 CBC compatibility suites to the
+	// default list. It defaults to false so callers that predate CBC support
+	// retain the original AEAD-only negotiation surface.
+	EnableTLS12CBC bool
+
 	// ServerName is the hostname used to verify the server certificate.
 	// For clients only.
 	ServerName string
@@ -157,7 +162,7 @@ func (c *Config) cipherSuites() []uint16 {
 	// Note: TLS 1.2 and TLS 1.3 cipher suites are disjoint, so no deduplication needed
 	for _, ver := range versions {
 		suites = append(suites, defaultCipherSuites(ver)...)
-		if ver == VersionTLS12 {
+		if ver == VersionTLS12 && c.EnableTLS12CBC {
 			suites = append(suites, tls12CBCCipherSuites()...)
 		}
 	}

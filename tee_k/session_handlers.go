@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"net"
 	"strconv"
@@ -212,7 +213,7 @@ func (t *TEEK) handleRedactedRequest(sessionID string, msg *shared.Message) erro
 }
 
 // validateHTTPRequestFormat validates that the redacted request maintains proper HTTP format
-func (t *TEEK) validateHTTPRequestFormat(redactedRequest []byte, ranges []shared.RequestRedactionRange, connData *shared.RequestConnectionData) error {
+func (t *TEEK) validateTLS12CBCHTTPRequestFormat(redactedRequest []byte, ranges []shared.RequestRedactionRange, connData *shared.RequestConnectionData) error {
 	// Create a pretty version with asterisks for redacted ranges
 	prettyRequest := make([]byte, len(redactedRequest))
 	copy(prettyRequest, redactedRequest)
@@ -241,40 +242,35 @@ func (t *TEEK) validateHTTPRequestFormat(redactedRequest []byte, ranges []shared
 	// 		zap.String("type", r.Type))
 	// }
 
-	// Convert to string for easier parsing
-	reqStr := string(prettyRequest)
-
-	// Check basic HTTP request format
-	if !strings.HasPrefix(reqStr, "GET ") && !strings.HasPrefix(reqStr, "POST ") {
-		return fmt.Errorf("request does not start with valid HTTP method")
+	headerEnd := bytes.Index(redactedRequest, []byte("\r\n\r\n"))
+	if headerEnd < 0 {
+		return fmt.Errorf("request does not contain a complete HTTP header block")
+	}
+	headerBytes := redactedRequest[:headerEnd]
+	lines := strings.Split(string(headerBytes), "\r\n")
+	prettyLines := strings.Split(string(prettyRequest[:headerEnd]), "\r\n")
+	if len(lines) < 4 || len(prettyLines) != len(lines) {
+		return fmt.Errorf("request has insufficient or redacted structural lines")
 	}
 
-	// Check for HTTP version
-	if !strings.Contains(reqStr, " HTTP/1.1") {
-		return fmt.Errorf("request does not contain HTTP/1.1 version")
-	}
-
-	// Check for proper line endings
-	if !strings.Contains(reqStr, "\r\n") {
-		return fmt.Errorf("request does not contain proper CRLF line endings")
-	}
-
-	// Check that request has double CRLF
-	if !strings.Contains(reqStr, "\r\n\r\n") {
-		return fmt.Errorf("request does not end with proper double CRLF")
-	}
-
-	// Validate that critical parts aren't fully redacted
-	lines := strings.Split(reqStr, "\r\n")
-	if len(lines) < 2 {
-		return fmt.Errorf("request has insufficient lines")
-	}
-
-	// First line should contain method, path, and version
-	firstLine := lines[0]
-	parts := strings.Split(firstLine, " ")
-	if len(parts) < 3 {
+	requestParts := strings.Split(lines[0], " ")
+	if len(requestParts) != 3 {
 		return fmt.Errorf("invalid HTTP request line format")
+	}
+	method, requestTarget, version := requestParts[0], requestParts[1], requestParts[2]
+	switch method {
+	case "GET", "POST", "PUT", "PATCH":
+	default:
+		return fmt.Errorf("unsupported HTTP method %q", method)
+	}
+	if requestTarget == "" || requestTarget[0] != '/' || strings.ContainsAny(requestTarget, "\r\n\t #") {
+		return fmt.Errorf("invalid HTTP request target")
+	}
+	if version != "HTTP/1.1" {
+		return fmt.Errorf("request must use HTTP/1.1")
+	}
+	if !strings.HasPrefix(prettyLines[0], method+" ") || !strings.HasSuffix(prettyLines[0], " HTTP/1.1") {
+		return fmt.Errorf("request method or HTTP version must not be redacted")
 	}
 
 	// CRITICAL VALIDATION: Check Host header matches the connection authority.
@@ -284,35 +280,167 @@ func (t *TEEK) validateHTTPRequestFormat(redactedRequest []byte, ranges []shared
 			return err
 		}
 
-		hostHeader := extractHeader(lines, "Host")
-		if hostHeader == "" {
-			return fmt.Errorf("host header is missing")
+		hostLineMatches := lines[1] == "Host: "+expectedAuthority
+		prettyHostLineMatches := prettyLines[1] == "Host: "+expectedAuthority
+		// Preserve the pre-CBC client's unbracketed default-port IPv6 wire
+		// format while also accepting the standards-compliant bracketed form.
+		if connData.Port == defaultHTTPSPort && strings.Contains(connData.Hostname, ":") {
+			bracketedHostLine := "Host: [" + connData.Hostname + "]"
+			hostLineMatches = hostLineMatches || lines[1] == bracketedHostLine
+			prettyHostLineMatches = prettyHostLineMatches || prettyLines[1] == bracketedHostLine
 		}
-
-		// Check if Host header is redacted (contains asterisks)
-		if strings.Contains(hostHeader, "*") {
-			return fmt.Errorf("host header must not be redacted")
-		}
-
-		// Bind the HTTP authority to the TCP destination. The default HTTPS port
-		// is omitted; alternate ports must be explicit in the Host header.
-		if hostHeader != expectedAuthority {
-			return fmt.Errorf("host header '%s' does not match connection authority '%s'", hostHeader, expectedAuthority)
+		if !hostLineMatches || !prettyHostLineMatches {
+			return fmt.Errorf("host header does not match connection authority or is redacted")
 		}
 
 		t.logger.Debug("Host header validation passed")
 	}
 
 	// CRITICAL VALIDATION: Check Connection: close is present
+	if lines[2] != "Connection: close" || prettyLines[2] != "Connection: close" {
+		return fmt.Errorf("connection header must be the unredacted second header with value close")
+	}
+
+	contentLengthCount := 0
+	transferEncodingCount := 0
+	declaredBodyLength := -1
+	for i, line := range lines[1:] {
+		colon := strings.IndexByte(line, ':')
+		if colon <= 0 || !validHTTPHeaderName(line[:colon]) {
+			return fmt.Errorf("invalid HTTP header line %d", i+1)
+		}
+		name := strings.ToLower(line[:colon])
+		value := strings.TrimSpace(line[colon+1:])
+		if strings.ContainsAny(value, "\r\n\x00") {
+			return fmt.Errorf("invalid control byte in HTTP header %q", name)
+		}
+		switch name {
+		case "host":
+			if i != 0 {
+				return fmt.Errorf("duplicate Host header")
+			}
+		case "connection":
+			if i != 1 {
+				return fmt.Errorf("duplicate Connection header")
+			}
+		case "content-length":
+			contentLengthCount++
+			parsed, err := strconv.ParseUint(value, 10, 63)
+			if err != nil || strconv.FormatUint(parsed, 10) != value {
+				return fmt.Errorf("invalid Content-Length header")
+			}
+			declaredBodyLength = int(parsed)
+			if prettyLines[i+1] != line {
+				return fmt.Errorf("Content-Length header must not be redacted")
+			}
+		case "transfer-encoding":
+			transferEncodingCount++
+		}
+	}
+	if contentLengthCount != 1 {
+		return fmt.Errorf("request must contain exactly one Content-Length header")
+	}
+	if transferEncodingCount != 0 {
+		return fmt.Errorf("request must not contain Transfer-Encoding")
+	}
+	bodyLength := len(redactedRequest) - (headerEnd + 4)
+	if bodyLength != declaredBodyLength {
+		return fmt.Errorf("request body length %d does not match Content-Length %d", bodyLength, declaredBodyLength)
+	}
+
+	t.logger.Debug("Request format validation passed")
+	return nil
+}
+
+func validHTTPHeaderName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for i := range len(name) {
+		c := name[i]
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') {
+			continue
+		}
+		switch c {
+		case '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~':
+			continue
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// validateHTTPRequestFormat preserves the legacy split-AEAD request checks.
+// CBC uses validateTLS12CBCHTTPRequestFormat because its signed request must
+// fit one record and have unambiguous framing at the trusted boundary.
+func (t *TEEK) validateHTTPRequestFormat(redactedRequest []byte, ranges []shared.RequestRedactionRange, connData *shared.RequestConnectionData) error {
+	prettyRequest := make([]byte, len(redactedRequest))
+	copy(prettyRequest, redactedRequest)
+	for _, r := range ranges {
+		end := r.Start + r.Length
+		if r.Start >= 0 && end <= len(prettyRequest) {
+			for i := r.Start; i < end; i++ {
+				prettyRequest[i] = '*'
+			}
+		}
+	}
+
+	reqStr := string(prettyRequest)
+	if !strings.HasPrefix(reqStr, "GET ") && !strings.HasPrefix(reqStr, "POST ") {
+		return fmt.Errorf("request does not start with valid HTTP method")
+	}
+	if !strings.Contains(reqStr, " HTTP/1.1") {
+		return fmt.Errorf("request does not contain HTTP/1.1 version")
+	}
+	if !strings.Contains(reqStr, "\r\n") {
+		return fmt.Errorf("request does not contain proper CRLF line endings")
+	}
+	if !strings.Contains(reqStr, "\r\n\r\n") {
+		return fmt.Errorf("request does not end with proper double CRLF")
+	}
+
+	lines := strings.Split(reqStr, "\r\n")
+	if len(lines) < 2 {
+		return fmt.Errorf("request has insufficient lines")
+	}
+	parts := strings.Split(lines[0], " ")
+	if len(parts) < 3 {
+		return fmt.Errorf("invalid HTTP request line format")
+	}
+
+	if connData != nil {
+		expectedAuthority, err := expectedHTTPRequestAuthority(connData)
+		if err != nil {
+			return err
+		}
+		hostHeader := extractHeader(lines, "Host")
+		if hostHeader == "" {
+			return fmt.Errorf("host header is missing")
+		}
+		if strings.Contains(hostHeader, "*") {
+			return fmt.Errorf("host header must not be redacted")
+		}
+		hostMatches := hostHeader == expectedAuthority
+		// New clients serialize a standards-compliant bracketed default-port
+		// IPv6 authority. Pre-CBC clients sent the unbracketed legacy form.
+		// Accept both only on the legacy split-AEAD path.
+		if !hostMatches && connData.Port == defaultHTTPSPort && strings.Contains(connData.Hostname, ":") {
+			hostMatches = hostHeader == "["+connData.Hostname+"]"
+		}
+		if !hostMatches {
+			return fmt.Errorf("host header '%s' does not match connection authority '%s'", hostHeader, expectedAuthority)
+		}
+		t.logger.Debug("Host header validation passed")
+	}
+
 	connectionHeader := extractHeader(lines, "Connection")
 	if connectionHeader == "" {
 		return fmt.Errorf("connection header is missing")
 	}
-
 	if strings.Contains(connectionHeader, "*") {
 		return fmt.Errorf("connection header must not be redacted")
 	}
-
 	if !strings.EqualFold(strings.TrimSpace(connectionHeader), "close") {
 		return fmt.Errorf("connection header must be 'close', got '%s'", connectionHeader)
 	}

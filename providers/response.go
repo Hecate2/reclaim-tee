@@ -123,31 +123,42 @@ func processRedactionRequest(
 	return nil, fmt.Errorf("Expected either xPath, jsonPath or regex for redaction")
 }
 
-// convertResponsePosToAbsolutePos converts a position within the response body to absolute position in the full response,
-// accounting for chunked transfer encoding. This implementation exactly matches TypeScript behavior.
-func convertResponsePosToAbsolutePos(pos int, bodyStartIdx int, chunks []shared.ResponseRedactionRange) int {
+// convertResponseStartPosToAbsolute maps an inclusive decoded-body start. At
+// an exact chunk boundary the byte belongs to the next chunk.
+func convertResponseStartPosToAbsolute(pos int, bodyStartIdx int, chunks []shared.ResponseRedactionRange) int {
 	if len(chunks) > 0 {
-
 		chunkBodyStart := 0
-		for _, ch := range chunks {
+		for i, ch := range chunks {
 			chunkSize := ch.Length
-
-			// Handle boundary positions exactly like TypeScript
 			if pos >= chunkBodyStart && pos < (chunkBodyStart+chunkSize) {
-				logger.Debug("Position maps to chunk", zap.String("component", "Response"), zap.String("operation", "convertResponsePosToAbsolutePos"), zap.String("level", "verbose"), zap.Int("position", pos), zap.Int("chunk_body_start", chunkBodyStart), zap.Int("absolute_pos", pos-chunkBodyStart+ch.Start))
 				return pos - chunkBodyStart + ch.Start
 			}
-			// Handle positions exactly at chunk boundary (go to next chunk)
 			if pos == (chunkBodyStart + chunkSize) {
-				logger.Debug("Position at chunk boundary", zap.String("component", "Response"), zap.String("operation", "convertResponsePosToAbsolutePos"), zap.String("level", "verbose"), zap.Int("position", pos), zap.Int("chunk_end", ch.Start+ch.Length))
+				if i+1 < len(chunks) {
+					return chunks[i+1].Start
+				}
 				return ch.Start + ch.Length
 			}
-
 			chunkBodyStart += chunkSize
 		}
+		return -1
+	}
+	return bodyStartIdx + pos
+}
 
-		logger.Error("Position out of range for chunks", zap.String("component", "Response"), zap.String("operation", "convertResponsePosToAbsolutePos"), zap.Int("position", pos), zap.Int("chunk_count", len(chunks)))
-		return -1 // Match TypeScript error handling pattern
+// convertResponseEndPosToAbsolute maps an exclusive decoded-body end. At an
+// exact chunk boundary it belongs immediately after the previous chunk.
+func convertResponseEndPosToAbsolute(pos int, bodyStartIdx int, chunks []shared.ResponseRedactionRange) int {
+	if len(chunks) > 0 {
+		chunkBodyStart := 0
+		for _, ch := range chunks {
+			chunkBodyEnd := chunkBodyStart + ch.Length
+			if pos >= chunkBodyStart && pos <= chunkBodyEnd {
+				return ch.Start + (pos - chunkBodyStart)
+			}
+			chunkBodyStart = chunkBodyEnd
+		}
+		return -1
 	}
 	return bodyStartIdx + pos
 }
@@ -171,10 +182,14 @@ func getRedactionsForChunkHeaders(from, to int, chunks []shared.ResponseRedactio
 // parseHTTPResponseBytes parses an HTTP/1.1 response and returns structural metadata and chunk ranges.
 // This function now uses the new streaming parser internally but provides the same interface.
 func parseHTTPResponseBytes(data []byte) (*HTTPParsedResponse, error) {
+	return parseHTTPResponseBytesWithFraming(data, false)
+}
+
+func parseHTTPResponseBytesWithFraming(data []byte, strictFraming bool) (*HTTPParsedResponse, error) {
 	logger.Info("Starting parseHTTPResponseBytes", zap.String("component", "Response"), zap.String("operation", "parseHTTPResponseBytes"), zap.Int("data_size", len(data)))
 
 	// Use the new streaming parser for complete HTTP/1.1 compliance
-	parser := NewHTTPResponseParser()
+	parser := newHTTPResponseParser(strictFraming)
 
 	// Process all data at once
 	if err := parser.OnChunk(data); err != nil {
@@ -317,8 +332,8 @@ func applyRegexWindow(
 }
 
 func getReveal(startIdx, length, bodyStartIdx int, resChunks []shared.ResponseRedactionRange, hash string) shared.ResponseRedactionRange {
-	from := convertResponsePosToAbsolutePos(startIdx, bodyStartIdx, resChunks)
-	to := convertResponsePosToAbsolutePos(startIdx+length, bodyStartIdx, resChunks)
+	from := convertResponseStartPosToAbsolute(startIdx, bodyStartIdx, resChunks)
+	to := convertResponseEndPosToAbsolute(startIdx+length, bodyStartIdx, resChunks)
 
 	return shared.ResponseRedactionRange{
 		Start:  from,

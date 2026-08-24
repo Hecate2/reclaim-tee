@@ -90,6 +90,7 @@ func (c *Client) handleAuthenticatedTLS12CBCResponse(sessionID string, response 
 	c.responseContentMutex.Unlock()
 	c.cbcMutex.Lock()
 	c.cbcResponsePlaintextLengths = plaintextLengths
+	c.cbcResponseCloseNotify = closeNotify
 	c.cbcMutex.Unlock()
 
 	if err := c.reconstructHTTPResponseFromDecryptedData(); err != nil {

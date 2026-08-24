@@ -204,7 +204,7 @@ func GetResponseRedactions(response []byte, rawParams *HTTPProviderParams, ctx *
 		zap.String("requestId", requestId))
 
 	logger.Info("Step 1/4: Parsing HTTP response", zap.String("component", "HTTP"), zap.String("operation", "GetResponseRedactions"), zap.Int("step", 1), zap.Int("total", 4))
-	res, err := parseHTTPResponseBytes(response)
+	res, err := parseHTTPResponseBytesWithFraming(response, ctx.TLS12CBC)
 	if err != nil {
 		logger.Error("Failed to parse response", zap.String("component", "HTTP"), zap.String("operation", "GetResponseRedactions"), zap.Error(err))
 		return nil, err
@@ -241,6 +241,12 @@ func GetResponseRedactions(response []byte, rawParams *HTTPProviderParams, ctx *
 	revealFraming := shouldRevealChunkFraming(ctx)
 
 	reveals := []shared.ResponseRedactionRange{{Start: 0, Length: headerEndIndex}}
+	if ctx.TLS12CBC {
+		// CBC's offline verifier must be able to distinguish framing headers
+		// from hidden application headers. Reveal syntax, not header values.
+		reveals = append(reveals, shared.ResponseRedactionRange{Start: headerEndIndex, Length: 2})
+		reveals = append(reveals, res.HeaderFraming...)
+	}
 
 	// CRLF boundary: only verify and reveal when client supports it
 	if shouldRevealCrlf(ctx) {
@@ -270,6 +276,11 @@ func GetResponseRedactions(response []byte, rawParams *HTTPProviderParams, ctx *
 		if rng, ok := res.HeaderLowerToRanges["transfer-encoding"]; ok && rng.Length > 0 {
 			reveals = append(reveals, rng)
 		}
+		if ctx.TLS12CBC {
+			if rng, ok := res.HeaderLowerToRanges["content-length"]; ok && rng.Length > 0 {
+				reveals = append(reveals, rng)
+			}
+		}
 	}
 
 	logger.Info("Step 4/4: Processing redaction requests", zap.String("component", "HTTP"), zap.String("operation", "GetResponseRedactions"), zap.Int("step", 4), zap.Int("total", 4))
@@ -296,7 +307,11 @@ func GetResponseRedactions(response []byte, rawParams *HTTPProviderParams, ctx *
 
 	// reveal all chunk framing (size lines + terminator) so the verifier can
 	// dechunk; chunk data stays redacted unless a redaction reveals it
-	if revealFraming && len(res.Chunks) > 0 {
+	if revealFraming && ctx.TLS12CBC && res.Chunked {
+		reveals = append(reveals, res.ChunkFraming...)
+		unsafeMetadata := chunkMetadataRedactions(bodyStartIdx, len(response), res.Chunks, res.ChunkFraming)
+		reveals = subtractRevealRanges(reveals, unsafeMetadata)
+	} else if revealFraming && len(res.Chunks) > 0 {
 		prev := res.HeaderEndIdx + 4
 		for _, chunk := range res.Chunks {
 			if chunk.Start > prev {
@@ -374,6 +389,72 @@ func GetResponseRedactions(response []byte, rawParams *HTTPProviderParams, ctx *
 	}()))
 
 	return redactions, nil
+}
+
+func chunkMetadataRedactions(bodyStart, responseEnd int, chunks, framing []shared.ResponseRedactionRange) []shared.ResponseRedactionRange {
+	allowed := make([]shared.ResponseRedactionRange, 0, len(chunks)+len(framing))
+	allowed = append(allowed, chunks...)
+	allowed = append(allowed, framing...)
+	sort.Slice(allowed, func(i, j int) bool { return allowed[i].Start < allowed[j].Start })
+
+	redactions := make([]shared.ResponseRedactionRange, 0)
+	cursor := bodyStart
+	for _, item := range allowed {
+		start := max(item.Start, bodyStart)
+		end := min(item.Start+item.Length, responseEnd)
+		if end <= cursor || start >= responseEnd {
+			continue
+		}
+		if start > cursor {
+			redactions = append(redactions, shared.ResponseRedactionRange{Start: cursor, Length: start - cursor})
+		}
+		if end > cursor {
+			cursor = end
+		}
+	}
+	if cursor < responseEnd {
+		redactions = append(redactions, shared.ResponseRedactionRange{Start: cursor, Length: responseEnd - cursor})
+	}
+	return redactions
+}
+
+func subtractRevealRanges(reveals, exclusions []shared.ResponseRedactionRange) []shared.ResponseRedactionRange {
+	if len(exclusions) == 0 {
+		return reveals
+	}
+	sort.Slice(exclusions, func(i, j int) bool { return exclusions[i].Start < exclusions[j].Start })
+	result := make([]shared.ResponseRedactionRange, 0, len(reveals))
+	for _, reveal := range reveals {
+		cursor := reveal.Start
+		end := reveal.Start + reveal.Length
+		for _, exclusion := range exclusions {
+			exclusionStart := exclusion.Start
+			exclusionEnd := exclusion.Start + exclusion.Length
+			if exclusionEnd <= cursor {
+				continue
+			}
+			if exclusionStart >= end {
+				break
+			}
+			if exclusionStart > cursor {
+				result = append(result, shared.ResponseRedactionRange{
+					Start: cursor, Length: exclusionStart - cursor, Hash: reveal.Hash,
+				})
+			}
+			if exclusionEnd > cursor {
+				cursor = exclusionEnd
+			}
+			if cursor >= end {
+				break
+			}
+		}
+		if cursor < end {
+			result = append(result, shared.ResponseRedactionRange{
+				Start: cursor, Length: end - cursor, Hash: reveal.Hash,
+			})
+		}
+	}
+	return result
 }
 
 func responseBodyCharset(contentType string) string {

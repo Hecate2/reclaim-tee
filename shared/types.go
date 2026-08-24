@@ -458,6 +458,7 @@ type RequestConnectionData struct {
 	ALPN             []string `json:"alpn"`
 	ForceTLSVersion  string   `json:"force_tls_version,omitempty"`  // Force specific TLS version: "1.2", "1.3", or "" for auto
 	ForceCipherSuite string   `json:"force_cipher_suite,omitempty"` // Force specific cipher suite: hex ID (e.g. "0xc02f") or name, or "" for auto
+	SupportsTLS12CBC bool     `json:"supports_tls12_cbc,omitempty"` // Absent/false preserves the pre-CBC negotiation surface.
 }
 
 // TEE_K to Client: Connection is ready

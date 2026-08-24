@@ -533,6 +533,7 @@ func (c *Client) sendPendingConnectionRequest() error {
 				Alpn:             reqData.ALPN,
 				ForceTlsVersion:  reqData.ForceTLSVersion,
 				ForceCipherSuite: reqData.ForceCipherSuite,
+				SupportsTls12Cbc: reqData.SupportsTLS12CBC,
 			},
 		},
 	}

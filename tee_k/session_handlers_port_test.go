@@ -78,3 +78,27 @@ func TestValidateHTTPRequestFormatRejectsHostWithoutNonDefaultPort(t *testing.T)
 		t.Fatalf("validateHTTPRequestFormat() error = %q, want authority mismatch", err)
 	}
 }
+
+func TestValidateHTTPRequestFormatAcceptsDefaultHTTPSPortIPv6(t *testing.T) {
+	t.Parallel()
+
+	teek := &TEEK{logger: shared.NewNopLogger()}
+	connData := &shared.RequestConnectionData{Hostname: "2001:db8::1", Port: 443}
+	for _, host := range []string{"2001:db8::1", "[2001:db8::1]"} {
+		request := []byte("GET / HTTP/1.1\r\nHost: " + host + "\r\nConnection: close\r\n\r\n")
+		if err := teek.validateHTTPRequestFormat(request, nil, connData); err != nil {
+			t.Fatalf("legacy Host %q rejected: %v", host, err)
+		}
+	}
+}
+
+func TestValidateTLS12CBCHTTPRequestAcceptsLegacyDefaultPortIPv6(t *testing.T) {
+	teek := &TEEK{logger: shared.NewNopLogger()}
+	connData := &shared.RequestConnectionData{Hostname: "2001:db8::1", Port: 443}
+	for _, host := range []string{"2001:db8::1", "[2001:db8::1]"} {
+		request := []byte("GET / HTTP/1.1\r\nHost: " + host + "\r\nConnection: close\r\nContent-Length: 0\r\n\r\n")
+		if err := teek.validateTLS12CBCHTTPRequestFormat(request, nil, connData); err != nil {
+			t.Fatalf("CBC Host %q rejected: %v", host, err)
+		}
+	}
+}

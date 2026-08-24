@@ -19,8 +19,11 @@ type HTTPResponseParser struct {
 	Response *HTTPParsedResponse
 
 	// Parser state
-	remainingBodyBytes int64  // -1 means read until stream ends, 0 means no more body, >0 means exact count
-	isChunked          bool   // true if using chunked transfer encoding
+	remainingBodyBytes int64 // -1 means read until stream ends, 0 means no more body, >0 means exact count
+	isChunked          bool  // true if using chunked transfer encoding
+	chunkNeedsCRLF     bool
+	finalChunkSeen     bool
+	strictFraming      bool
 	remaining          []byte // buffer for incomplete data
 	currentByteIdx     int    // current position in the complete response stream
 
@@ -39,8 +42,11 @@ type HTTPParsedResponse struct {
 	BodyStartIndex      int
 	Body                []byte
 	HeaderLowerToRanges map[string]shared.ResponseRedactionRange
+	HeaderFraming       []shared.ResponseRedactionRange // header names, delimiters, and CRLFs
 	Headers             map[string]string               // header values for processing
+	Chunked             bool
 	Chunks              []shared.ResponseRedactionRange // for chunked responses
+	ChunkFraming        []shared.ResponseRedactionRange // safe chunk-size and CRLF ranges
 
 	// Completeness tracking
 	HeadersComplete bool
@@ -49,6 +55,10 @@ type HTTPParsedResponse struct {
 
 // NewHTTPResponseParser creates a new streaming HTTP response parser
 func NewHTTPResponseParser() *HTTPResponseParser {
+	return newHTTPResponseParser(false)
+}
+
+func newHTTPResponseParser(strictFraming bool) *HTTPResponseParser {
 	logger.Info("Starting NewHTTPResponseParser", zap.String("component", "Parser"), zap.String("operation", "NewHTTPResponseParser"), zap.String("description", "Creating streaming parser"))
 
 	return &HTTPResponseParser{
@@ -60,13 +70,17 @@ func NewHTTPResponseParser() *HTTPResponseParser {
 			BodyStartIndex:      -1,
 			Body:                []byte{},
 			HeaderLowerToRanges: make(map[string]shared.ResponseRedactionRange),
+			HeaderFraming:       []shared.ResponseRedactionRange{},
 			Headers:             make(map[string]string),
+			Chunked:             false,
 			Chunks:              []shared.ResponseRedactionRange{},
+			ChunkFraming:        []shared.ResponseRedactionRange{},
 			HeadersComplete:     false,
 			Complete:            false,
 		},
 		remainingBodyBytes: 0,
 		isChunked:          false,
+		strictFraming:      strictFraming,
 		remaining:          []byte{},
 		currentByteIdx:     0,
 		headersComplete:    false,
@@ -117,10 +131,21 @@ func (p *HTTPResponseParser) StreamEnded() error {
 		return errors.New("stream ended before headers were complete")
 	}
 
-	// Check if we're missing expected body data
+	// Check if we're missing expected body data.
 	if p.remainingBodyBytes > 0 {
 		logger.Error("Stream ended with body bytes still expected", zap.String("component", "Parser"), zap.String("operation", "StreamEnded"), zap.Int64("remaining_body_bytes", p.remainingBodyBytes))
 		return errors.New("stream ended before all body bytes were received")
+	}
+	if p.strictFraming && p.isChunked {
+		if p.chunkNeedsCRLF {
+			return errors.New("stream ended before chunk data CRLF")
+		}
+		if !p.finalChunkSeen {
+			return errors.New("stream ended before terminal zero chunk")
+		}
+		if !p.complete {
+			return errors.New("stream ended before final chunk trailer terminator")
+		}
 	}
 
 	// Handle remaining data based on response type
@@ -131,12 +156,16 @@ func (p *HTTPResponseParser) StreamEnded() error {
 			p.currentByteIdx += len(p.remaining)
 			p.remaining = []byte{}
 		} else if p.isChunked {
+			if p.strictFraming {
+				return errors.New("received trailing bytes after chunked response")
+			}
 			// Chunked: consume trailing data (trailer headers, final CRLF) to match TypeScript behavior
 			logger.Debug("Consuming remaining bytes as chunked trailer to match TypeScript", zap.String("component", "Parser"), zap.String("operation", "StreamEnded"), zap.Int("remaining_bytes", len(p.remaining)))
 			p.currentByteIdx += len(p.remaining) // CRITICAL FIX: advance position like TypeScript
 			p.remaining = []byte{}
+		} else if p.strictFraming {
+			return errors.New("received trailing bytes after Content-Length body")
 		} else {
-			// Content-Length: ignore extra data (this is valid HTTP behavior)
 			logger.Debug("Ignoring extra bytes after Content-Length body", zap.String("component", "Parser"), zap.String("operation", "StreamEnded"), zap.Int("extra_bytes", len(p.remaining)))
 			p.remaining = []byte{}
 		}
@@ -211,14 +240,41 @@ func (p *HTTPResponseParser) parseStatusLine(line string) error {
 
 // parseHeaderLine parses a single HTTP header line
 func (p *HTTPResponseParser) parseHeaderLine(line string) error {
-	before, after, ok := strings.Cut(line, ": ")
-	if !ok {
-		logger.Warn("Header line missing colon separator", zap.String("component", "Parser"), zap.String("operation", "parseHeaderLine"), zap.String("line", line))
-		return nil // Skip malformed headers
+	var before, after string
+	var separator, valueStart int
+	if p.strictFraming {
+		separator = strings.IndexByte(line, ':')
+		if separator <= 0 {
+			logger.Warn("Header line missing colon separator", zap.String("component", "Parser"), zap.String("operation", "parseHeaderLine"), zap.String("line", line))
+			return errors.New("invalid HTTP response header line")
+		}
+		before = line[:separator]
+		if !validHTTPResponseHeaderName(before) {
+			return errors.New("invalid HTTP response header name")
+		}
+		valueStart = separator + 1
+		for valueStart < len(line) && (line[valueStart] == ' ' || line[valueStart] == '\t') {
+			valueStart++
+		}
+		after = line[valueStart:]
+	} else {
+		var ok bool
+		before, after, ok = strings.Cut(line, ": ")
+		if !ok {
+			logger.Warn("Header line missing colon separator", zap.String("component", "Parser"), zap.String("operation", "parseHeaderLine"), zap.String("line", line))
+			return nil // Preserve legacy behavior: skip malformed headers.
+		}
+		separator = len(before)
+		valueStart = separator + 2
 	}
 
 	key := strings.ToLower(before)
 	value := after
+	if p.strictFraming && (key == "content-length" || key == "transfer-encoding") {
+		if _, exists := p.Response.Headers[key]; exists {
+			return fmt.Errorf("duplicate HTTP response framing header %q", key)
+		}
+	}
 
 	// Store header value for processing
 	p.Response.Headers[key] = value
@@ -228,6 +284,12 @@ func (p *HTTPResponseParser) parseHeaderLine(line string) error {
 	p.Response.HeaderLowerToRanges[key] = shared.ResponseRedactionRange{
 		Start:  lineStart,
 		Length: len(line),
+	}
+	if p.strictFraming {
+		p.Response.HeaderFraming = append(p.Response.HeaderFraming,
+			shared.ResponseRedactionRange{Start: lineStart, Length: valueStart},
+			shared.ResponseRedactionRange{Start: lineStart + len(line), Length: 2},
+		)
 	}
 
 	logger.Debug("Header parsed", zap.String("component", "Parser"), zap.String("operation", "parseHeaderLine"), zap.String("level", "verbose"), zap.String("key", key), zap.String("value", value), zap.Int("start", lineStart), zap.Int("end", lineStart+len(line)))
@@ -245,13 +307,41 @@ func (p *HTTPResponseParser) finishHeaders() error {
 	// Determine body reading strategy
 	transferEncoding := p.Response.Headers["transfer-encoding"]
 	contentLength := p.Response.Headers["content-length"]
+	if p.strictFraming && transferEncoding != "" && contentLength != "" {
+		return errors.New("HTTP response contains both Transfer-Encoding and Content-Length")
+	}
+	isChunked := strings.Contains(strings.ToLower(transferEncoding), "chunked")
+	if p.strictFraming && transferEncoding != "" {
+		codings := strings.Split(strings.ToLower(transferEncoding), ",")
+		isChunked = false
+		for index, coding := range codings {
+			coding = strings.TrimSpace(coding)
+			if coding == "" {
+				return errors.New("HTTP response contains an invalid Transfer-Encoding")
+			}
+			if coding == "chunked" {
+				if index != len(codings)-1 {
+					return errors.New("HTTP response contains invalid Transfer-Encoding order")
+				}
+				isChunked = true
+			}
+		}
+	}
 
-	if strings.Contains(strings.ToLower(transferEncoding), "chunked") {
+	if isChunked {
 		// Chunked transfer encoding
 		p.isChunked = true
+		p.Response.Chunked = true
 		p.remainingBodyBytes = 0
 	} else if contentLength != "" {
 		// Fixed content length
+		if p.strictFraming {
+			for _, char := range []byte(contentLength) {
+				if char < '0' || char > '9' {
+					return fmt.Errorf("invalid Content-Length %s", contentLength)
+				}
+			}
+		}
 		length, err := strconv.ParseInt(contentLength, 10, 64)
 		if err != nil {
 			logger.Error("Invalid Content-Length", zap.String("component", "Parser"), zap.String("operation", "finishHeaders"), zap.String("content_length", contentLength))
@@ -277,6 +367,22 @@ func (p *HTTPResponseParser) finishHeaders() error {
 	}
 
 	return nil
+}
+
+func validHTTPResponseHeaderName(name string) bool {
+	for i := range len(name) {
+		char := name[i]
+		if (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') || (char >= '0' && char <= '9') {
+			continue
+		}
+		switch char {
+		case '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~':
+			continue
+		default:
+			return false
+		}
+	}
+	return name != ""
 }
 
 // processBody processes the HTTP response body
@@ -336,6 +442,35 @@ func (p *HTTPResponseParser) processFixedBody() error {
 func (p *HTTPResponseParser) processChunkedBody() error {
 
 	for {
+		if p.finalChunkSeen {
+			line, found := p.getLine()
+			if !found {
+				break
+			}
+			p.recordChunkFraming(p.currentByteIdx-2, 2)
+			if line == "" {
+				p.complete = true
+				p.Response.Complete = true
+				break
+			}
+			continue
+		}
+
+		if p.chunkNeedsCRLF {
+			if len(p.remaining) < 2 {
+				break
+			}
+			if !bytes.Equal(p.remaining[:2], []byte("\r\n")) {
+				logger.Error("Missing chunk trailing CRLF", zap.String("component", "Parser"), zap.String("operation", "processChunkedBody"))
+				return errors.New("invalid chunk: missing CRLF after data")
+			}
+			p.recordChunkFraming(p.currentByteIdx, 2)
+			p.remaining = p.remaining[2:]
+			p.currentByteIdx += 2
+			p.chunkNeedsCRLF = false
+			continue
+		}
+
 		if p.remainingBodyBytes > 0 {
 			// Read chunk data
 			bytesToRead := int(min(p.remainingBodyBytes, int64(len(p.remaining))))
@@ -353,16 +488,7 @@ func (p *HTTPResponseParser) processChunkedBody() error {
 				break // Still need more chunk data
 			}
 
-			// Consume chunk trailing CRLF
-			if len(p.remaining) < 2 {
-				break // Need more data for CRLF
-			}
-			if !bytes.Equal(p.remaining[:2], []byte("\r\n")) {
-				logger.Error("Missing chunk trailing CRLF", zap.String("component", "Parser"), zap.String("operation", "processChunkedBody"))
-				return errors.New("invalid chunk: missing CRLF after data")
-			}
-			p.remaining = p.remaining[2:]
-			p.currentByteIdx += 2
+			p.chunkNeedsCRLF = true
 			continue
 		}
 
@@ -373,6 +499,9 @@ func (p *HTTPResponseParser) processChunkedBody() error {
 		}
 
 		if line == "" {
+			if p.strictFraming {
+				return errors.New("invalid chunk: empty size line")
+			}
 			continue // Skip empty lines
 		}
 
@@ -382,28 +511,32 @@ func (p *HTTPResponseParser) processChunkedBody() error {
 			sizeStr = before
 		}
 		sizeStr = strings.TrimSpace(sizeStr)
+		if p.strictFraming && !validChunkSize(sizeStr) {
+			return errors.New("invalid chunk size")
+		}
 
 		chunkSize, err := strconv.ParseInt(sizeStr, 16, 64)
 		if err != nil {
 			logger.Error("Invalid chunk size", zap.String("component", "Parser"), zap.String("operation", "processChunkedBody"), zap.String("chunk_size", sizeStr))
 			return fmt.Errorf("invalid chunk size %s: %w", sizeStr, err)
 		}
+		lineStart := p.currentByteIdx - len(line) - 2
+		sizeOffset := strings.Index(line, sizeStr)
+		if sizeOffset < 0 {
+			return errors.New("invalid chunk size position")
+		}
+		if extensionOffset := strings.IndexByte(line, ';'); extensionOffset >= 0 {
+			// Reveal through the extension delimiter so the verifier can
+			// distinguish valid hidden extension data from malformed size syntax.
+			p.recordChunkFraming(lineStart, extensionOffset+1)
+		} else {
+			p.recordChunkFraming(lineStart, len(line))
+		}
+		p.recordChunkFraming(p.currentByteIdx-2, 2)
 
 		if chunkSize == 0 {
-			// Final chunk - response is complete, but continue processing remaining lines like TypeScript
-			p.complete = true
-			p.Response.Complete = true
-
-			// Continue processing any remaining lines (like TypeScript does)
-			for {
-				_, found := p.getLine()
-				if !found {
-					break // No more complete lines
-				}
-				// Empty lines and other data after final chunk are consumed but ignored
-			}
-
-			break
+			p.finalChunkSeen = true
+			continue
 		}
 
 		// Record chunk range (absolute positions in complete response)
@@ -417,6 +550,29 @@ func (p *HTTPResponseParser) processChunkedBody() error {
 	}
 
 	return nil
+}
+
+func validChunkSize(size string) bool {
+	if size == "" {
+		return false
+	}
+	for i := range len(size) {
+		char := size[i]
+		if (char >= '0' && char <= '9') || (char >= 'a' && char <= 'f') || (char >= 'A' && char <= 'F') {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func (p *HTTPResponseParser) recordChunkFraming(start, length int) {
+	if length <= 0 {
+		return
+	}
+	p.Response.ChunkFraming = append(p.Response.ChunkFraming, shared.ResponseRedactionRange{
+		Start: start, Length: length,
+	})
 }
 
 // getLine extracts a CRLF-terminated line from the buffer

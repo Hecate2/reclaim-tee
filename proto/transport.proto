@@ -113,6 +113,7 @@ message RequestConnection {
   repeated string alpn = 4;
   string force_tls_version = 5; // optional
   string force_cipher_suite = 6; // optional (kept string form)
+  bool supports_tls12_cbc = 7; // additive client capability; absent means legacy split-AEAD only
 }
 
 message ConnectionReady { bool success = 1; }

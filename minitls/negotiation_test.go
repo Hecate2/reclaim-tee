@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"net"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -201,6 +202,29 @@ func TestBuildClientHelloOffersExtendedMasterSecret(t *testing.T) {
 	}
 }
 
+func TestPreCBCClientHelloKeepsOriginalAEADOnlySurface(t *testing.T) {
+	c := NewClientWithConfig(nil, &Config{MinVersion: VersionTLS12, MaxVersion: VersionTLS12})
+	hello, err := c.buildClientHello("example.com")
+	if err != nil {
+		t.Fatalf("buildClientHello: %v", err)
+	}
+
+	// Pin the pre-CBC wire IDs and order. Do not derive this fixture from the
+	// implementation: a shared edit must fail this compatibility test.
+	wantSuites := []uint16{0xcca9, 0xc02b, 0xc02c, 0xcca8, 0xc02f, 0xc030}
+	if !slices.Equal(c.offeredCipherSuites, wantSuites) {
+		t.Fatalf("pre-CBC offered suites changed: got %#v, want %#v", c.offeredCipherSuites, wantSuites)
+	}
+	for _, suite := range c.offeredCipherSuites {
+		if IsTLS12CBCCipherSuite(suite) {
+			t.Fatalf("pre-CBC ClientHello offered CBC suite 0x%04x", suite)
+		}
+	}
+	if _, present := parseClientHelloExtensions(t, hello)[extensionEncryptThenMAC]; present {
+		t.Fatal("pre-CBC ClientHello unexpectedly advertised Encrypt-then-MAC")
+	}
+}
+
 func TestBuildClientHelloForHRRSupportsAllOfferedGroups(t *testing.T) {
 	for _, group := range []uint16{X25519, secp256r1, secp384r1, secp521r1} {
 		c := NewClientWithConfig(nil, &Config{})
@@ -223,7 +247,7 @@ func TestBuildClientHelloForHRRSupportsAllOfferedGroups(t *testing.T) {
 
 func TestBuildClientHelloForHRRPreservesEtMVersionsAndCookie(t *testing.T) {
 	c := NewClientWithConfig(nil, &Config{
-		MinVersion: VersionTLS12, MaxVersion: VersionTLS13,
+		MinVersion: VersionTLS12, MaxVersion: VersionTLS13, EnableTLS12CBC: true,
 	})
 	if _, err := c.buildClientHello("example.com"); err != nil {
 		t.Fatalf("buildClientHello: %v", err)

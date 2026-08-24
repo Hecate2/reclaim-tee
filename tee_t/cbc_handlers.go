@@ -164,6 +164,9 @@ func authenticateTLS12CBCResponseBatch(readContext *minitls.TLS12CBCContext, bat
 			if len(plaintext) != 2 {
 				return nil, fmt.Errorf("invalid TLS 1.2 alert length %d", len(plaintext))
 			}
+			if plaintext[0] == 2 {
+				return nil, fmt.Errorf("fatal TLS 1.2 alert %d", plaintext[1])
+			}
 			if plaintext[1] == 0 {
 				result.closeNotify = true
 			}
@@ -216,6 +219,7 @@ func (t *TEET) handleTLS12CBCResponseRecords(identity *teetSessionIdentity, batc
 	state.ConsolidatedResponseCiphertext = append([]byte(nil), authenticated.response...)
 	state.CBCResponseDigest = digest
 	state.CBCPlaintextRecordLengths = authenticated.plaintextLengths
+	state.CBCCloseNotify = authenticated.closeNotify
 	state.cbcMu.Unlock()
 	previousReadContext.Destroy()
 

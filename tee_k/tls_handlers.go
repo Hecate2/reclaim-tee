@@ -47,7 +47,8 @@ func (t *TEEK) performTLSHandshakeAndHTTP(sessionID string) error {
 	// Configure TLS with shared cached certificate fetcher
 	config := &minitls.Config{
 		// Use shared cached certificate fetcher (1-week TTL, max 1000 entries)
-		CertFetcher: t.certFetcher,
+		CertFetcher:    t.certFetcher,
+		EnableTLS12CBC: session.ConnectionData.SupportsTLS12CBC,
 	}
 
 	// Prefer client-requested TLS version over server default
@@ -80,6 +81,10 @@ func (t *TEEK) performTLSHandshakeAndHTTP(sessionID string) error {
 	// Configure cipher suite restrictions if specified
 	if err := configureCipherSuites(config, effectiveCipherSuite, effectiveTLSVersion); err != nil {
 		t.terminateSessionWithError(sessionID, shared.ReasonInternalError, err, "Invalid cipher suite configuration")
+		return err
+	}
+	if err := validateClientCipherCapabilities(config, session.ConnectionData.SupportsTLS12CBC); err != nil {
+		t.terminateSessionWithError(sessionID, shared.ReasonProtocolViolation, err, "TLS 1.2 CBC capability is required")
 		return err
 	}
 
@@ -159,5 +164,17 @@ func (t *TEEK) performTLSHandshakeAndHTTP(sessionID string) error {
 
 	t.logger.WithSession(sessionID).Info("TLS handshake complete",
 		zap.Uint16("cipher_suite", cipherSuite))
+	return nil
+}
+
+func validateClientCipherCapabilities(config *minitls.Config, supportsTLS12CBC bool) error {
+	if config == nil || supportsTLS12CBC {
+		return nil
+	}
+	for _, suite := range config.CipherSuites {
+		if minitls.IsTLS12CBCCipherSuite(suite) {
+			return fmt.Errorf("client does not advertise TLS 1.2 CBC protocol support")
+		}
+	}
 	return nil
 }

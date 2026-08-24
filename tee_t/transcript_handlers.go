@@ -151,6 +151,7 @@ func (t *TEET) checkFinishedCondition(identity *teetSessionIdentity) error {
 				ResponseRecordsSha256:         cbcSnapshot.digest,
 				ResponseRedactionRanges:       cbcSnapshot.ranges,
 				PlaintextRecordLengths:        cbcSnapshot.plaintextLengths,
+				CloseNotify:                   cbcSnapshot.closeNotify,
 			}
 		} else {
 			tOutput.ConsolidatedResponseCiphertext = ciphertext

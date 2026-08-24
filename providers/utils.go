@@ -91,8 +91,9 @@ func substituteParamValues(current *HTTPProviderParams, secret *HTTPProviderSecr
 		params.URL = urlParams.NewParam
 		maps.Copy(extracted, urlParams.ExtractedValues)
 		if len(urlParams.HiddenParts) > 0 {
-			host := getHostHeaderString(mustParseURL(params.URL))
-			offset := len("https://"+host) - len(current.Method) - 1 // space after method
+			u := mustParseURL(params.URL)
+			authorityPrefixLength := len(u.Scheme) + len("://") + len(u.Host)
+			offset := authorityPrefixLength - len(current.Method) - 1
 			for _, hp := range urlParams.HiddenParts {
 				hiddenURL = append(hiddenURL, hiddenPart{Index: hp.Index - offset, Length: hp.Length})
 			}

@@ -12,6 +12,15 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+const maxTLS12CBCRequestPlaintext = 16384
+
+func validateTLS12CBCRequestPlaintext(request []byte) error {
+	if len(request) == 0 || len(request) > maxTLS12CBCRequestPlaintext {
+		return fmt.Errorf("invalid TLS 1.2 CBC HTTP request length: %d", len(request))
+	}
+	return nil
+}
+
 const tls12CBCReadStateAckTimeout = 5 * time.Second
 
 func tls12CBCModeToProto(mode minitls.TLS12CBCRecordMode) (teeproto.TLS12CBCRecordMode, error) {
@@ -149,8 +158,8 @@ func (t *TEEK) handleTLS12CBCRequest(sessionID string, request *teeproto.TLS12CB
 		return fmt.Errorf("multiple TLS 1.2 CBC requests received")
 	}
 	fullRequest := request.GetFullRequest()
-	if len(fullRequest) == 0 || len(fullRequest) > shared.MaxHTTPRequestSize {
-		return fmt.Errorf("invalid TLS 1.2 CBC HTTP request length: %d", len(fullRequest))
+	if err := validateTLS12CBCRequestPlaintext(fullRequest); err != nil {
+		return err
 	}
 	if len(request.GetRedactionRanges()) > shared.MaxRedactionRanges {
 		return fmt.Errorf("too many TLS 1.2 CBC request redaction ranges")
@@ -171,7 +180,7 @@ func (t *TEEK) handleTLS12CBCRequest(sessionID string, request *teeproto.TLS12CB
 	if err != nil {
 		return err
 	}
-	if err := t.validateHTTPRequestFormat(fullRequest, ranges, session.ConnectionData); err != nil {
+	if err := t.validateTLS12CBCHTTPRequestFormat(fullRequest, ranges, session.ConnectionData); err != nil {
 		return err
 	}
 
@@ -185,24 +194,14 @@ func (t *TEEK) handleTLS12CBCRequest(sessionID string, request *teeproto.TLS12CB
 	}
 
 	ctx := state.TLSClient.GetTLS12CBC()
-	const maxTLSPlaintext = 16384
-	records := make([]*teeproto.TLSRecord, 0, (len(fullRequest)+maxTLSPlaintext-1)/maxTLSPlaintext)
-	for offset := 0; offset < len(fullRequest); offset += maxTLSPlaintext {
-		end := offset + maxTLSPlaintext
-		if end > len(fullRequest) {
-			end = len(fullRequest)
-		}
-		seq := ctx.GetWriteSequence()
-		record, err := ctx.EncryptRecord(minitls.RecordTypeApplicationData, fullRequest[offset:end])
-		if err != nil {
-			return fmt.Errorf("encrypt TLS 1.2 CBC request record: %w", err)
-		}
-		records = append(records, &teeproto.TLSRecord{
-			Header:  append([]byte(nil), record[:5]...),
-			Payload: append([]byte(nil), record[5:]...),
-			SeqNum:  seq,
-		})
+	seq := ctx.GetWriteSequence()
+	record, err := ctx.EncryptRecord(minitls.RecordTypeApplicationData, fullRequest)
+	if err != nil {
+		return fmt.Errorf("encrypt TLS 1.2 CBC request record: %w", err)
 	}
+	records := []*teeproto.TLSRecord{{
+		Header: append([]byte(nil), record[:5]...), Payload: append([]byte(nil), record[5:]...), SeqNum: seq,
+	}}
 	if len(records) > shared.MaxEncryptedFragments {
 		return fmt.Errorf("TLS 1.2 CBC request has too many records")
 	}

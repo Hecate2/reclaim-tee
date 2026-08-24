@@ -88,6 +88,19 @@ func TestTLS12CBCSignedContractsAcceptExplicitFields(t *testing.T) {
 	if _, err := c.validateTEETSignedMessage("cbc-contract", signCBCContractBody(t, pair, teeproto.BodyType_BODY_TYPE_T_OUTPUT, tBody)); err != nil {
 		t.Fatalf("valid T CBC contract rejected: %v", err)
 	}
+
+	var payload teeproto.TOutputPayload
+	if err := proto.Unmarshal(tBody, &payload); err != nil {
+		t.Fatal(err)
+	}
+	payload.Tls12Cbc.CloseNotify = true
+	tampered, err := proto.Marshal(&payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.validateTEETSignedMessage("cbc-contract", signCBCContractBody(t, pair, teeproto.BodyType_BODY_TYPE_T_OUTPUT, tampered)); err == nil {
+		t.Fatal("signed close_notify mismatch was accepted")
+	}
 }
 
 func TestTLS12CBCSignedContractsRejectLegacyMixAndCleartextChanges(t *testing.T) {
@@ -180,6 +193,67 @@ func TestTLS12CBCAuthenticatedResponseRejectsFatalAlertWithoutPublishing(t *test
 	}
 	if len(c.parsedResponseBySeq) != 0 || len(c.ciphertextBySeq) != 0 || len(c.cbcResponsePlaintextLengths) != 0 {
 		t.Fatal("fatal alert published partial plaintext state")
+	}
+}
+
+func TestTLS12CBCRedactionCoordinatesExcludeAuthenticatedAlerts(t *testing.T) {
+	c := newCBCContractClient("cbc-redaction-alert")
+	first := []byte("HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\n")
+	second := []byte("hello")
+	alert := []byte{1, 0}
+	c.parsedResponseBySeq[1] = &TLSResponseData{
+		ActualContent: first, ContentType: minitls.RecordTypeApplicationData, OriginalLen: len(first),
+	}
+	c.parsedResponseBySeq[2] = &TLSResponseData{
+		ActualContent: second, ContentType: minitls.RecordTypeApplicationData, OriginalLen: len(second),
+	}
+	c.parsedResponseBySeq[3] = &TLSResponseData{
+		ActualContent: alert, ContentType: minitls.RecordTypeAlert, OriginalLen: len(alert),
+	}
+	c.ciphertextBySeq[1] = append([]byte(nil), first...)
+	c.ciphertextBySeq[2] = append([]byte(nil), second...)
+	c.ciphertextBySeq[3] = append([]byte(nil), alert...)
+
+	analysis, err := c.analyzeTLSRecords([]uint64{1, 2, 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantResponseLength := len(first) + len(second)
+	if analysis.TotalTLSOffset != wantResponseLength {
+		t.Fatalf("CBC response coordinate length = %d, want %d", analysis.TotalTLSOffset, wantResponseLength)
+	}
+	if len(analysis.ProtocolRedactions) != 0 {
+		t.Fatalf("CBC alert produced out-of-band response redactions: %+v", analysis.ProtocolRedactions)
+	}
+	if len(analysis.HTTPMappings) != 2 || analysis.HTTPMappings[1].TLSPos != len(first) {
+		t.Fatalf("CBC application-data mappings are not contiguous: %+v", analysis.HTTPMappings)
+	}
+}
+
+func TestPreCBCRedactionCoordinatesStillIncludeProtocolRecords(t *testing.T) {
+	c := newCBCContractClient("legacy-redaction-alert")
+	c.cipherSuite = minitls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256
+	appData := []byte("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+	alert := []byte{1, 0}
+	c.parsedResponseBySeq[1] = &TLSResponseData{
+		ActualContent: appData, ContentType: minitls.RecordTypeApplicationData, OriginalLen: len(appData),
+	}
+	c.parsedResponseBySeq[2] = &TLSResponseData{
+		ActualContent: alert, ContentType: minitls.RecordTypeAlert, OriginalLen: len(alert),
+	}
+	c.ciphertextBySeq[1] = append([]byte(nil), appData...)
+	c.ciphertextBySeq[2] = append([]byte(nil), alert...)
+
+	analysis, err := c.analyzeTLSRecords([]uint64{1, 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if analysis.TotalTLSOffset != len(appData)+len(alert) {
+		t.Fatalf("pre-CBC coordinate length = %d, want %d", analysis.TotalTLSOffset, len(appData)+len(alert))
+	}
+	if len(analysis.ProtocolRedactions) != 1 || analysis.ProtocolRedactions[0].Start != len(appData) ||
+		analysis.ProtocolRedactions[0].Length != len(alert) {
+		t.Fatalf("pre-CBC protocol redactions changed: %+v", analysis.ProtocolRedactions)
 	}
 }
 

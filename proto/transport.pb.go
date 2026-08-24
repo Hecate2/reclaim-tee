@@ -956,8 +956,9 @@ type RequestConnection struct {
 	Port             int32                  `protobuf:"varint,2,opt,name=port,proto3" json:"port,omitempty"`
 	Sni              string                 `protobuf:"bytes,3,opt,name=sni,proto3" json:"sni,omitempty"`
 	Alpn             []string               `protobuf:"bytes,4,rep,name=alpn,proto3" json:"alpn,omitempty"`
-	ForceTlsVersion  string                 `protobuf:"bytes,5,opt,name=force_tls_version,json=forceTlsVersion,proto3" json:"force_tls_version,omitempty"`    // optional
-	ForceCipherSuite string                 `protobuf:"bytes,6,opt,name=force_cipher_suite,json=forceCipherSuite,proto3" json:"force_cipher_suite,omitempty"` // optional (kept string form)
+	ForceTlsVersion  string                 `protobuf:"bytes,5,opt,name=force_tls_version,json=forceTlsVersion,proto3" json:"force_tls_version,omitempty"`     // optional
+	ForceCipherSuite string                 `protobuf:"bytes,6,opt,name=force_cipher_suite,json=forceCipherSuite,proto3" json:"force_cipher_suite,omitempty"`  // optional (kept string form)
+	SupportsTls12Cbc bool                   `protobuf:"varint,7,opt,name=supports_tls12_cbc,json=supportsTls12Cbc,proto3" json:"supports_tls12_cbc,omitempty"` // additive client capability; absent means legacy split-AEAD only
 	unknownFields    protoimpl.UnknownFields
 	sizeCache        protoimpl.SizeCache
 }
@@ -1032,6 +1033,13 @@ func (x *RequestConnection) GetForceCipherSuite() string {
 		return x.ForceCipherSuite
 	}
 	return ""
+}
+
+func (x *RequestConnection) GetSupportsTls12Cbc() bool {
+	if x != nil {
+		return x.SupportsTls12Cbc
+	}
+	return false
 }
 
 type ConnectionReady struct {
@@ -4224,14 +4232,15 @@ const file_transport_proto_rawDesc = "" +
 	"\x11tls12_cbc_request\x18X \x01(\v2\x19.teeproto.TLS12CBCRequestH\x00R\x0ftls12CbcRequest\x12M\n" +
 	"\x13batched_tls_records\x18Y \x01(\v2\x1b.teeproto.BatchedTLSRecordsH\x00R\x11batchedTlsRecords\x12b\n" +
 	"\x1aauthenticated_cbc_response\x18Z \x01(\v2\".teeproto.AuthenticatedCBCResponseH\x00R\x18authenticatedCbcResponseB\t\n" +
-	"\apayload\"\xc3\x01\n" +
+	"\apayload\"\xf1\x01\n" +
 	"\x11RequestConnection\x12\x1a\n" +
 	"\bhostname\x18\x01 \x01(\tR\bhostname\x12\x12\n" +
 	"\x04port\x18\x02 \x01(\x05R\x04port\x12\x10\n" +
 	"\x03sni\x18\x03 \x01(\tR\x03sni\x12\x12\n" +
 	"\x04alpn\x18\x04 \x03(\tR\x04alpn\x12*\n" +
 	"\x11force_tls_version\x18\x05 \x01(\tR\x0fforceTlsVersion\x12,\n" +
-	"\x12force_cipher_suite\x18\x06 \x01(\tR\x10forceCipherSuite\"+\n" +
+	"\x12force_cipher_suite\x18\x06 \x01(\tR\x10forceCipherSuite\x12,\n" +
+	"\x12supports_tls12_cbc\x18\a \x01(\bR\x10supportsTls12Cbc\"+\n" +
 	"\x0fConnectionReady\x12\x18\n" +
 	"\asuccess\x18\x01 \x01(\bR\asuccess\"$\n" +
 	"\bTCPReady\x12\x18\n" +

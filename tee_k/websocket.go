@@ -309,7 +309,7 @@ func (t *TEEK) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		switch p := env.Payload.(type) {
 		case *teeproto.Envelope_RequestConnection:
 			// Inline conversion
-			data := shared.RequestConnectionData{Hostname: p.RequestConnection.GetHostname(), Port: int(p.RequestConnection.GetPort()), SNI: p.RequestConnection.GetSni(), ALPN: p.RequestConnection.GetAlpn(), ForceTLSVersion: p.RequestConnection.GetForceTlsVersion(), ForceCipherSuite: p.RequestConnection.GetForceCipherSuite()}
+			data := shared.RequestConnectionData{Hostname: p.RequestConnection.GetHostname(), Port: int(p.RequestConnection.GetPort()), SNI: p.RequestConnection.GetSni(), ALPN: p.RequestConnection.GetAlpn(), ForceTLSVersion: p.RequestConnection.GetForceTlsVersion(), ForceCipherSuite: p.RequestConnection.GetForceCipherSuite(), SupportsTLS12CBC: p.RequestConnection.GetSupportsTls12Cbc()}
 			msg := &shared.Message{SessionID: sessionID, Type: shared.MsgRequestConnection, Data: data}
 			handlerErr = t.handleRequestConnection(sessionID, msg)
 		case *teeproto.Envelope_TcpReady:

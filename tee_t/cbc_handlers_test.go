@@ -67,6 +67,7 @@ func TestTLS12CBCTOutputUsesOnlyExplicitContractFields(t *testing.T) {
 		CBCAuthenticatedRedactedResponse: []byte("responXX"), CBCResponseDigest: make([]byte, 32),
 		CBCResponseRedactionRanges:     []*teeproto.ResponseRedactionRange{{Start: 6, Length: 2}},
 		CBCPlaintextRecordLengths:      []uint32{8},
+		CBCCloseNotify:                 true,
 		ConsolidatedResponseCiphertext: []byte("legacy ciphertext"),
 		RequestProofStreams:            [][]byte{[]byte("legacy proof")},
 	}
@@ -99,6 +100,9 @@ func TestTLS12CBCTOutputUsesOnlyExplicitContractFields(t *testing.T) {
 	}
 	if payload.GetTls12Cbc() == nil {
 		t.Fatal("T CBC output is missing explicit contract")
+	}
+	if !payload.GetTls12Cbc().GetCloseNotify() {
+		t.Fatal("T CBC output omitted authenticated close_notify")
 	}
 	if len(payload.GetConsolidatedResponseCiphertext()) != 0 || len(payload.GetRequestProofStreams()) != 0 {
 		t.Fatal("T CBC output included legacy AEAD fields")
@@ -234,5 +238,19 @@ func TestAuthenticateTLS12CBCResponseBatchRejectsMalformedAlert(t *testing.T) {
 	}}
 	if result, err := authenticateTLS12CBCResponseBatch(reader, batch); err == nil || result != nil {
 		t.Fatalf("malformed alert accepted: result=%v err=%v", result, err)
+	}
+}
+
+func TestAuthenticateTLS12CBCResponseBatchRejectsFatalAlert(t *testing.T) {
+	writer, reader := newCBCResponseTestContexts(t, minitls.TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA, minitls.TLS12CBCRecordModeMACThenEncrypt)
+	batch := &teeproto.BatchedTLSRecords{Records: []*teeproto.TLSRecord{
+		encryptCBCResponseTestRecord(t, writer, minitls.RecordTypeApplicationData, []byte("response"), 1),
+		encryptCBCResponseTestRecord(t, writer, minitls.RecordTypeAlert, []byte{2, 40}, 2),
+	}}
+	if result, err := authenticateTLS12CBCResponseBatch(reader, batch); err == nil || result != nil {
+		t.Fatalf("fatal alert accepted: result=%v err=%v", result, err)
+	}
+	if reader.GetReadSequence() != 1 {
+		t.Fatalf("fatal alert advanced published read sequence to %d", reader.GetReadSequence())
 	}
 }

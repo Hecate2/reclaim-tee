@@ -85,8 +85,9 @@ func TestCipherSuitesDefaults(t *testing.T) {
 
 	// Test TLS 1.2 default cipher suites
 	config12 := &Config{
-		MinVersion: VersionTLS12,
-		MaxVersion: VersionTLS12,
+		MinVersion:     VersionTLS12,
+		MaxVersion:     VersionTLS12,
+		EnableTLS12CBC: true,
 	}
 
 	cipherSuites12 := config12.cipherSuites()

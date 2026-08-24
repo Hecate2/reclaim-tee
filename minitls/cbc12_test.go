@@ -262,8 +262,12 @@ func TestTLS12CBCKeyBlockLayout(t *testing.T) {
 }
 
 func TestTLS12CBCCipherSuiteConfiguration(t *testing.T) {
-	withCBC := (&Config{MinVersion: VersionTLS12, MaxVersion: VersionTLS12}).cipherSuites()
+	legacyDefault := (&Config{MinVersion: VersionTLS12, MaxVersion: VersionTLS12}).cipherSuites()
 	withoutCBC := defaultCipherSuites(VersionTLS12)
+	if !slices.Equal(legacyDefault, withoutCBC) {
+		t.Fatalf("pre-CBC default suites changed: got %#v, want %#v", legacyDefault, withoutCBC)
+	}
+	withCBC := (&Config{MinVersion: VersionTLS12, MaxVersion: VersionTLS12, EnableTLS12CBC: true}).cipherSuites()
 	wantCBC := []uint16{
 		TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA,
 		TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA,

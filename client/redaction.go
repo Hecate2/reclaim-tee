@@ -32,18 +32,8 @@ func (c *Client) analyzeResponseRedaction() (shared.ResponseRedactionSpec, error
 	// Step 4: Consolidate and finalize
 	spec := c.finalizeRedactionSpec(responseRedactionRanges)
 
-	// Calculate total response size in TLS stream coordinates (matching redaction ranges)
-	totalResponseBytes := 0
-	for _, parsed := range c.parsedResponseBySeq {
-		if parsed != nil {
-			// Use TLS stream length to match TEE_T's consolidated stream coordinates
-			if minitls.IsTLS13CipherSuite(c.cipherSuite) {
-				totalResponseBytes += parsed.OriginalLen - 1 // TLS 1.3: strips last byte from encrypted data
-			} else {
-				totalResponseBytes += parsed.OriginalLen // TLS 1.2: no inner plaintext structure
-			}
-		}
-	}
+	// The analysis result owns the selected protocol's stream coordinates.
+	totalResponseBytes := tlsAnalysis.TotalTLSOffset
 
 	// Calculate total redacted bytes from consolidated ranges (also in TLS stream coordinates)
 	totalRedactedBytes := 0
@@ -170,6 +160,7 @@ func (c *Client) processSingleTLSRecord(seqNum uint64, result *TLSAnalysisResult
 	// 	zap.Int("original_length", parsed.OriginalLen),
 	// 	zap.Int("tls_stream_length", tlsStreamLength))
 
+	isTLS12CBC := minitls.IsTLS12CBCCipherSuite(c.cipherSuite)
 	switch parsed.ContentType {
 	case minitls.RecordTypeApplicationData:
 		// Create mapping for this segment
@@ -184,18 +175,25 @@ func (c *Client) processSingleTLSRecord(seqNum uint64, result *TLSAnalysisResult
 		result.HTTPMappings = append(result.HTTPMappings, mapping)
 		result.AllHTTPContent = append(result.AllHTTPContent, parsed.ActualContent...)
 	default:
-		// Redact everything except app data
-		// Use tlsStreamLength to match TEE_T's consolidated stream
-		result.ProtocolRedactions = append(result.ProtocolRedactions,
-			shared.ResponseRedactionRange{
-				Start:  result.TotalTLSOffset,
-				Length: tlsStreamLength,
-			})
+		// Split-AEAD transcripts include authenticated protocol records in their
+		// consolidated stream, so redact them. The CBC contract carries only
+		// concatenated ApplicationData plaintext; authenticated alerts are
+		// represented separately and consume no CBC response coordinates.
+		if !isTLS12CBC {
+			result.ProtocolRedactions = append(result.ProtocolRedactions,
+				shared.ResponseRedactionRange{
+					Start:  result.TotalTLSOffset,
+					Length: tlsStreamLength,
+				})
+		}
 	}
 
 	// oldOffset := result.TotalTLSOffset
-	// Increment by tlsStreamLength to match TEE_T's consolidated stream
-	result.TotalTLSOffset += tlsStreamLength
+	// Increment only for records represented in the selected consolidated
+	// stream. CBC alerts are authenticated but omitted from signed response data.
+	if !isTLS12CBC || parsed.ContentType == minitls.RecordTypeApplicationData {
+		result.TotalTLSOffset += tlsStreamLength
+	}
 	// Debug logging (commented out for production)
 	// c.logger.Info("[REDACTION DEBUG] Incremented offset",
 	// 	zap.Int("old_offset", oldOffset),

@@ -158,6 +158,7 @@ func (c *Client) validateTEETTLS12CBCContract(body *teeproto.TOutputPayload, sig
 	binding := c.cbcBinding
 	responseDigest := append([]byte(nil), c.cbcResponseDigest...)
 	lengths := append([]uint32(nil), c.cbcResponsePlaintextLengths...)
+	closeNotify := c.cbcResponseCloseNotify
 	ranges := append([]shared.ResponseRedactionRange(nil), c.cbcResponseRedactionRanges...)
 	c.cbcMutex.Unlock()
 	if binding == nil || !proto.Equal(binding, cbc.GetBinding()) {
@@ -168,6 +169,9 @@ func (c *Client) validateTEETTLS12CBCContract(body *teeproto.TOutputPayload, sig
 	}
 	if !slices.Equal(lengths, cbc.GetPlaintextRecordLengths()) {
 		return fmt.Errorf("TEE_T TLS 1.2 CBC plaintext record lengths mismatch")
+	}
+	if closeNotify != cbc.GetCloseNotify() {
+		return fmt.Errorf("TEE_T TLS 1.2 CBC close_notify mismatch")
 	}
 	signedRanges := cbc.GetResponseRedactionRanges()
 	if len(signedRanges) != len(ranges) {

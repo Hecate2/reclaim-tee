@@ -42,6 +42,7 @@ type TEETSessionState struct {
 	CBCAuthenticatedRedactedResponse []byte
 	CBCResponseDigest                []byte
 	CBCPlaintextRecordLengths        []uint32
+	CBCCloseNotify                   bool
 	CBCResponseRedactionRanges       []*teeproto.ResponseRedactionRange
 	CBCRedactionSpecReceived         atomic.Bool
 	cbcMu                            sync.Mutex
@@ -312,6 +313,7 @@ func (s *TEETSessionState) DestroySessionState() {
 	s.ConsolidatedResponseCiphertext = nil
 	clear(s.CBCResponseDigest)
 	s.CBCResponseDigest = nil
+	s.CBCCloseNotify = false
 }
 
 type tls12CBCSigningSnapshot struct {
@@ -320,6 +322,7 @@ type tls12CBCSigningSnapshot struct {
 	redactedResponse []byte
 	digest           []byte
 	plaintextLengths []uint32
+	closeNotify      bool
 	ranges           []*teeproto.ResponseRedactionRange
 	active           bool
 }
@@ -354,6 +357,7 @@ func (s *TEETSessionState) snapshotTLS12CBCSigningState() tls12CBCSigningSnapsho
 		redactedResponse: append([]byte(nil), s.CBCAuthenticatedRedactedResponse...),
 		digest:           append([]byte(nil), s.CBCResponseDigest...),
 		plaintextLengths: append([]uint32(nil), s.CBCPlaintextRecordLengths...),
+		closeNotify:      s.CBCCloseNotify,
 		active:           true,
 	}
 	for _, item := range s.CBCResponseRedactionRanges {

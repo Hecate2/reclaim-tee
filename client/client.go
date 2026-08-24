@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/reclaimprotocol/reclaim-tee/minitls"
 	teeproto "github.com/reclaimprotocol/reclaim-tee/proto"
 	"github.com/reclaimprotocol/reclaim-tee/providers"
 	"github.com/reclaimprotocol/reclaim-tee/shared"
@@ -210,6 +211,7 @@ type Client struct {
 	cbcRequestDigest            []byte
 	cbcResponseDigest           []byte
 	cbcResponsePlaintextLengths []uint32
+	cbcResponseCloseNotify      bool
 	cbcResponseRedactionRanges  []shared.ResponseRedactionRange
 
 	// recordState is this session's TLS record-reassembly buffer. Per-Client
@@ -477,6 +479,7 @@ func (c *Client) RequestHTTP() error {
 		ALPN:             []string{"http/1.1"},
 		ForceTLSVersion:  c.forceTLSVersion,
 		ForceCipherSuite: c.forceCipherSuite,
+		SupportsTLS12CBC: true,
 	}
 	c.connectionRequestPending = true
 	sessionID := c.sessionID
@@ -654,7 +657,10 @@ func (c *Client) getResponseRedactions(response *HTTPResponse) ([]shared.Respons
 		return []shared.ResponseRedactionRange{}, nil
 	}
 
-	ctx := &providers.ProviderCtx{Version: providers.ATTESTOR_VERSION_3_2_0}
+	ctx := &providers.ProviderCtx{
+		Version:  providers.ATTESTOR_VERSION_3_2_0,
+		TLS12CBC: minitls.IsTLS12CBCCipherSuite(c.cipherSuite),
+	}
 
 	ranges, err := providers.GetResponseRedactions(response.FullResponse, c.providerParams, ctx, c.requestId)
 	if err != nil {
