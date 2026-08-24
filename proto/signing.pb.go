@@ -90,8 +90,11 @@ type KOutputPayload struct {
 	// Attestation generation asserted by the TEE and covered by this signature.
 	// Old clients ignore this field but preserve the original body bytes.
 	AttestationType string `protobuf:"bytes,11,opt,name=attestation_type,json=attestationType,proto3" json:"attestation_type,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// Present only for the trusted-TEE TLS 1.2 CBC contract. Legacy AEAD
+	// keystream semantics must not be mixed with this field.
+	Tls12Cbc      *TLS12CBCKOutput `protobuf:"bytes,12,opt,name=tls12_cbc,json=tls12Cbc,proto3" json:"tls12_cbc,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *KOutputPayload) Reset() {
@@ -187,6 +190,13 @@ func (x *KOutputPayload) GetAttestationType() string {
 	return ""
 }
 
+func (x *KOutputPayload) GetTls12Cbc() *TLS12CBCKOutput {
+	if x != nil {
+		return x.Tls12Cbc
+	}
+	return nil
+}
+
 type TOutputPayload struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Session binding - cryptographically links TEE_K and TEE_T outputs
@@ -201,8 +211,11 @@ type TOutputPayload struct {
 	// Attestation generation asserted by the TEE and covered by this signature.
 	// Old clients ignore this field but preserve the original body bytes.
 	AttestationType string `protobuf:"bytes,11,opt,name=attestation_type,json=attestationType,proto3" json:"attestation_type,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// Present only for the trusted-TEE TLS 1.2 CBC contract. The response is
+	// authenticated plaintext, not a split-AEAD ciphertext share.
+	Tls12Cbc      *TLS12CBCTOutput `protobuf:"bytes,12,opt,name=tls12_cbc,json=tls12Cbc,proto3" json:"tls12_cbc,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *TOutputPayload) Reset() {
@@ -277,6 +290,157 @@ func (x *TOutputPayload) GetAttestationType() string {
 	return ""
 }
 
+func (x *TOutputPayload) GetTls12Cbc() *TLS12CBCTOutput {
+	if x != nil {
+		return x.Tls12Cbc
+	}
+	return nil
+}
+
+type TLS12CBCKOutput struct {
+	state                        protoimpl.MessageState   `protogen:"open.v1"`
+	Binding                      *TLS12CBCSessionBinding  `protobuf:"bytes,1,opt,name=binding,proto3" json:"binding,omitempty"`
+	AuthenticatedRedactedRequest []byte                   `protobuf:"bytes,2,opt,name=authenticated_redacted_request,json=authenticatedRedactedRequest,proto3" json:"authenticated_redacted_request,omitempty"`
+	RequestRecordsSha256         []byte                   `protobuf:"bytes,3,opt,name=request_records_sha256,json=requestRecordsSha256,proto3" json:"request_records_sha256,omitempty"`
+	RequestRedactionRanges       []*RequestRedactionRange `protobuf:"bytes,4,rep,name=request_redaction_ranges,json=requestRedactionRanges,proto3" json:"request_redaction_ranges,omitempty"`
+	unknownFields                protoimpl.UnknownFields
+	sizeCache                    protoimpl.SizeCache
+}
+
+func (x *TLS12CBCKOutput) Reset() {
+	*x = TLS12CBCKOutput{}
+	mi := &file_signing_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *TLS12CBCKOutput) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*TLS12CBCKOutput) ProtoMessage() {}
+
+func (x *TLS12CBCKOutput) ProtoReflect() protoreflect.Message {
+	mi := &file_signing_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use TLS12CBCKOutput.ProtoReflect.Descriptor instead.
+func (*TLS12CBCKOutput) Descriptor() ([]byte, []int) {
+	return file_signing_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *TLS12CBCKOutput) GetBinding() *TLS12CBCSessionBinding {
+	if x != nil {
+		return x.Binding
+	}
+	return nil
+}
+
+func (x *TLS12CBCKOutput) GetAuthenticatedRedactedRequest() []byte {
+	if x != nil {
+		return x.AuthenticatedRedactedRequest
+	}
+	return nil
+}
+
+func (x *TLS12CBCKOutput) GetRequestRecordsSha256() []byte {
+	if x != nil {
+		return x.RequestRecordsSha256
+	}
+	return nil
+}
+
+func (x *TLS12CBCKOutput) GetRequestRedactionRanges() []*RequestRedactionRange {
+	if x != nil {
+		return x.RequestRedactionRanges
+	}
+	return nil
+}
+
+type TLS12CBCTOutput struct {
+	state                         protoimpl.MessageState    `protogen:"open.v1"`
+	Binding                       *TLS12CBCSessionBinding   `protobuf:"bytes,1,opt,name=binding,proto3" json:"binding,omitempty"`
+	AuthenticatedRedactedResponse []byte                    `protobuf:"bytes,2,opt,name=authenticated_redacted_response,json=authenticatedRedactedResponse,proto3" json:"authenticated_redacted_response,omitempty"`
+	ResponseRecordsSha256         []byte                    `protobuf:"bytes,3,opt,name=response_records_sha256,json=responseRecordsSha256,proto3" json:"response_records_sha256,omitempty"`
+	ResponseRedactionRanges       []*ResponseRedactionRange `protobuf:"bytes,4,rep,name=response_redaction_ranges,json=responseRedactionRanges,proto3" json:"response_redaction_ranges,omitempty"`
+	PlaintextRecordLengths        []uint32                  `protobuf:"varint,5,rep,packed,name=plaintext_record_lengths,json=plaintextRecordLengths,proto3" json:"plaintext_record_lengths,omitempty"`
+	unknownFields                 protoimpl.UnknownFields
+	sizeCache                     protoimpl.SizeCache
+}
+
+func (x *TLS12CBCTOutput) Reset() {
+	*x = TLS12CBCTOutput{}
+	mi := &file_signing_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *TLS12CBCTOutput) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*TLS12CBCTOutput) ProtoMessage() {}
+
+func (x *TLS12CBCTOutput) ProtoReflect() protoreflect.Message {
+	mi := &file_signing_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use TLS12CBCTOutput.ProtoReflect.Descriptor instead.
+func (*TLS12CBCTOutput) Descriptor() ([]byte, []int) {
+	return file_signing_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *TLS12CBCTOutput) GetBinding() *TLS12CBCSessionBinding {
+	if x != nil {
+		return x.Binding
+	}
+	return nil
+}
+
+func (x *TLS12CBCTOutput) GetAuthenticatedRedactedResponse() []byte {
+	if x != nil {
+		return x.AuthenticatedRedactedResponse
+	}
+	return nil
+}
+
+func (x *TLS12CBCTOutput) GetResponseRecordsSha256() []byte {
+	if x != nil {
+		return x.ResponseRecordsSha256
+	}
+	return nil
+}
+
+func (x *TLS12CBCTOutput) GetResponseRedactionRanges() []*ResponseRedactionRange {
+	if x != nil {
+		return x.ResponseRedactionRanges
+	}
+	return nil
+}
+
+func (x *TLS12CBCTOutput) GetPlaintextRecordLengths() []uint32 {
+	if x != nil {
+		return x.PlaintextRecordLengths
+	}
+	return nil
+}
+
 // Attestation report with structured data
 type AttestationReport struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -288,7 +452,7 @@ type AttestationReport struct {
 
 func (x *AttestationReport) Reset() {
 	*x = AttestationReport{}
-	mi := &file_signing_proto_msgTypes[2]
+	mi := &file_signing_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -300,7 +464,7 @@ func (x *AttestationReport) String() string {
 func (*AttestationReport) ProtoMessage() {}
 
 func (x *AttestationReport) ProtoReflect() protoreflect.Message {
-	mi := &file_signing_proto_msgTypes[2]
+	mi := &file_signing_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -313,7 +477,7 @@ func (x *AttestationReport) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AttestationReport.ProtoReflect.Descriptor instead.
 func (*AttestationReport) Descriptor() ([]byte, []int) {
-	return file_signing_proto_rawDescGZIP(), []int{2}
+	return file_signing_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *AttestationReport) GetType() string {
@@ -343,7 +507,7 @@ type TLSPacketInfo struct {
 
 func (x *TLSPacketInfo) Reset() {
 	*x = TLSPacketInfo{}
-	mi := &file_signing_proto_msgTypes[3]
+	mi := &file_signing_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -355,7 +519,7 @@ func (x *TLSPacketInfo) String() string {
 func (*TLSPacketInfo) ProtoMessage() {}
 
 func (x *TLSPacketInfo) ProtoReflect() protoreflect.Message {
-	mi := &file_signing_proto_msgTypes[3]
+	mi := &file_signing_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -368,7 +532,7 @@ func (x *TLSPacketInfo) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TLSPacketInfo.ProtoReflect.Descriptor instead.
 func (*TLSPacketInfo) Descriptor() ([]byte, []int) {
-	return file_signing_proto_rawDescGZIP(), []int{3}
+	return file_signing_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *TLSPacketInfo) GetSeqNum() uint64 {
@@ -411,7 +575,7 @@ type OPRFOutput struct {
 
 func (x *OPRFOutput) Reset() {
 	*x = OPRFOutput{}
-	mi := &file_signing_proto_msgTypes[4]
+	mi := &file_signing_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -423,7 +587,7 @@ func (x *OPRFOutput) String() string {
 func (*OPRFOutput) ProtoMessage() {}
 
 func (x *OPRFOutput) ProtoReflect() protoreflect.Message {
-	mi := &file_signing_proto_msgTypes[4]
+	mi := &file_signing_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -436,7 +600,7 @@ func (x *OPRFOutput) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OPRFOutput.ProtoReflect.Descriptor instead.
 func (*OPRFOutput) Descriptor() ([]byte, []int) {
-	return file_signing_proto_rawDescGZIP(), []int{4}
+	return file_signing_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *OPRFOutput) GetTlsStart() int32 {
@@ -477,7 +641,7 @@ type SignedMessage struct {
 
 func (x *SignedMessage) Reset() {
 	*x = SignedMessage{}
-	mi := &file_signing_proto_msgTypes[5]
+	mi := &file_signing_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -489,7 +653,7 @@ func (x *SignedMessage) String() string {
 func (*SignedMessage) ProtoMessage() {}
 
 func (x *SignedMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_signing_proto_msgTypes[5]
+	mi := &file_signing_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -502,7 +666,7 @@ func (x *SignedMessage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SignedMessage.ProtoReflect.Descriptor instead.
 func (*SignedMessage) Descriptor() ([]byte, []int) {
-	return file_signing_proto_rawDescGZIP(), []int{5}
+	return file_signing_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *SignedMessage) GetBodyType() BodyType {
@@ -565,7 +729,7 @@ var File_signing_proto protoreflect.FileDescriptor
 
 const file_signing_proto_rawDesc = "" +
 	"\n" +
-	"\rsigning.proto\x12\bteeproto\x1a\fcommon.proto\"\xa8\x04\n" +
+	"\rsigning.proto\x12\bteeproto\x1a\fcommon.proto\"\xe0\x04\n" +
 	"\x0eKOutputPayload\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\a \x01(\tR\tsessionId\x12)\n" +
@@ -577,7 +741,8 @@ const file_signing_proto_rawDesc = "" +
 	"\ftimestamp_ms\x18\x06 \x01(\x04R\vtimestampMs\x127\n" +
 	"\foprf_outputs\x18\n" +
 	" \x03(\v2\x14.teeproto.OPRFOutputR\voprfOutputs\x12)\n" +
-	"\x10attestation_type\x18\v \x01(\tR\x0fattestationType\"\xb4\x02\n" +
+	"\x10attestation_type\x18\v \x01(\tR\x0fattestationType\x126\n" +
+	"\ttls12_cbc\x18\f \x01(\v2\x19.teeproto.TLS12CBCKOutputR\btls12Cbc\"\xec\x02\n" +
 	"\x0eTOutputPayload\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x04 \x01(\tR\tsessionId\x12H\n" +
@@ -586,7 +751,19 @@ const file_signing_proto_rawDesc = "" +
 	"\ftimestamp_ms\x18\x03 \x01(\x04R\vtimestampMs\x127\n" +
 	"\foprf_outputs\x18\n" +
 	" \x03(\v2\x14.teeproto.OPRFOutputR\voprfOutputs\x12)\n" +
-	"\x10attestation_type\x18\v \x01(\tR\x0fattestationType\"?\n" +
+	"\x10attestation_type\x18\v \x01(\tR\x0fattestationType\x126\n" +
+	"\ttls12_cbc\x18\f \x01(\v2\x19.teeproto.TLS12CBCTOutputR\btls12Cbc\"\xa4\x02\n" +
+	"\x0fTLS12CBCKOutput\x12:\n" +
+	"\abinding\x18\x01 \x01(\v2 .teeproto.TLS12CBCSessionBindingR\abinding\x12D\n" +
+	"\x1eauthenticated_redacted_request\x18\x02 \x01(\fR\x1cauthenticatedRedactedRequest\x124\n" +
+	"\x16request_records_sha256\x18\x03 \x01(\fR\x14requestRecordsSha256\x12Y\n" +
+	"\x18request_redaction_ranges\x18\x04 \x03(\v2\x1f.teeproto.RequestRedactionRangeR\x16requestRedactionRanges\"\xe5\x02\n" +
+	"\x0fTLS12CBCTOutput\x12:\n" +
+	"\abinding\x18\x01 \x01(\v2 .teeproto.TLS12CBCSessionBindingR\abinding\x12F\n" +
+	"\x1fauthenticated_redacted_response\x18\x02 \x01(\fR\x1dauthenticatedRedactedResponse\x126\n" +
+	"\x17response_records_sha256\x18\x03 \x01(\fR\x15responseRecordsSha256\x12\\\n" +
+	"\x19response_redaction_ranges\x18\x04 \x03(\v2 .teeproto.ResponseRedactionRangeR\x17responseRedactionRanges\x128\n" +
+	"\x18plaintext_record_lengths\x18\x05 \x03(\rR\x16plaintextRecordLengths\"?\n" +
 	"\x11AttestationReport\x12\x12\n" +
 	"\x04type\x18\x01 \x01(\tR\x04type\x12\x16\n" +
 	"\x06report\x18\x02 \x01(\fR\x06report\"r\n" +
@@ -630,33 +807,42 @@ func file_signing_proto_rawDescGZIP() []byte {
 }
 
 var file_signing_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_signing_proto_msgTypes = make([]protoimpl.MessageInfo, 6)
+var file_signing_proto_msgTypes = make([]protoimpl.MessageInfo, 8)
 var file_signing_proto_goTypes = []any{
 	(BodyType)(0),                  // 0: teeproto.BodyType
 	(*KOutputPayload)(nil),         // 1: teeproto.KOutputPayload
 	(*TOutputPayload)(nil),         // 2: teeproto.TOutputPayload
-	(*AttestationReport)(nil),      // 3: teeproto.AttestationReport
-	(*TLSPacketInfo)(nil),          // 4: teeproto.TLSPacketInfo
-	(*OPRFOutput)(nil),             // 5: teeproto.OPRFOutput
-	(*SignedMessage)(nil),          // 6: teeproto.SignedMessage
-	(*RequestRedactionRange)(nil),  // 7: teeproto.RequestRedactionRange
-	(*CertificateInfo)(nil),        // 8: teeproto.CertificateInfo
-	(*ResponseRedactionRange)(nil), // 9: teeproto.ResponseRedactionRange
+	(*TLS12CBCKOutput)(nil),        // 3: teeproto.TLS12CBCKOutput
+	(*TLS12CBCTOutput)(nil),        // 4: teeproto.TLS12CBCTOutput
+	(*AttestationReport)(nil),      // 5: teeproto.AttestationReport
+	(*TLSPacketInfo)(nil),          // 6: teeproto.TLSPacketInfo
+	(*OPRFOutput)(nil),             // 7: teeproto.OPRFOutput
+	(*SignedMessage)(nil),          // 8: teeproto.SignedMessage
+	(*RequestRedactionRange)(nil),  // 9: teeproto.RequestRedactionRange
+	(*CertificateInfo)(nil),        // 10: teeproto.CertificateInfo
+	(*ResponseRedactionRange)(nil), // 11: teeproto.ResponseRedactionRange
+	(*TLS12CBCSessionBinding)(nil), // 12: teeproto.TLS12CBCSessionBinding
 }
 var file_signing_proto_depIdxs = []int32{
-	7, // 0: teeproto.KOutputPayload.request_redaction_ranges:type_name -> teeproto.RequestRedactionRange
-	8, // 1: teeproto.KOutputPayload.certificate_info:type_name -> teeproto.CertificateInfo
-	9, // 2: teeproto.KOutputPayload.response_redaction_ranges:type_name -> teeproto.ResponseRedactionRange
-	5, // 3: teeproto.KOutputPayload.oprf_outputs:type_name -> teeproto.OPRFOutput
-	5, // 4: teeproto.TOutputPayload.oprf_outputs:type_name -> teeproto.OPRFOutput
-	0, // 5: teeproto.SignedMessage.body_type:type_name -> teeproto.BodyType
-	3, // 6: teeproto.SignedMessage.attestation_report:type_name -> teeproto.AttestationReport
-	4, // 7: teeproto.SignedMessage.response_packets:type_name -> teeproto.TLSPacketInfo
-	8, // [8:8] is the sub-list for method output_type
-	8, // [8:8] is the sub-list for method input_type
-	8, // [8:8] is the sub-list for extension type_name
-	8, // [8:8] is the sub-list for extension extendee
-	0, // [0:8] is the sub-list for field type_name
+	9,  // 0: teeproto.KOutputPayload.request_redaction_ranges:type_name -> teeproto.RequestRedactionRange
+	10, // 1: teeproto.KOutputPayload.certificate_info:type_name -> teeproto.CertificateInfo
+	11, // 2: teeproto.KOutputPayload.response_redaction_ranges:type_name -> teeproto.ResponseRedactionRange
+	7,  // 3: teeproto.KOutputPayload.oprf_outputs:type_name -> teeproto.OPRFOutput
+	3,  // 4: teeproto.KOutputPayload.tls12_cbc:type_name -> teeproto.TLS12CBCKOutput
+	7,  // 5: teeproto.TOutputPayload.oprf_outputs:type_name -> teeproto.OPRFOutput
+	4,  // 6: teeproto.TOutputPayload.tls12_cbc:type_name -> teeproto.TLS12CBCTOutput
+	12, // 7: teeproto.TLS12CBCKOutput.binding:type_name -> teeproto.TLS12CBCSessionBinding
+	9,  // 8: teeproto.TLS12CBCKOutput.request_redaction_ranges:type_name -> teeproto.RequestRedactionRange
+	12, // 9: teeproto.TLS12CBCTOutput.binding:type_name -> teeproto.TLS12CBCSessionBinding
+	11, // 10: teeproto.TLS12CBCTOutput.response_redaction_ranges:type_name -> teeproto.ResponseRedactionRange
+	0,  // 11: teeproto.SignedMessage.body_type:type_name -> teeproto.BodyType
+	5,  // 12: teeproto.SignedMessage.attestation_report:type_name -> teeproto.AttestationReport
+	6,  // 13: teeproto.SignedMessage.response_packets:type_name -> teeproto.TLSPacketInfo
+	14, // [14:14] is the sub-list for method output_type
+	14, // [14:14] is the sub-list for method input_type
+	14, // [14:14] is the sub-list for extension type_name
+	14, // [14:14] is the sub-list for extension extendee
+	0,  // [0:14] is the sub-list for field type_name
 }
 
 func init() { file_signing_proto_init() }
@@ -671,7 +857,7 @@ func file_signing_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_signing_proto_rawDesc), len(file_signing_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   6,
+			NumMessages:   8,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

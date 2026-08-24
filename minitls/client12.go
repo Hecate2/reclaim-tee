@@ -10,6 +10,7 @@ import (
 	"crypto/sha256"
 	"crypto/sha512"
 	"crypto/x509"
+	"encoding/binary"
 	"fmt"
 	"hash"
 	"io"
@@ -36,100 +37,26 @@ func (c *Client) continueTLS12HandshakeAfterServerHello() error {
 		return fmt.Errorf("failed to process server certificate: %v", err)
 	}
 
-	// Step 4: Read ServerKeyExchange message
-	serverKeyExchange, err := c.readHandshakeMessage()
+	// Steps 4-7 depend on the selected key exchange. ECDHE consumes and
+	// verifies ServerKeyExchange; static RSA goes directly to
+	// CertificateRequest/ServerHelloDone and encrypts a fresh pre-master secret.
+	sharedSecret, clientKeyExchangeMsg, certRequestReceived, err := c.prepareTLS12KeyExchange()
 	if err != nil {
-		return fmt.Errorf("failed to read ServerKeyExchange: %v", err)
-	}
-	c.transcript = append(c.transcript, serverKeyExchange...)
-
-	// Parse ServerKeyExchange message
-	msg, err := ParseServerKeyExchange(serverKeyExchange)
-	if err != nil {
-		return fmt.Errorf("failed to parse ServerKeyExchange: %v", err)
+		return err
 	}
 
-	// Step 4.1: Verify ServerKeyExchange signature
-	if err := c.verifyServerKeyExchangeSignature(msg); err != nil {
-		return fmt.Errorf("ServerKeyExchange signature verification failed: %v", err)
-	}
-
-	// Extract server's ECDH public key
-	serverPublicKey, err := c.parseServerKeyExchange(serverKeyExchange)
-	if err != nil {
-		return fmt.Errorf("failed to parse ServerKeyExchange public key: %v", err)
-	}
-
-	// Step 4.5: Generate client ECDH key pair matching server's curve
-
-	var clientCurve ecdh.Curve
-	switch msg.GetNamedCurve() {
-	case X25519:
-		clientCurve = ecdh.X25519()
-	case secp256r1:
-		clientCurve = ecdh.P256()
-	case secp384r1:
-		clientCurve = ecdh.P384()
-	case secp521r1:
-		clientCurve = ecdh.P521()
-	default:
-		return fmt.Errorf("unsupported client curve: %d", msg.GetNamedCurve())
-	}
-
-	// Generate new client key pair using the same curve as server
-	clientPrivateKeyForTLS12, err := clientCurve.GenerateKey(rand.Reader)
-	if err != nil {
-		return fmt.Errorf("failed to generate client ECDH key: %v", err)
-	}
-
-	c.logger.Debug("Generated client ECDH key pair", zap.Uint16("curve", msg.GetNamedCurve()))
-
-	// Step 5: Check for optional CertificateRequest, then read ServerHelloDone
-	nextMsg, err := c.readHandshakeMessage()
-	if err != nil {
-		return fmt.Errorf("failed to read next handshake message: %v", err)
-	}
-	c.transcript = append(c.transcript, nextMsg...)
-
-	certRequestReceived := false
-	if len(nextMsg) > 0 && HandshakeType(nextMsg[0]) == typeCertificateRequest {
-		c.logger.Info("Server requested client certificate")
-		certRequestReceived = true
-
-		// Now read ServerHelloDone
-		serverHelloDone, err := c.readHandshakeMessage()
-		if err != nil {
-			return fmt.Errorf("failed to read ServerHelloDone after CertificateRequest: %v", err)
+	// An empty client Certificate is a handshake message and therefore must be
+	// included in an EMS session hash before ClientKeyExchange.
+	if certRequestReceived {
+		c.logger.Info("Sending empty Certificate in response to server's CertificateRequest")
+		emptyCert := c.buildEmptyCertificateMessageTLS12()
+		emptyCertRecord := c.wrapHandshakeMessage(emptyCert)
+		if _, err := c.conn.Write(emptyCertRecord); err != nil {
+			return fmt.Errorf("failed to send empty Certificate: %v", err)
 		}
-		c.transcript = append(c.transcript, serverHelloDone...)
-
-		if _, err := ParseServerHelloDone(serverHelloDone); err != nil {
-			return fmt.Errorf("failed to parse ServerHelloDone: %v", err)
-		}
-	} else if len(nextMsg) > 0 && HandshakeType(nextMsg[0]) == typeServerHelloDone {
-		// No CertificateRequest, this is directly ServerHelloDone
-		if _, err := ParseServerHelloDone(nextMsg); err != nil {
-			return fmt.Errorf("failed to parse ServerHelloDone: %v", err)
-		}
-	} else {
-		msgType := "unknown"
-		if len(nextMsg) > 0 {
-			msgType = fmt.Sprintf("%d", nextMsg[0])
-		}
-		return fmt.Errorf("unexpected handshake message type: %s (expected CertificateRequest or ServerHelloDone)", msgType)
+		c.transcript = append(c.transcript, emptyCert...)
+		c.logger.Debug("Sent empty Certificate")
 	}
-
-	c.logger.Debug("Received Server Hello Done")
-
-	// Step 6: Generate pre-master secret using ECDH
-	sharedSecret, err := clientPrivateKeyForTLS12.ECDH(serverPublicKey)
-	if err != nil {
-		return fmt.Errorf("ECDH failed: %v", err)
-	}
-
-	// Step 7: Build ClientKeyExchange message (but don't send yet)
-	clientKeyExchange := NewClientKeyExchange(clientPrivateKeyForTLS12.PublicKey().Bytes())
-	clientKeyExchangeMsg := clientKeyExchange.Marshal()
 
 	// Step 8: Calculate session hash for Extended Master Secret INCLUDING ClientKeyExchange
 	// RFC 7627 Section 4: "handshake_messages" includes all handshake messages from ClientHello
@@ -171,18 +98,6 @@ func (c *Client) continueTLS12HandshakeAfterServerHello() error {
 
 	c.logger.Debug("Master secret derived successfully")
 
-	// Step 9.5: Send empty Certificate if server requested it
-	if certRequestReceived {
-		c.logger.Info("Sending empty Certificate in response to server's CertificateRequest")
-		emptyCert := c.buildEmptyCertificateMessageTLS12()
-		emptyCertRecord := c.wrapHandshakeMessage(emptyCert)
-		if _, err := c.conn.Write(emptyCertRecord); err != nil {
-			return fmt.Errorf("failed to send empty Certificate: %v", err)
-		}
-		c.transcript = append(c.transcript, emptyCert...)
-		c.logger.Debug("Sent empty Certificate")
-	}
-
 	// Step 10: Now send ClientKeyExchange
 
 	// Wrap in TLS record
@@ -203,9 +118,9 @@ func (c *Client) continueTLS12HandshakeAfterServerHello() error {
 
 	c.logger.Debug("Sent ChangeCipherSpec")
 
-	// Step 10: Derive session keys and initialize AEAD
-	if err := c.initTLS12AEAD(); err != nil {
-		return fmt.Errorf("failed to initialize TLS 1.2 AEAD: %v", err)
+	// Step 10: Derive session keys and initialize the negotiated record layer.
+	if err := c.initTLS12RecordProtection(); err != nil {
+		return fmt.Errorf("failed to initialize TLS 1.2 record protection: %v", err)
 	}
 
 	// Step 11: Send Finished message (encrypted)
@@ -228,6 +143,115 @@ func (c *Client) continueTLS12HandshakeAfterServerHello() error {
 	// Server has sent 1 encrypted message (Finished), so readSeq=1
 
 	return nil
+}
+
+func (c *Client) prepareTLS12KeyExchange() (preMasterSecret, clientKeyExchange []byte, certRequestReceived bool, err error) {
+	switch TLS12CipherSuiteKeyExchange(c.cipherSuite) {
+	case TLS12KeyExchangeECDHE:
+		serverKeyExchange, readErr := c.readHandshakeMessage()
+		if readErr != nil {
+			return nil, nil, false, fmt.Errorf("failed to read ServerKeyExchange: %v", readErr)
+		}
+		c.transcript = append(c.transcript, serverKeyExchange...)
+		msg, parseErr := ParseServerKeyExchange(serverKeyExchange)
+		if parseErr != nil {
+			return nil, nil, false, fmt.Errorf("failed to parse ServerKeyExchange: %v", parseErr)
+		}
+		if verifyErr := c.verifyServerKeyExchangeSignature(msg); verifyErr != nil {
+			return nil, nil, false, fmt.Errorf("ServerKeyExchange signature verification failed: %v", verifyErr)
+		}
+		serverPublicKey, parseErr := c.parseServerKeyExchange(serverKeyExchange)
+		if parseErr != nil {
+			return nil, nil, false, fmt.Errorf("failed to parse ServerKeyExchange public key: %v", parseErr)
+		}
+
+		var clientCurve ecdh.Curve
+		switch msg.GetNamedCurve() {
+		case X25519:
+			clientCurve = ecdh.X25519()
+		case secp256r1:
+			clientCurve = ecdh.P256()
+		case secp384r1:
+			clientCurve = ecdh.P384()
+		case secp521r1:
+			clientCurve = ecdh.P521()
+		default:
+			return nil, nil, false, fmt.Errorf("unsupported client curve: %d", msg.GetNamedCurve())
+		}
+		privateKey, generateErr := clientCurve.GenerateKey(rand.Reader)
+		if generateErr != nil {
+			return nil, nil, false, fmt.Errorf("failed to generate client ECDH key: %v", generateErr)
+		}
+		c.logger.Debug("Generated client ECDH key pair", zap.Uint16("curve", msg.GetNamedCurve()))
+		certRequestReceived, err = c.readTLS12ServerHelloDone()
+		if err != nil {
+			return nil, nil, false, err
+		}
+		secret, ecdhErr := privateKey.ECDH(serverPublicKey)
+		if ecdhErr != nil {
+			return nil, nil, false, fmt.Errorf("ECDH failed: %v", ecdhErr)
+		}
+		return secret, NewClientKeyExchange(privateKey.PublicKey().Bytes()).Marshal(), certRequestReceived, nil
+
+	case TLS12KeyExchangeRSA:
+		certRequestReceived, err = c.readTLS12ServerHelloDone()
+		if err != nil {
+			return nil, nil, false, err
+		}
+		if len(c.serverCertificates) == 0 {
+			return nil, nil, false, fmt.Errorf("server certificate is unavailable for RSA key exchange")
+		}
+		publicKey, ok := c.serverCertificates[0].PublicKey.(*rsa.PublicKey)
+		if !ok {
+			return nil, nil, false, fmt.Errorf("static RSA cipher suite requires an RSA server certificate")
+		}
+		secret := make([]byte, 48)
+		if _, randomErr := io.ReadFull(rand.Reader, secret); randomErr != nil {
+			return nil, nil, false, fmt.Errorf("failed to generate RSA pre-master secret: %v", randomErr)
+		}
+		secret[0] = byte(VersionTLS12 >> 8)
+		secret[1] = byte(VersionTLS12 & 0xff)
+		encryptedSecret, encryptErr := rsa.EncryptPKCS1v15(rand.Reader, publicKey, secret)
+		if encryptErr != nil {
+			return nil, nil, false, fmt.Errorf("failed to encrypt RSA pre-master secret: %v", encryptErr)
+		}
+		return secret, NewRSAClientKeyExchange(encryptedSecret).Marshal(), certRequestReceived, nil
+	default:
+		return nil, nil, false, fmt.Errorf("unsupported TLS 1.2 key exchange for cipher suite 0x%04x", c.cipherSuite)
+	}
+}
+
+func (c *Client) readTLS12ServerHelloDone() (bool, error) {
+	nextMsg, err := c.readHandshakeMessage()
+	if err != nil {
+		return false, fmt.Errorf("failed to read next handshake message: %v", err)
+	}
+	c.transcript = append(c.transcript, nextMsg...)
+	if len(nextMsg) == 0 {
+		return false, fmt.Errorf("empty handshake message before ServerHelloDone")
+	}
+
+	if HandshakeType(nextMsg[0]) == typeCertificateRequest {
+		c.logger.Info("Server requested client certificate")
+		serverHelloDone, readErr := c.readHandshakeMessage()
+		if readErr != nil {
+			return false, fmt.Errorf("failed to read ServerHelloDone after CertificateRequest: %v", readErr)
+		}
+		c.transcript = append(c.transcript, serverHelloDone...)
+		if _, parseErr := ParseServerHelloDone(serverHelloDone); parseErr != nil {
+			return false, fmt.Errorf("failed to parse ServerHelloDone: %v", parseErr)
+		}
+		c.logger.Debug("Received Server Hello Done")
+		return true, nil
+	}
+	if HandshakeType(nextMsg[0]) != typeServerHelloDone {
+		return false, fmt.Errorf("unexpected handshake message type %d before ServerHelloDone", nextMsg[0])
+	}
+	if _, err := ParseServerHelloDone(nextMsg); err != nil {
+		return false, fmt.Errorf("failed to parse ServerHelloDone: %v", err)
+	}
+	c.logger.Debug("Received Server Hello Done")
+	return false, nil
 }
 
 // processServerCertificateTLS12 processes a TLS 1.2 server certificate message
@@ -282,6 +306,9 @@ func (c *Client) processServerCertificateTLS12(data []byte) error {
 	if len(certs) == 0 {
 		return fmt.Errorf("no certificates received")
 	}
+	if err := c.validateTLS12CertificateAuthentication(certs[0]); err != nil {
+		return err
+	}
 
 	// Store certificates for signature verification
 	c.serverCertificates = certs
@@ -301,6 +328,25 @@ func (c *Client) processServerCertificateTLS12(data []byte) error {
 		zap.String("hostname", c.serverName),
 		zap.Int("cert_count", len(certs)))
 
+	return nil
+}
+
+func (c *Client) validateTLS12CertificateAuthentication(certificate *x509.Certificate) error {
+	if certificate == nil {
+		return fmt.Errorf("TLS 1.2 server certificate is nil")
+	}
+	switch TLS12CipherSuiteAuthentication(c.cipherSuite) {
+	case TLS12AuthenticationRSA:
+		if _, ok := certificate.PublicKey.(*rsa.PublicKey); !ok {
+			return fmt.Errorf("TLS 1.2 RSA-authenticated cipher suite requires an RSA server certificate")
+		}
+	case TLS12AuthenticationECDSA:
+		if _, ok := certificate.PublicKey.(*ecdsa.PublicKey); !ok {
+			return fmt.Errorf("TLS 1.2 ECDSA-authenticated cipher suite requires an ECDSA server certificate")
+		}
+	default:
+		return fmt.Errorf("unsupported TLS 1.2 authentication for cipher suite 0x%04x", c.cipherSuite)
+	}
 	return nil
 }
 
@@ -371,6 +417,18 @@ func (c *Client) verifyServerKeyExchangeSignature(msg *ServerKeyExchangeMsg) err
 	algInfo, supported := supportedSignatureAlgorithms[signAlg]
 	if !supported {
 		return fmt.Errorf("unsupported signature algorithm: 0x%04x", signAlg)
+	}
+	switch TLS12CipherSuiteAuthentication(c.cipherSuite) {
+	case TLS12AuthenticationRSA:
+		if algInfo.algType != sigTypeRSAPSS && algInfo.algType != sigTypeRSAPKCS1 {
+			return fmt.Errorf("TLS 1.2 RSA-authenticated cipher suite received %s signature", algInfo.name)
+		}
+	case TLS12AuthenticationECDSA:
+		if algInfo.algType != sigTypeECDSA {
+			return fmt.Errorf("TLS 1.2 ECDSA-authenticated cipher suite received %s signature", algInfo.name)
+		}
+	default:
+		return fmt.Errorf("unsupported TLS 1.2 authentication for cipher suite 0x%04x", c.cipherSuite)
 	}
 
 	c.logger.Debug("Verifying ServerKeyExchange signature",
@@ -519,6 +577,25 @@ func (c *Client) initTLS12AEAD() error {
 	return nil
 }
 
+func (c *Client) initTLS12RecordProtection() error {
+	if !IsTLS12CBCCipherSuite(c.cipherSuite) {
+		return c.initTLS12AEAD()
+	}
+	keys, err := c.tls12KeySchedule.DeriveCBCKeys()
+	if err != nil {
+		return err
+	}
+	mode := TLS12CBCRecordModeMACThenEncrypt
+	if c.encryptThenMAC {
+		mode = TLS12CBCRecordModeEncryptThenMAC
+	}
+	c.tls12CBC, err = NewTLS12CBCContext(keys, c.cipherSuite, mode)
+	if err != nil {
+		return fmt.Errorf("create TLS 1.2 CBC context: %v", err)
+	}
+	return nil
+}
+
 // sendTLS12Finished sends a TLS 1.2 Finished message
 func (c *Client) sendTLS12Finished(isClient bool) error {
 	// Calculate handshake hash for finished message
@@ -545,6 +622,17 @@ func (c *Client) sendTLS12Finished(isClient bool) error {
 
 	// Calculate the expected ciphertext length
 	plaintext := finishedMsgBytes // Encrypt the entire handshake message (header + verify_data)
+	if c.tls12CBC != nil {
+		record, err := c.tls12CBC.EncryptRecord(recordTypeHandshake, plaintext)
+		if err != nil {
+			return fmt.Errorf("failed to encrypt CBC Finished message: %v", err)
+		}
+		if _, err := c.conn.Write(record); err != nil {
+			return fmt.Errorf("failed to send Finished message: %v", err)
+		}
+		c.transcript = append(c.transcript, finishedMsgBytes...)
+		return nil
+	}
 
 	// For AES-GCM: explicit_iv(8) + plaintext + AEAD_tag(16)
 	// For ChaCha20: plaintext + AEAD_tag(16)
@@ -599,33 +687,36 @@ func (c *Client) readAndVerifyTLS12Finished(isClient bool) error {
 	}
 
 	recordLength := int(header[3])<<8 | int(header[4])
+	if header[0] != recordTypeHandshake || binary.BigEndian.Uint16(header[1:3]) != VersionTLS12 {
+		return fmt.Errorf("invalid TLS 1.2 Finished record header")
+	}
 	encryptedPayload := make([]byte, recordLength)
 	if _, err := io.ReadFull(c.conn, encryptedPayload); err != nil {
 		return fmt.Errorf("failed to read encrypted Finished: %v", err)
 	}
 
-	// For AAD, we need the plaintext length, not ciphertext length
-	// AES-GCM: record = explicit_iv(8) + encrypted_data + auth_tag(16)
-	// ChaCha20: record = encrypted_data + auth_tag(16)
-	var plaintextLength int
-	if c.cipherSuite == TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256 ||
-		c.cipherSuite == TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256 ||
-		c.cipherSuite == TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384 ||
-		c.cipherSuite == TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384 {
-		// AES-GCM: subtract explicit_iv(8) + auth_tag(16)
-		plaintextLength = recordLength - 8 - 16
+	var plaintext []byte
+	var err error
+	if c.tls12CBC != nil {
+		plaintext, err = c.tls12CBC.DecryptRecord(header, encryptedPayload)
+		if err != nil {
+			return fmt.Errorf("failed to decrypt Finished message: %v", err)
+		}
 	} else {
-		// ChaCha20: subtract only auth_tag(16)
-		plaintextLength = recordLength - 16
-	}
-
-	aadHeader := []byte{header[0], header[1], header[2],
-		byte(plaintextLength >> 8), byte(plaintextLength)}
-
-	// Decrypt the Finished message using correct AAD
-	plaintext, err := c.tls12AEAD.Decrypt(encryptedPayload, aadHeader)
-	if err != nil {
-		return fmt.Errorf("failed to decrypt Finished message: %v", err)
+		// For AEAD AAD, use the plaintext length rather than wire length.
+		plaintextLength := recordLength - 16
+		if IsTLS12AESGCMCipherSuite(c.cipherSuite) {
+			plaintextLength -= 8
+		}
+		if plaintextLength < 0 {
+			return fmt.Errorf("invalid TLS 1.2 Finished record length")
+		}
+		aadHeader := []byte{header[0], header[1], header[2],
+			byte(plaintextLength >> 8), byte(plaintextLength)}
+		plaintext, err = c.tls12AEAD.Decrypt(encryptedPayload, aadHeader)
+		if err != nil {
+			return fmt.Errorf("failed to decrypt Finished message: %v", err)
+		}
 	}
 
 	// Parse the Finished message
@@ -649,18 +740,7 @@ func (c *Client) readAndVerifyTLS12Finished(isClient bool) error {
 
 // calculateHandshakeHash calculates the handshake hash for TLS 1.2
 func (c *Client) calculateHandshakeHash() []byte {
-	var hasher hash.Hash
-
-	// Choose hash function based on cipher suite
-	switch c.cipherSuite {
-	case TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256, TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
-		TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256, TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256:
-		hasher = sha256.New()
-	case TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384, TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384:
-		hasher = sha512.New384()
-	default:
-		hasher = sha256.New() // Default to SHA-256
-	}
+	hasher := c.getHashFuncForCipher(c.cipherSuite)()
 
 	hasher.Write(c.transcript)
 	return hasher.Sum(nil)
@@ -668,16 +748,11 @@ func (c *Client) calculateHandshakeHash() []byte {
 
 // getHashFuncForCipher returns the hash function for a given cipher suite
 func (c *Client) getHashFuncForCipher(cipherSuite uint16) func() hash.Hash {
-	switch cipherSuite {
-	case TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256, TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
-		TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256, TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256:
-		return sha256.New
-	case TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384, TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384:
-		return sha512.New384 // SHA-384
-	default:
-		// Default to SHA-256 for unknown cipher suites
-		return sha256.New
+	info := GetCipherSuiteInfo(cipherSuite)
+	if info != nil && info.HashFunc == "SHA384" {
+		return sha512.New384
 	}
+	return sha256.New
 }
 
 // readChangeCipherSpec reads and validates a ChangeCipherSpec message

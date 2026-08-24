@@ -332,6 +332,9 @@ func (c *Client) sendRedactionSpec() error {
 		c.terminateConnectionWithError("Failed to analyze response redaction", err)
 		return fmt.Errorf("failed to analyze response redaction: %w", err)
 	}
+	if minitls.IsTLS12CBCCipherSuite(c.cipherSuite) && len(c.oprfRedactionRanges) != 0 {
+		return fmt.Errorf("legacy ZK TOPRF is not supported for TLS 1.2 CBC; use MPC OPRF ranges")
+	}
 
 	// Send redaction spec to TEE_K using protobuf envelope
 	if !c.hasTEEConnection("TEE_K") {
@@ -358,6 +361,11 @@ func (c *Client) sendRedactionSpec() error {
 	pr := make([]*teeproto.ResponseRedactionRange, 0, len(redactionSpec.Ranges))
 	for _, r := range redactionSpec.Ranges {
 		pr = append(pr, &teeproto.ResponseRedactionRange{Start: int32(r.Start), Length: int32(r.Length)})
+	}
+	if minitls.IsTLS12CBCCipherSuite(c.cipherSuite) {
+		c.cbcMutex.Lock()
+		c.cbcResponseRedactionRanges = append([]shared.ResponseRedactionRange(nil), redactionSpec.Ranges...)
+		c.cbcMutex.Unlock()
 	}
 
 	env := &teeproto.Envelope{SessionId: c.sessionID, TimestampMs: time.Now().UnixMilli(),

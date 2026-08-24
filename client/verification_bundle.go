@@ -150,6 +150,9 @@ func (c *Client) PrepareZKProofForTOPRF(httpRangeStart, httpRangeEnd int, toprfM
 
 // BuildVerificationBundleData collects all artefacts and processes OPRF for hashed ranges
 func (c *Client) BuildVerificationBundleData(attestorClient *AttestorClient, providerParams *providers.HTTPProviderParams) ([]byte, error) {
+	if minitls.IsTLS12CBCCipherSuite(c.cipherSuite) && len(c.oprfRedactionRanges) != 0 {
+		return nil, fmt.Errorf("legacy ZK TOPRF is not supported for TLS 1.2 CBC; use MPC OPRF ranges")
+	}
 	// Verify MPC OPRF outputs match between TEE_K and TEE_T
 	if err := c.verifyOPRFMPCOutputsMatch(); err != nil {
 		return nil, fmt.Errorf("MPC OPRF verification failed: %w", err)

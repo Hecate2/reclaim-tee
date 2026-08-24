@@ -61,7 +61,6 @@ func (t *TEEK) performTLSHandshakeAndHTTP(sessionID string) error {
 	if effectiveCipherSuite == "" {
 		effectiveCipherSuite = t.forceCipherSuite
 	}
-
 	switch effectiveTLSVersion {
 	case "1.2":
 		config.MinVersion = minitls.VersionTLS12
@@ -110,9 +109,6 @@ func (t *TEEK) performTLSHandshakeAndHTTP(sessionID string) error {
 		return err
 	}
 
-	// Update TEE_K session state to mark handshake complete
-	tlsState.HandshakeComplete = true
-
 	// Extract certificate info from TLS client for structured storage
 	session, sessionErr := t.sessionManager.GetSession(sessionID)
 	if sessionErr == nil && tlsClient.GetCertificateInfo() != nil {
@@ -124,6 +120,18 @@ func (t *TEEK) performTLSHandshakeAndHTTP(sessionID string) error {
 	// Store cipher suite for session
 	cipherSuite := tlsClient.GetCipherSuite()
 	tlsState.CipherSuite = cipherSuite
+	var cbcBinding *teeproto.TLS12CBCSessionBinding
+	if minitls.IsTLS12CBCCipherSuite(cipherSuite) {
+		cbcBinding, err = t.handOffTLS12CBCReadState(sessionID, tlsState)
+		if err != nil {
+			t.terminateSessionWithError(sessionID, shared.ReasonProtocolViolation, err, "TLS 1.2 CBC read-state handoff failed")
+			return err
+		}
+	}
+
+	// Publish handshake completion only after TEE_T has acknowledged any CBC
+	// server-read state. The client cannot send application data before this.
+	tlsState.HandshakeComplete = true
 
 	// Log domain at INFO so a tag-fail (logged on TEE_T by sid) can be tied to
 	// a target host and reproduced locally without client logs.
@@ -138,8 +146,9 @@ func (t *TEEK) performTLSHandshakeAndHTTP(sessionID string) error {
 	// Send handshake complete message
 	envHandshake := &teeproto.Envelope{SessionId: sessionID, TimestampMs: time.Now().UnixMilli(),
 		Payload: &teeproto.Envelope_HandshakeComplete{HandshakeComplete: &teeproto.HandshakeComplete{
-			Success:     true,
-			CipherSuite: uint32(cipherSuite), // Include cipher suite for consolidated verification
+			Success:         true,
+			CipherSuite:     uint32(cipherSuite), // Include cipher suite for consolidated verification
+			Tls12CbcBinding: cbcBinding,
 		}},
 	}
 

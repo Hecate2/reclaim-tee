@@ -203,7 +203,14 @@ type Client struct {
 	decryptionStreamBySeq map[uint64][]byte           // Store decryption streams by sequence
 
 	// Batched response tracking (collection until EOF)
-	batchedResponses []shared.EncryptedResponseData // Collect response packets until EOF
+	batchedResponses            []shared.EncryptedResponseData // Collect response packets until EOF
+	cbcMutex                    sync.Mutex
+	cbcBinding                  *teeproto.TLS12CBCSessionBinding
+	cbcResponseRecords          []*teeproto.TLSRecord
+	cbcRequestDigest            []byte
+	cbcResponseDigest           []byte
+	cbcResponsePlaintextLengths []uint32
+	cbcResponseRedactionRanges  []shared.ResponseRedactionRange
 
 	// recordState is this session's TLS record-reassembly buffer. Per-Client
 	// (never a package global) so an overlapping session/retry can't splice or

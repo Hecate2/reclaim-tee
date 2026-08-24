@@ -386,12 +386,34 @@ func (t *TEEK) handleRedactionSpec(sessionID string, msg *shared.Message) error 
 		t.terminateSessionWithError(sessionID, shared.ReasonInternalError, err, "Failed to store redaction ranges")
 		return err
 	}
+	teekState, err := t.sessionManager.GetTEEKSessionState(sessionID)
+	if err != nil {
+		t.terminateSessionWithError(sessionID, shared.ReasonInternalError, err, "Failed to get TLS session state")
+		return err
+	}
+	if isTLS12CBCSession(teekState) && !teekState.CBCRedactionSpecReceived.CompareAndSwap(false, true) {
+		err = fmt.Errorf("multiple TLS 1.2 CBC response redaction specifications received")
+		t.terminateSessionWithError(sessionID, shared.ReasonProtocolViolation, err, "Multiple CBC response redaction specifications")
+		return err
+	}
 
 	if session.ResponseState == nil {
 		session.ResponseState = &shared.ResponseSessionState{}
 	}
 	session.ResponseState.ResponseRedactionRanges = redactionSpec.Ranges
 	t.logger.WithSession(sessionID).Debug("Stored response redaction ranges")
+	if isTLS12CBCSession(teekState) {
+		teekState.setCBCResponseRedactionSpec(redactionSpec)
+		if !teekState.CBCCiphertextReady.Load() {
+			t.logger.WithSession(sessionID).Debug("CBC response redaction queued until authenticated response length arrives")
+			return nil
+		}
+		if err := t.processTLS12CBCResponseRedactionSpec(sessionID, teekState); err != nil {
+			t.terminateSessionWithError(sessionID, shared.ReasonProtocolViolation, err, "Failed to process TLS 1.2 CBC response redaction")
+			return err
+		}
+		return nil
+	}
 
 	// Generate and send redacted decryption streams
 	if err := t.generateAndSendRedactedDecryptionStreamResponse(sessionID, redactionSpec); err != nil {

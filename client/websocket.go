@@ -1,7 +1,10 @@
 package client
 
 import (
+	"bytes"
+	"encoding/binary"
 	"fmt"
+	"io"
 	"net/url"
 	"strings"
 	"time"
@@ -295,7 +298,7 @@ func (c *Client) handleMessages(conn *websocket.Conn, generation uint64, done ch
 			msg := &shared.Message{Type: shared.MsgSendTCPData, SessionID: env.GetSessionId(), Data: shared.TCPData{Data: p.TcpData.GetData()}, Timestamp: time.UnixMilli(env.GetTimestampMs())}
 			c.handleSendTCPData(msg)
 		case *teeproto.Envelope_HandshakeComplete:
-			msg := &shared.Message{Type: shared.MsgHandshakeComplete, SessionID: env.GetSessionId(), Data: shared.HandshakeCompleteData{Success: p.HandshakeComplete.GetSuccess(), CertificateChain: p.HandshakeComplete.GetCertificateChain(), CipherSuite: uint16(p.HandshakeComplete.GetCipherSuite())}, Timestamp: time.UnixMilli(env.GetTimestampMs())}
+			msg := &shared.Message{Type: shared.MsgHandshakeComplete, SessionID: env.GetSessionId(), Data: shared.HandshakeCompleteData{Success: p.HandshakeComplete.GetSuccess(), CertificateChain: p.HandshakeComplete.GetCertificateChain(), CipherSuite: uint16(p.HandshakeComplete.GetCipherSuite()), TLS12CBCBinding: p.HandshakeComplete.GetTls12CbcBinding()}, Timestamp: time.UnixMilli(env.GetTimestampMs())}
 			c.handleHandshakeComplete(msg)
 		case *teeproto.Envelope_SessionReady:
 			msg := &shared.Message{Type: shared.MsgSessionReady, SessionID: env.GetSessionId(), Data: shared.SessionReadyData{SessionID: env.GetSessionId(), Ready: p.SessionReady.GetReady()}, Timestamp: time.UnixMilli(env.GetTimestampMs())}
@@ -319,12 +322,84 @@ func (c *Client) handleMessages(conn *websocket.Conn, generation uint64, done ch
 			}
 			msg := &shared.Message{Type: shared.MsgBatchedDecryptionStreams, SessionID: env.GetSessionId(), Data: shared.BatchedDecryptionStreamData{DecryptionStreams: ds, SessionID: p.BatchedDecryptionStreams.GetSessionId(), TotalCount: int(p.BatchedDecryptionStreams.GetTotalCount())}, Timestamp: time.UnixMilli(env.GetTimestampMs())}
 			c.handleBatchedDecryptionStreams(msg)
+		case *teeproto.Envelope_BatchedTlsRecords:
+			if err := c.handleBatchedTLS12CBCRequest(env.GetSessionId(), p.BatchedTlsRecords); err != nil {
+				c.terminateConnectionWithError("Invalid TLS 1.2 CBC request records", err)
+				return
+			}
 		default:
 			if !c.isClosing.Load() {
 				c.logger.Error("Unknown message payload from TEE_K")
 			}
 		}
 	}
+}
+
+func (c *Client) handleBatchedTLS12CBCRequest(sessionID string, batch *teeproto.BatchedTLSRecords) error {
+	c.cbcMutex.Lock()
+	hasBinding := c.cbcBinding != nil
+	c.cbcMutex.Unlock()
+	if !hasBinding || !minitls.IsTLS12CBCCipherSuite(c.cipherSuite) {
+		return fmt.Errorf("TLS 1.2 CBC request records received outside a CBC session")
+	}
+	if sessionID == "" || sessionID != c.sessionID {
+		return fmt.Errorf("TLS 1.2 CBC request session mismatch")
+	}
+	records := batch.GetRecords()
+	if len(records) == 0 || len(records) > shared.MaxEncryptedFragments {
+		return fmt.Errorf("invalid TLS 1.2 CBC request record count: %d", len(records))
+	}
+	if c.httpRequestSent.Load() {
+		return fmt.Errorf("duplicate TLS 1.2 CBC request record batch")
+	}
+	digest, err := shared.TLS12CBCRecordDigest(shared.TLS12CBCRequestDigestDomain, records)
+	if err != nil {
+		return fmt.Errorf("digest TLS 1.2 CBC request records: %w", err)
+	}
+	conn := c.tcpConn
+	if conn == nil {
+		return fmt.Errorf("TCP connection to target website not established")
+	}
+
+	wireRecords := make([][]byte, 0, len(records))
+	for i, record := range records {
+		if record == nil {
+			return fmt.Errorf("nil TLS 1.2 CBC request record at index %d", i)
+		}
+		header := record.GetHeader()
+		payload := record.GetPayload()
+		wantSeq := uint64(i + 1)
+		if record.GetSeqNum() != wantSeq {
+			return fmt.Errorf("TLS 1.2 CBC request sequence is %d, want %d", record.GetSeqNum(), wantSeq)
+		}
+		if len(header) != 5 || header[0] != minitls.RecordTypeApplicationData ||
+			binary.BigEndian.Uint16(header[1:3]) != minitls.VersionTLS12 ||
+			int(binary.BigEndian.Uint16(header[3:5])) != len(payload) {
+			return fmt.Errorf("invalid TLS 1.2 CBC request record header at sequence %d", wantSeq)
+		}
+
+		wireRecord := make([]byte, 0, len(header)+len(payload))
+		wireRecord = append(wireRecord, header...)
+		wireRecord = append(wireRecord, payload...)
+		wireRecords = append(wireRecords, wireRecord)
+	}
+
+	for i, wireRecord := range wireRecords {
+		c.capturedTrafficMu.Lock()
+		c.capturedTraffic = append(c.capturedTraffic, append([]byte(nil), wireRecord...))
+		c.capturedTrafficMu.Unlock()
+		if _, err := io.CopyN(conn, bytes.NewReader(wireRecord), int64(len(wireRecord))); err != nil {
+			return fmt.Errorf("write TLS 1.2 CBC request record %d: %w", i+1, err)
+		}
+	}
+
+	c.cbcMutex.Lock()
+	c.cbcRequestDigest = digest
+	c.cbcMutex.Unlock()
+	c.httpRequestSent.Store(true)
+	c.httpResponseExpected = true
+	c.logger.Info("HTTP request sent as TLS 1.2 CBC records", zap.Int("records", len(records)))
+	return nil
 }
 
 // handleTEETMessages handles incoming messages from TEE_T
@@ -357,6 +432,11 @@ func (c *Client) handleTEETMessages(conn *websocket.Conn, generation uint64, don
 			}
 			c.logger.Info("TEE_T SignedMessage verified")
 			c.checkForProtocolCompletion()
+		case *teeproto.Envelope_AuthenticatedCbcResponse:
+			if err := c.handleAuthenticatedTLS12CBCResponse(env.GetSessionId(), p.AuthenticatedCbcResponse); err != nil {
+				c.terminateConnectionWithError("Invalid authenticated TLS 1.2 CBC response", err)
+				return
+			}
 		case *teeproto.Envelope_Error:
 			msg := &shared.Message{Type: shared.MsgError, SessionID: env.GetSessionId(), Data: shared.ErrorData{Message: p.Error.GetMessage()}, Timestamp: time.UnixMilli(env.GetTimestampMs())}
 			c.handleTEETError(msg)

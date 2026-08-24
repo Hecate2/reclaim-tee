@@ -126,23 +126,40 @@ func (t *TEEK) generateComprehensiveSignatureForSession(session *shared.Session,
 		TimestampMs:     uint64(timestampMs), // Include signed timestamp
 		AttestationType: signedAttestationType,
 	}
-	if requestMetadata != nil {
-		kPayload.RedactedRequest = requestMetadata.RedactedRequest
-		for _, r := range requestMetadata.RedactionRanges {
-			kPayload.RequestRedactionRanges = append(kPayload.RequestRedactionRanges, &teeproto.RequestRedactionRange{Start: int32(r.Start), Length: int32(r.Length), Type: r.Type})
+	isCBC := isTLS12CBCSession(teekState)
+	if isCBC {
+		cbcSnapshot := teekState.snapshotTLS12CBCSigningState()
+		if err := validateTLS12CBCBinding(cbcSnapshot.binding); err != nil {
+			return err
+		}
+		if len(cbcSnapshot.redactedRequest) == 0 || len(cbcSnapshot.requestDigest) != 32 {
+			return fmt.Errorf("TLS 1.2 CBC request transcript is incomplete")
+		}
+		kPayload.Tls12Cbc = &teeproto.TLS12CBCKOutput{
+			Binding:                      cbcSnapshot.binding,
+			AuthenticatedRedactedRequest: cbcSnapshot.redactedRequest,
+			RequestRecordsSha256:         cbcSnapshot.requestDigest,
+			RequestRedactionRanges:       cbcSnapshot.requestRedactions,
+		}
+	} else {
+		if requestMetadata != nil {
+			kPayload.RedactedRequest = requestMetadata.RedactedRequest
+			for _, r := range requestMetadata.RedactionRanges {
+				kPayload.RequestRedactionRanges = append(kPayload.RequestRedactionRanges, &teeproto.RequestRedactionRange{Start: int32(r.Start), Length: int32(r.Length), Type: r.Type})
+			}
+		}
+		// Use consolidated keystream from session for SignedMessage
+		kPayload.ConsolidatedResponseKeystream = session.ConsolidatedResponseKeystream
+		if session.ResponseState != nil && len(session.ResponseState.ResponseRedactionRanges) > 0 {
+			for _, rr := range session.ResponseState.ResponseRedactionRanges {
+				kPayload.ResponseRedactionRanges = append(kPayload.ResponseRedactionRanges, &teeproto.ResponseRedactionRange{Start: int32(rr.Start), Length: int32(rr.Length)})
+			}
+			t.logger.WithSession(sessionID).Debug("Included response redaction ranges in signed payload", zap.Int("ranges", len(session.ResponseState.ResponseRedactionRanges)))
 		}
 	}
-	// Use consolidated keystream from session for SignedMessage
-	kPayload.ConsolidatedResponseKeystream = session.ConsolidatedResponseKeystream
 
 	// Include certificate info in signed payload
 	kPayload.CertificateInfo = session.CertificateInfo
-	if session.ResponseState != nil && len(session.ResponseState.ResponseRedactionRanges) > 0 {
-		for _, rr := range session.ResponseState.ResponseRedactionRanges {
-			kPayload.ResponseRedactionRanges = append(kPayload.ResponseRedactionRanges, &teeproto.ResponseRedactionRange{Start: int32(rr.Start), Length: int32(rr.Length)})
-		}
-		t.logger.WithSession(sessionID).Debug("Included response redaction ranges in signed payload", zap.Int("ranges", len(session.ResponseState.ResponseRedactionRanges)))
-	}
 
 	// Include OPRF outputs in signed payload
 	if teekState != nil {
@@ -201,7 +218,7 @@ func (t *TEEK) generateComprehensiveSignatureForSession(session *shared.Session,
 
 	// Get TLS state for packet metadata
 	tlsState := teekState
-	if tlsState != nil && tlsState.TLSClient != nil {
+	if !isCBC && tlsState != nil && tlsState.TLSClient != nil {
 		tlsClient := tlsState.TLSClient
 		cipherSuite = uint32(tlsClient.GetCipherSuite())
 

@@ -29,6 +29,10 @@ message KOutputPayload {
   // Attestation generation asserted by the TEE and covered by this signature.
   // Old clients ignore this field but preserve the original body bytes.
   string attestation_type = 11;
+
+  // Present only for the trusted-TEE TLS 1.2 CBC contract. Legacy AEAD
+  // keystream semantics must not be mixed with this field.
+  TLS12CBCKOutput tls12_cbc = 12;
 }
 
 message TOutputPayload {
@@ -48,6 +52,25 @@ message TOutputPayload {
   // Attestation generation asserted by the TEE and covered by this signature.
   // Old clients ignore this field but preserve the original body bytes.
   string attestation_type = 11;
+
+  // Present only for the trusted-TEE TLS 1.2 CBC contract. The response is
+  // authenticated plaintext, not a split-AEAD ciphertext share.
+  TLS12CBCTOutput tls12_cbc = 12;
+}
+
+message TLS12CBCKOutput {
+  TLS12CBCSessionBinding binding = 1;
+  bytes authenticated_redacted_request = 2;
+  bytes request_records_sha256 = 3;
+  repeated RequestRedactionRange request_redaction_ranges = 4;
+}
+
+message TLS12CBCTOutput {
+  TLS12CBCSessionBinding binding = 1;
+  bytes authenticated_redacted_response = 2;
+  bytes response_records_sha256 = 3;
+  repeated ResponseRedactionRange response_redaction_ranges = 4;
+  repeated uint32 plaintext_record_lengths = 5;
 }
 
 // Attestation report with structured data
@@ -90,4 +113,3 @@ message SignedMessage {
   bytes server_app_key = 7;
   uint32 cipher_suite = 8;
 }
-

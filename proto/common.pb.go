@@ -21,6 +21,132 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+type TLS12CBCRecordMode int32
+
+const (
+	TLS12CBCRecordMode_TLS12_CBC_RECORD_MODE_UNSPECIFIED      TLS12CBCRecordMode = 0
+	TLS12CBCRecordMode_TLS12_CBC_RECORD_MODE_MAC_THEN_ENCRYPT TLS12CBCRecordMode = 1
+	TLS12CBCRecordMode_TLS12_CBC_RECORD_MODE_ENCRYPT_THEN_MAC TLS12CBCRecordMode = 2
+)
+
+// Enum value maps for TLS12CBCRecordMode.
+var (
+	TLS12CBCRecordMode_name = map[int32]string{
+		0: "TLS12_CBC_RECORD_MODE_UNSPECIFIED",
+		1: "TLS12_CBC_RECORD_MODE_MAC_THEN_ENCRYPT",
+		2: "TLS12_CBC_RECORD_MODE_ENCRYPT_THEN_MAC",
+	}
+	TLS12CBCRecordMode_value = map[string]int32{
+		"TLS12_CBC_RECORD_MODE_UNSPECIFIED":      0,
+		"TLS12_CBC_RECORD_MODE_MAC_THEN_ENCRYPT": 1,
+		"TLS12_CBC_RECORD_MODE_ENCRYPT_THEN_MAC": 2,
+	}
+)
+
+func (x TLS12CBCRecordMode) Enum() *TLS12CBCRecordMode {
+	p := new(TLS12CBCRecordMode)
+	*p = x
+	return p
+}
+
+func (x TLS12CBCRecordMode) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (TLS12CBCRecordMode) Descriptor() protoreflect.EnumDescriptor {
+	return file_common_proto_enumTypes[0].Descriptor()
+}
+
+func (TLS12CBCRecordMode) Type() protoreflect.EnumType {
+	return &file_common_proto_enumTypes[0]
+}
+
+func (x TLS12CBCRecordMode) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use TLS12CBCRecordMode.Descriptor instead.
+func (TLS12CBCRecordMode) EnumDescriptor() ([]byte, []int) {
+	return file_common_proto_rawDescGZIP(), []int{0}
+}
+
+// Shared, signed binding for the trusted-TEE TLS 1.2 CBC contract.
+type TLS12CBCSessionBinding struct {
+	state                protoimpl.MessageState `protogen:"open.v1"`
+	ContractVersion      uint32                 `protobuf:"varint,1,opt,name=contract_version,json=contractVersion,proto3" json:"contract_version,omitempty"`
+	CipherSuite          uint32                 `protobuf:"varint,2,opt,name=cipher_suite,json=cipherSuite,proto3" json:"cipher_suite,omitempty"`
+	RecordMode           TLS12CBCRecordMode     `protobuf:"varint,3,opt,name=record_mode,json=recordMode,proto3,enum=teeproto.TLS12CBCRecordMode" json:"record_mode,omitempty"`
+	ExtendedMasterSecret bool                   `protobuf:"varint,4,opt,name=extended_master_secret,json=extendedMasterSecret,proto3" json:"extended_master_secret,omitempty"`
+	SessionBinding       []byte                 `protobuf:"bytes,5,opt,name=session_binding,json=sessionBinding,proto3" json:"session_binding,omitempty"` // exactly 32 random bytes
+	unknownFields        protoimpl.UnknownFields
+	sizeCache            protoimpl.SizeCache
+}
+
+func (x *TLS12CBCSessionBinding) Reset() {
+	*x = TLS12CBCSessionBinding{}
+	mi := &file_common_proto_msgTypes[0]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *TLS12CBCSessionBinding) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*TLS12CBCSessionBinding) ProtoMessage() {}
+
+func (x *TLS12CBCSessionBinding) ProtoReflect() protoreflect.Message {
+	mi := &file_common_proto_msgTypes[0]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use TLS12CBCSessionBinding.ProtoReflect.Descriptor instead.
+func (*TLS12CBCSessionBinding) Descriptor() ([]byte, []int) {
+	return file_common_proto_rawDescGZIP(), []int{0}
+}
+
+func (x *TLS12CBCSessionBinding) GetContractVersion() uint32 {
+	if x != nil {
+		return x.ContractVersion
+	}
+	return 0
+}
+
+func (x *TLS12CBCSessionBinding) GetCipherSuite() uint32 {
+	if x != nil {
+		return x.CipherSuite
+	}
+	return 0
+}
+
+func (x *TLS12CBCSessionBinding) GetRecordMode() TLS12CBCRecordMode {
+	if x != nil {
+		return x.RecordMode
+	}
+	return TLS12CBCRecordMode_TLS12_CBC_RECORD_MODE_UNSPECIFIED
+}
+
+func (x *TLS12CBCSessionBinding) GetExtendedMasterSecret() bool {
+	if x != nil {
+		return x.ExtendedMasterSecret
+	}
+	return false
+}
+
+func (x *TLS12CBCSessionBinding) GetSessionBinding() []byte {
+	if x != nil {
+		return x.SessionBinding
+	}
+	return nil
+}
+
 // Shared range types
 type RequestRedactionRange struct {
 	state  protoimpl.MessageState `protogen:"open.v1"`
@@ -34,7 +160,7 @@ type RequestRedactionRange struct {
 
 func (x *RequestRedactionRange) Reset() {
 	*x = RequestRedactionRange{}
-	mi := &file_common_proto_msgTypes[0]
+	mi := &file_common_proto_msgTypes[1]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -46,7 +172,7 @@ func (x *RequestRedactionRange) String() string {
 func (*RequestRedactionRange) ProtoMessage() {}
 
 func (x *RequestRedactionRange) ProtoReflect() protoreflect.Message {
-	mi := &file_common_proto_msgTypes[0]
+	mi := &file_common_proto_msgTypes[1]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -59,7 +185,7 @@ func (x *RequestRedactionRange) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RequestRedactionRange.ProtoReflect.Descriptor instead.
 func (*RequestRedactionRange) Descriptor() ([]byte, []int) {
-	return file_common_proto_rawDescGZIP(), []int{0}
+	return file_common_proto_rawDescGZIP(), []int{1}
 }
 
 func (x *RequestRedactionRange) GetStart() int32 {
@@ -93,7 +219,7 @@ type ResponseRedactionRange struct {
 
 func (x *ResponseRedactionRange) Reset() {
 	*x = ResponseRedactionRange{}
-	mi := &file_common_proto_msgTypes[1]
+	mi := &file_common_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -105,7 +231,7 @@ func (x *ResponseRedactionRange) String() string {
 func (*ResponseRedactionRange) ProtoMessage() {}
 
 func (x *ResponseRedactionRange) ProtoReflect() protoreflect.Message {
-	mi := &file_common_proto_msgTypes[1]
+	mi := &file_common_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -118,7 +244,7 @@ func (x *ResponseRedactionRange) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResponseRedactionRange.ProtoReflect.Descriptor instead.
 func (*ResponseRedactionRange) Descriptor() ([]byte, []int) {
-	return file_common_proto_rawDescGZIP(), []int{1}
+	return file_common_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *ResponseRedactionRange) GetStart() int32 {
@@ -135,6 +261,66 @@ func (x *ResponseRedactionRange) GetLength() int32 {
 	return 0
 }
 
+type TLSRecord struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Header        []byte                 `protobuf:"bytes,1,opt,name=header,proto3" json:"header,omitempty"`   // exact five-byte TLS record header
+	Payload       []byte                 `protobuf:"bytes,2,opt,name=payload,proto3" json:"payload,omitempty"` // exact record payload
+	SeqNum        uint64                 `protobuf:"varint,3,opt,name=seq_num,json=seqNum,proto3" json:"seq_num,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *TLSRecord) Reset() {
+	*x = TLSRecord{}
+	mi := &file_common_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *TLSRecord) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*TLSRecord) ProtoMessage() {}
+
+func (x *TLSRecord) ProtoReflect() protoreflect.Message {
+	mi := &file_common_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use TLSRecord.ProtoReflect.Descriptor instead.
+func (*TLSRecord) Descriptor() ([]byte, []int) {
+	return file_common_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *TLSRecord) GetHeader() []byte {
+	if x != nil {
+		return x.Header
+	}
+	return nil
+}
+
+func (x *TLSRecord) GetPayload() []byte {
+	if x != nil {
+		return x.Payload
+	}
+	return nil
+}
+
+func (x *TLSRecord) GetSeqNum() uint64 {
+	if x != nil {
+		return x.SeqNum
+	}
+	return 0
+}
+
 // Streams and small shared structures
 type ResponseDecryptionStreamData struct {
 	state            protoimpl.MessageState `protogen:"open.v1"`
@@ -147,7 +333,7 @@ type ResponseDecryptionStreamData struct {
 
 func (x *ResponseDecryptionStreamData) Reset() {
 	*x = ResponseDecryptionStreamData{}
-	mi := &file_common_proto_msgTypes[2]
+	mi := &file_common_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -159,7 +345,7 @@ func (x *ResponseDecryptionStreamData) String() string {
 func (*ResponseDecryptionStreamData) ProtoMessage() {}
 
 func (x *ResponseDecryptionStreamData) ProtoReflect() protoreflect.Message {
-	mi := &file_common_proto_msgTypes[2]
+	mi := &file_common_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -172,7 +358,7 @@ func (x *ResponseDecryptionStreamData) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResponseDecryptionStreamData.ProtoReflect.Descriptor instead.
 func (*ResponseDecryptionStreamData) Descriptor() ([]byte, []int) {
-	return file_common_proto_rawDescGZIP(), []int{2}
+	return file_common_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *ResponseDecryptionStreamData) GetDecryptionStream() []byte {
@@ -206,7 +392,7 @@ type SignedRedactedDecryptionStream struct {
 
 func (x *SignedRedactedDecryptionStream) Reset() {
 	*x = SignedRedactedDecryptionStream{}
-	mi := &file_common_proto_msgTypes[3]
+	mi := &file_common_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -218,7 +404,7 @@ func (x *SignedRedactedDecryptionStream) String() string {
 func (*SignedRedactedDecryptionStream) ProtoMessage() {}
 
 func (x *SignedRedactedDecryptionStream) ProtoReflect() protoreflect.Message {
-	mi := &file_common_proto_msgTypes[3]
+	mi := &file_common_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -231,7 +417,7 @@ func (x *SignedRedactedDecryptionStream) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SignedRedactedDecryptionStream.ProtoReflect.Descriptor instead.
 func (*SignedRedactedDecryptionStream) Descriptor() ([]byte, []int) {
-	return file_common_proto_rawDescGZIP(), []int{3}
+	return file_common_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *SignedRedactedDecryptionStream) GetRedactedStream() []byte {
@@ -262,7 +448,7 @@ type CertificateInfo struct {
 
 func (x *CertificateInfo) Reset() {
 	*x = CertificateInfo{}
-	mi := &file_common_proto_msgTypes[4]
+	mi := &file_common_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -274,7 +460,7 @@ func (x *CertificateInfo) String() string {
 func (*CertificateInfo) ProtoMessage() {}
 
 func (x *CertificateInfo) ProtoReflect() protoreflect.Message {
-	mi := &file_common_proto_msgTypes[4]
+	mi := &file_common_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -287,7 +473,7 @@ func (x *CertificateInfo) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CertificateInfo.ProtoReflect.Descriptor instead.
 func (*CertificateInfo) Descriptor() ([]byte, []int) {
-	return file_common_proto_rawDescGZIP(), []int{4}
+	return file_common_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *CertificateInfo) GetCommonName() string {
@@ -334,7 +520,7 @@ type FinishedMessage struct {
 
 func (x *FinishedMessage) Reset() {
 	*x = FinishedMessage{}
-	mi := &file_common_proto_msgTypes[5]
+	mi := &file_common_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -346,7 +532,7 @@ func (x *FinishedMessage) String() string {
 func (*FinishedMessage) ProtoMessage() {}
 
 func (x *FinishedMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_common_proto_msgTypes[5]
+	mi := &file_common_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -359,7 +545,7 @@ func (x *FinishedMessage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FinishedMessage.ProtoReflect.Descriptor instead.
 func (*FinishedMessage) Descriptor() ([]byte, []int) {
-	return file_common_proto_rawDescGZIP(), []int{5}
+	return file_common_proto_rawDescGZIP(), []int{7}
 }
 
 type AttestationRequestData struct {
@@ -370,7 +556,7 @@ type AttestationRequestData struct {
 
 func (x *AttestationRequestData) Reset() {
 	*x = AttestationRequestData{}
-	mi := &file_common_proto_msgTypes[6]
+	mi := &file_common_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -382,7 +568,7 @@ func (x *AttestationRequestData) String() string {
 func (*AttestationRequestData) ProtoMessage() {}
 
 func (x *AttestationRequestData) ProtoReflect() protoreflect.Message {
-	mi := &file_common_proto_msgTypes[6]
+	mi := &file_common_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -395,21 +581,32 @@ func (x *AttestationRequestData) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AttestationRequestData.ProtoReflect.Descriptor instead.
 func (*AttestationRequestData) Descriptor() ([]byte, []int) {
-	return file_common_proto_rawDescGZIP(), []int{6}
+	return file_common_proto_rawDescGZIP(), []int{8}
 }
 
 var File_common_proto protoreflect.FileDescriptor
 
 const file_common_proto_rawDesc = "" +
 	"\n" +
-	"\fcommon.proto\x12\bteeproto\"Y\n" +
+	"\fcommon.proto\x12\bteeproto\"\x84\x02\n" +
+	"\x16TLS12CBCSessionBinding\x12)\n" +
+	"\x10contract_version\x18\x01 \x01(\rR\x0fcontractVersion\x12!\n" +
+	"\fcipher_suite\x18\x02 \x01(\rR\vcipherSuite\x12=\n" +
+	"\vrecord_mode\x18\x03 \x01(\x0e2\x1c.teeproto.TLS12CBCRecordModeR\n" +
+	"recordMode\x124\n" +
+	"\x16extended_master_secret\x18\x04 \x01(\bR\x14extendedMasterSecret\x12'\n" +
+	"\x0fsession_binding\x18\x05 \x01(\fR\x0esessionBinding\"Y\n" +
 	"\x15RequestRedactionRange\x12\x14\n" +
 	"\x05start\x18\x01 \x01(\x05R\x05start\x12\x16\n" +
 	"\x06length\x18\x02 \x01(\x05R\x06length\x12\x12\n" +
 	"\x04type\x18\x03 \x01(\tR\x04type\"F\n" +
 	"\x16ResponseRedactionRange\x12\x14\n" +
 	"\x05start\x18\x01 \x01(\x05R\x05start\x12\x16\n" +
-	"\x06length\x18\x02 \x01(\x05R\x06length\"|\n" +
+	"\x06length\x18\x02 \x01(\x05R\x06length\"V\n" +
+	"\tTLSRecord\x12\x16\n" +
+	"\x06header\x18\x01 \x01(\fR\x06header\x12\x18\n" +
+	"\apayload\x18\x02 \x01(\fR\apayload\x12\x17\n" +
+	"\aseq_num\x18\x03 \x01(\x04R\x06seqNum\"|\n" +
 	"\x1cResponseDecryptionStreamData\x12+\n" +
 	"\x11decryption_stream\x18\x01 \x01(\fR\x10decryptionStream\x12\x17\n" +
 	"\aseq_num\x18\x02 \x01(\x04R\x06seqNum\x12\x16\n" +
@@ -425,7 +622,11 @@ const file_common_proto_rawDesc = "" +
 	"\x0enot_after_unix\x18\x04 \x01(\x04R\fnotAfterUnix\x12\x1b\n" +
 	"\tdns_names\x18\x05 \x03(\tR\bdnsNames\"\x11\n" +
 	"\x0fFinishedMessage\"\x18\n" +
-	"\x16AttestationRequestDataB\x18Z\x16tee-mpc/proto;teeprotob\x06proto3"
+	"\x16AttestationRequestData*\x93\x01\n" +
+	"\x12TLS12CBCRecordMode\x12%\n" +
+	"!TLS12_CBC_RECORD_MODE_UNSPECIFIED\x10\x00\x12*\n" +
+	"&TLS12_CBC_RECORD_MODE_MAC_THEN_ENCRYPT\x10\x01\x12*\n" +
+	"&TLS12_CBC_RECORD_MODE_ENCRYPT_THEN_MAC\x10\x02B\x18Z\x16tee-mpc/proto;teeprotob\x06proto3"
 
 var (
 	file_common_proto_rawDescOnce sync.Once
@@ -439,22 +640,27 @@ func file_common_proto_rawDescGZIP() []byte {
 	return file_common_proto_rawDescData
 }
 
-var file_common_proto_msgTypes = make([]protoimpl.MessageInfo, 7)
+var file_common_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
+var file_common_proto_msgTypes = make([]protoimpl.MessageInfo, 9)
 var file_common_proto_goTypes = []any{
-	(*RequestRedactionRange)(nil),          // 0: teeproto.RequestRedactionRange
-	(*ResponseRedactionRange)(nil),         // 1: teeproto.ResponseRedactionRange
-	(*ResponseDecryptionStreamData)(nil),   // 2: teeproto.ResponseDecryptionStreamData
-	(*SignedRedactedDecryptionStream)(nil), // 3: teeproto.SignedRedactedDecryptionStream
-	(*CertificateInfo)(nil),                // 4: teeproto.CertificateInfo
-	(*FinishedMessage)(nil),                // 5: teeproto.FinishedMessage
-	(*AttestationRequestData)(nil),         // 6: teeproto.AttestationRequestData
+	(TLS12CBCRecordMode)(0),                // 0: teeproto.TLS12CBCRecordMode
+	(*TLS12CBCSessionBinding)(nil),         // 1: teeproto.TLS12CBCSessionBinding
+	(*RequestRedactionRange)(nil),          // 2: teeproto.RequestRedactionRange
+	(*ResponseRedactionRange)(nil),         // 3: teeproto.ResponseRedactionRange
+	(*TLSRecord)(nil),                      // 4: teeproto.TLSRecord
+	(*ResponseDecryptionStreamData)(nil),   // 5: teeproto.ResponseDecryptionStreamData
+	(*SignedRedactedDecryptionStream)(nil), // 6: teeproto.SignedRedactedDecryptionStream
+	(*CertificateInfo)(nil),                // 7: teeproto.CertificateInfo
+	(*FinishedMessage)(nil),                // 8: teeproto.FinishedMessage
+	(*AttestationRequestData)(nil),         // 9: teeproto.AttestationRequestData
 }
 var file_common_proto_depIdxs = []int32{
-	0, // [0:0] is the sub-list for method output_type
-	0, // [0:0] is the sub-list for method input_type
-	0, // [0:0] is the sub-list for extension type_name
-	0, // [0:0] is the sub-list for extension extendee
-	0, // [0:0] is the sub-list for field type_name
+	0, // 0: teeproto.TLS12CBCSessionBinding.record_mode:type_name -> teeproto.TLS12CBCRecordMode
+	1, // [1:1] is the sub-list for method output_type
+	1, // [1:1] is the sub-list for method input_type
+	1, // [1:1] is the sub-list for extension type_name
+	1, // [1:1] is the sub-list for extension extendee
+	0, // [0:1] is the sub-list for field type_name
 }
 
 func init() { file_common_proto_init() }
@@ -467,13 +673,14 @@ func file_common_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_common_proto_rawDesc), len(file_common_proto_rawDesc)),
-			NumEnums:      0,
-			NumMessages:   7,
+			NumEnums:      1,
+			NumMessages:   9,
 			NumExtensions: 0,
 			NumServices:   0,
 		},
 		GoTypes:           file_common_proto_goTypes,
 		DependencyIndexes: file_common_proto_depIdxs,
+		EnumInfos:         file_common_proto_enumTypes,
 		MessageInfos:      file_common_proto_msgTypes,
 	}.Build()
 	File_common_proto = out.File

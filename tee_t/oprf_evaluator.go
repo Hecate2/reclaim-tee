@@ -73,13 +73,25 @@ func (t *TEET) handleOPRFOnlineFull(identity *teetSessionIdentity, msg *teeproto
 		return fmt.Errorf("total_ranges changed mid-session: %d vs %d", total, teetState.OPRFExpectedCount)
 	}
 
-	// Validate range against the consolidated response ciphertext.
+	// CBC plaintext is published by the response handler on a separate
+	// goroutine. Snapshot it under the CBC state lock. The split-AEAD path keeps
+	// its existing TCP-ordered response buffer.
+	cbcResponse, isCBC := teetState.snapshotCBCResponseForOPRF()
+	var responseCiphertext []byte
+	if isCBC {
+		responseCiphertext = cbcResponse
+		defer clear(responseCiphertext)
+	} else {
+		responseCiphertext = teetState.ConsolidatedResponseCiphertext
+	}
+
+	// Validate range against the response used by this session mode.
 	if msg.TlsStart < 0 || msg.TlsLength <= 0 || msg.TlsLength > 64 {
 		return fmt.Errorf("invalid range: start=%d length=%d", msg.TlsStart, msg.TlsLength)
 	}
-	if int(msg.TlsStart)+int(msg.TlsLength) > len(teetState.ConsolidatedResponseCiphertext) {
+	if int(msg.TlsStart)+int(msg.TlsLength) > len(responseCiphertext) {
 		return fmt.Errorf("range exceeds ciphertext (end=%d, ciphertext_len=%d)",
-			int(msg.TlsStart)+int(msg.TlsLength), len(teetState.ConsolidatedResponseCiphertext))
+			int(msg.TlsStart)+int(msg.TlsLength), len(responseCiphertext))
 	}
 
 	// Check OT receiver pool is ready
@@ -97,7 +109,7 @@ func (t *TEET) handleOPRFOnlineFull(identity *teetSessionIdentity, msg *teeproto
 	// Extract ciphertext for range
 	start := int(msg.TlsStart)
 	end := start + int(msg.TlsLength)
-	ciphertext := teetState.ConsolidatedResponseCiphertext[start:end]
+	ciphertext := responseCiphertext[start:end]
 
 	// Pad to 64 bytes
 	paddedCiphertext, err := mpc.PadZeros64(ciphertext, int(msg.TlsLength))

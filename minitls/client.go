@@ -28,6 +28,10 @@ var errHelloRetryRequest = errors.New("HELLO_RETRY_REQUEST")
 // field allows 2^24; Go uses 64 KiB and no real server needs more.
 const maxHandshakeMsgLen = 65536
 
+// Certificate chains are routinely larger than other handshake messages.
+// Match the separate limit used by Go's crypto/tls implementation.
+const maxCertificateHandshakeMsgLen = 262144
+
 // hrrRandom is the HelloRetryRequest magic ServerHello.random (RFC 8446
 // 4.1.3): SHA-256 of "HelloRetryRequest".
 var hrrRandom = []byte{
@@ -57,6 +61,7 @@ type Client struct {
 	keySchedule       *KeySchedule      // TLS 1.3 key schedule
 	tls12KeySchedule  *TLS12KeySchedule // TLS 1.2 key schedule
 	tls12AEAD         *TLS12AEADContext // TLS 1.2 AEAD context
+	tls12CBC          *TLS12CBCContext  // TLS 1.2 CBC context
 
 	// Handshake state
 	offeredCipherSuites  []uint16 // Exactly what the last ClientHello advertised
@@ -84,6 +89,11 @@ type Client struct {
 
 	// Extended Master Secret support (RFC 7627)
 	extendedMasterSecret bool
+
+	// Encrypt-then-MAC support (RFC 7366). offeredEncryptThenMAC records the
+	// ClientHello extension; encryptThenMAC is the negotiated record mode.
+	offeredEncryptThenMAC bool
+	encryptThenMAC        bool
 
 	// Client certificate request flag
 	certRequestReceived bool // True if server requested client certificate
@@ -646,7 +656,11 @@ func (c *Client) buildClientHello(serverName string) ([]byte, error) {
 		},
 		alpnProtocols:        alpnProtocols, // RFC 7301 - Application-Layer Protocol Negotiation
 		extendedMasterSecret: true,          // RFC 7627 - binds the TLS 1.2 master secret to the transcript
+		encryptThenMAC: slices.ContainsFunc(cipherSuites, func(suite uint16) bool {
+			return IsTLS12CBCCipherSuite(suite)
+		}),
 	}
+	c.offeredEncryptThenMAC = hello.encryptThenMAC
 
 	c.offeredCipherSuites = cipherSuites
 
@@ -674,67 +688,44 @@ func (c *Client) buildClientHello(serverName string) ([]byte, error) {
 
 // readHandshakeMessage reads a complete handshake message
 func (c *Client) readHandshakeMessage() ([]byte, error) {
-	// First check if we have pending handshake data from a coalesced record
-	if len(c.pendingHandshakeData) > 0 {
-		// Need at least 4 bytes for handshake message header
-		if len(c.pendingHandshakeData) < 4 {
-			return nil, fmt.Errorf("pending handshake data too short: %d bytes", len(c.pendingHandshakeData))
+	for {
+		if len(c.pendingHandshakeData) >= 4 {
+			msgLen := int(c.pendingHandshakeData[1])<<16 | int(c.pendingHandshakeData[2])<<8 | int(c.pendingHandshakeData[3])
+			limit := maxHandshakeMsgLen
+			if HandshakeType(c.pendingHandshakeData[0]) == typeCertificate {
+				limit = maxCertificateHandshakeMsgLen
+			}
+			if msgLen > limit {
+				return nil, fmt.Errorf("handshake message of %d bytes exceeds %d cap", msgLen, limit)
+			}
+			totalMsgLen := 4 + msgLen
+			if len(c.pendingHandshakeData) >= totalMsgLen {
+				msg := append([]byte(nil), c.pendingHandshakeData[:totalMsgLen]...)
+				c.pendingHandshakeData = append([]byte(nil), c.pendingHandshakeData[totalMsgLen:]...)
+				c.logger.Debug("Read complete handshake message",
+					zap.Int("msg_bytes", totalMsgLen),
+					zap.Int("remaining_pending", len(c.pendingHandshakeData)))
+				return msg, nil
+			}
 		}
 
-		// Extract handshake message length from header
-		msgLen := int(c.pendingHandshakeData[1])<<16 | int(c.pendingHandshakeData[2])<<8 | int(c.pendingHandshakeData[3])
-		totalMsgLen := 4 + msgLen
-
-		if len(c.pendingHandshakeData) < totalMsgLen {
-			return nil, fmt.Errorf("pending handshake data incomplete: have %d, need %d", len(c.pendingHandshakeData), totalMsgLen)
+		header := make([]byte, 5)
+		if _, err := io.ReadFull(c.conn, header); err != nil {
+			return nil, fmt.Errorf("failed to read record header: %v", err)
 		}
-
-		// Extract the message and update pending buffer
-		msg := make([]byte, totalMsgLen)
-		copy(msg, c.pendingHandshakeData[:totalMsgLen])
-		c.pendingHandshakeData = c.pendingHandshakeData[totalMsgLen:]
-
-		c.logger.Debug("Read handshake message from pending buffer",
-			zap.Int("msg_bytes", totalMsgLen),
-			zap.Int("remaining_pending", len(c.pendingHandshakeData)))
-
-		return msg, nil
-	}
-
-	// No pending data, read from connection
-	// Read TLS record header
-	header := make([]byte, 5)
-	if _, err := io.ReadFull(c.conn, header); err != nil {
-		return nil, fmt.Errorf("failed to read record header: %v", err)
-	}
-
-	recordType := header[0]
-	recordLength := int(header[3])<<8 | int(header[4])
-
-	if recordType != recordTypeHandshake {
-		return nil, fmt.Errorf("expected handshake record, got type %d", recordType)
-	}
-
-	// Read the handshake message
-	payload := make([]byte, recordLength)
-	if _, err := io.ReadFull(c.conn, payload); err != nil {
-		return nil, fmt.Errorf("failed to read handshake payload: %v", err)
-	}
-
-	// Check if this record contains multiple handshake messages
-	if len(payload) >= 4 {
-		msgLen := int(payload[1])<<16 | int(payload[2])<<8 | int(payload[3])
-		totalMsgLen := 4 + msgLen
-		if len(payload) > totalMsgLen {
-			// Store leftover data for subsequent reads
-			c.pendingHandshakeData = payload[totalMsgLen:]
-			c.logger.Debug("Stored leftover handshake data from record",
-				zap.Int("leftover_bytes", len(c.pendingHandshakeData)))
-			return payload[:totalMsgLen], nil
+		if header[0] != recordTypeHandshake {
+			return nil, fmt.Errorf("expected handshake record, got type %d", header[0])
 		}
+		recordLength := int(header[3])<<8 | int(header[4])
+		payload := make([]byte, recordLength)
+		if _, err := io.ReadFull(c.conn, payload); err != nil {
+			return nil, fmt.Errorf("failed to read handshake payload: %v", err)
+		}
+		if len(c.pendingHandshakeData)+len(payload) > maxCertificateHandshakeMsgLen+4 {
+			return nil, fmt.Errorf("buffered handshake data exceeds %d cap", maxCertificateHandshakeMsgLen)
+		}
+		c.pendingHandshakeData = append(c.pendingHandshakeData, payload...)
 	}
-
-	return payload, nil
 }
 
 // detectTLSVersionFromData analyzes ServerHello data to determine negotiated TLS version
@@ -750,6 +741,9 @@ func (c *Client) detectTLSVersionFromData(serverHello []byte) (uint16, uint16, e
 	payload := serverHello[4:]
 	if len(payload) < 38 { // minimum: version(2) + random(32) + session_id_len(1) + cipher_suite(2) + compression(1)
 		return 0, 0, fmt.Errorf("ServerHello payload too short")
+	}
+	if uint16(payload[0])<<8|uint16(payload[1]) != VersionTLS12 {
+		return 0, 0, fmt.Errorf("ServerHello has invalid legacy version 0x%04x", uint16(payload[0])<<8|uint16(payload[1]))
 	}
 
 	// RFC 8446 4.1.4: the server may send at most one HelloRetryRequest.
@@ -769,14 +763,20 @@ func (c *Client) detectTLSVersionFromData(serverHello []byte) (uint16, uint16, e
 	// Parse session ID
 	sessionIDLen := payload[offset]
 	offset++
+	if int(sessionIDLen) > len(payload)-offset {
+		return 0, 0, fmt.Errorf("ServerHello session ID length exceeds payload")
+	}
 	offset += int(sessionIDLen)
 
-	if len(payload) < offset+2 {
-		return 0, 0, fmt.Errorf("ServerHello missing cipher suite")
+	if len(payload)-offset < 3 {
+		return 0, 0, fmt.Errorf("ServerHello is missing cipher suite or compression method")
 	}
 
 	// Parse cipher suite
 	cipherSuite := uint16(payload[offset])<<8 | uint16(payload[offset+1])
+	if payload[offset+2] != 0 {
+		return 0, 0, fmt.Errorf("ServerHello selected unsupported compression method %d", payload[offset+2])
+	}
 
 	// Check if this is a TLS 1.3 cipher suite
 	if IsTLS13CipherSuite(cipherSuite) {
@@ -802,6 +802,9 @@ func (c *Client) detectTLSVersion(serverHello []byte) (uint16, uint16, error) {
 	if len(payload) < 38 { // minimum: version(2) + random(32) + session_id_len(1) + cipher_suite(2) + compression(1)
 		return 0, 0, fmt.Errorf("ServerHello payload too short")
 	}
+	if uint16(payload[0])<<8|uint16(payload[1]) != VersionTLS12 {
+		return 0, 0, fmt.Errorf("ServerHello has invalid legacy version 0x%04x", uint16(payload[0])<<8|uint16(payload[1]))
+	}
 
 	// Check for HelloRetryRequest (HRR) - special ServerHello with magic random value
 	if bytes.Equal(payload[2:34], hrrRandom) {
@@ -821,29 +824,28 @@ func (c *Client) detectTLSVersion(serverHello []byte) (uint16, uint16, error) {
 	// Parse session ID
 	sessionIDLen := payload[offset]
 	offset++
+	if int(sessionIDLen) > len(payload)-offset {
+		return 0, 0, fmt.Errorf("ServerHello session ID length exceeds payload")
+	}
 	offset += int(sessionIDLen)
 
-	if len(payload) < offset+2 {
-		return 0, 0, fmt.Errorf("ServerHello missing cipher suite")
+	if len(payload)-offset < 3 {
+		return 0, 0, fmt.Errorf("ServerHello is missing cipher suite or compression method")
 	}
 
 	// Parse cipher suite
 	cipherSuite := uint16(payload[offset])<<8 | uint16(payload[offset+1])
-
-	// Check if this is a TLS 1.3 cipher suite
-	switch cipherSuite {
-	case TLS_AES_128_GCM_SHA256, TLS_AES_256_GCM_SHA384, TLS_CHACHA20_POLY1305_SHA256:
-		// TLS 1.3 cipher suite - check for supported_versions extension
-		// For now, assume TLS 1.3 if we see a TLS 1.3 cipher suite
-		return VersionTLS13, cipherSuite, nil
-	case TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256, TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
-		TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384, TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
-		TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256, TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256:
-		// TLS 1.2 AEAD cipher suite
-		return VersionTLS12, cipherSuite, nil
-	default:
-		return 0, 0, fmt.Errorf("unsupported cipher suite: 0x%04x", cipherSuite)
+	if payload[offset+2] != 0 {
+		return 0, 0, fmt.Errorf("ServerHello selected unsupported compression method %d", payload[offset+2])
 	}
+
+	if IsTLS13CipherSuite(cipherSuite) {
+		return VersionTLS13, cipherSuite, nil
+	}
+	if IsTLS12CipherSuite(cipherSuite) {
+		return VersionTLS12, cipherSuite, nil
+	}
+	return 0, 0, fmt.Errorf("unsupported cipher suite: 0x%04x", cipherSuite)
 }
 
 // Without this, Config.MinVersion/MaxVersion and ForceCipherSuite are
@@ -1098,54 +1100,88 @@ func (c *Client) extractServerRandomTLS12(serverHello []byte) error {
 
 	// Parse session ID
 	sessionIDLen := payload[offset]
-	offset += 1 + int(sessionIDLen)
+	offset++
+	if int(sessionIDLen) > len(payload)-offset {
+		return fmt.Errorf("ServerHello session ID length exceeds payload")
+	}
+	offset += int(sessionIDLen)
 
-	// Skip cipher suite (2 bytes)
+	if len(payload)-offset < 3 {
+		return fmt.Errorf("ServerHello is missing cipher suite or compression method")
+	}
+	// Skip cipher suite (2 bytes) and require null compression.
 	offset += 2
-
-	// Skip compression method (1 byte)
+	if payload[offset] != 0 {
+		return fmt.Errorf("ServerHello selected unsupported compression method %d", payload[offset])
+	}
 	offset += 1
 
-	// Parse extensions for Extended Master Secret
+	// Parse extensions for Extended Master Secret and Encrypt-then-MAC.
 	c.extendedMasterSecret = false // Default to false
+	c.encryptThenMAC = false
 	c.logger.Debug("TLS 1.2 ServerHello parsing", zap.Int("offset", offset), zap.Int("payload_length", len(payload)))
-	if len(payload) > offset+2 {
+	if len(payload) != offset {
+		if len(payload)-offset < 2 {
+			return fmt.Errorf("ServerHello extensions length is truncated")
+		}
 		extensionsLen := int(payload[offset])<<8 | int(payload[offset+1])
 		offset += 2
 
 		c.logger.Debug("TLS 1.2 ServerHello has extensions", zap.Int("extensions_length", extensionsLen))
 
-		if len(payload) >= offset+extensionsLen {
-			extensionsData := payload[offset : offset+extensionsLen]
+		if extensionsLen != len(payload)-offset {
+			return fmt.Errorf("ServerHello extensions length %d does not match remaining payload %d", extensionsLen, len(payload)-offset)
+		}
+		extensionsData := payload[offset : offset+extensionsLen]
 
-			// Check for Extended Master Secret extension
-			extOffset := 0
-			for extOffset < len(extensionsData) {
-				if extOffset+4 > len(extensionsData) {
-					break
-				}
-
-				extType := uint16(extensionsData[extOffset])<<8 | uint16(extensionsData[extOffset+1])
-				extLen := int(extensionsData[extOffset+2])<<8 | int(extensionsData[extOffset+3])
-				extOffset += 4
-
-				c.logger.Debug("Found extension", zap.Uint16("type", extType), zap.Uint16("type_hex", extType), zap.Int("length", extLen))
-
-				if extOffset+extLen > len(extensionsData) {
-					return fmt.Errorf("extension %d length %d exceeds buffer", extType, extLen)
-				}
-
-				if extType == extensionExtendedMasterSecret {
-					c.extendedMasterSecret = true
-					c.logger.Debug("Server supports Extended Master Secret (RFC 7627)")
-					break
-				}
-
-				extOffset += extLen
+		seenEMS := false
+		seenEtM := false
+		seenExtensions := make(map[uint16]struct{})
+		extOffset := 0
+		for extOffset < len(extensionsData) {
+			if extOffset+4 > len(extensionsData) {
+				return fmt.Errorf("truncated ServerHello extension header")
 			}
+
+			extType := uint16(extensionsData[extOffset])<<8 | uint16(extensionsData[extOffset+1])
+			extLen := int(extensionsData[extOffset+2])<<8 | int(extensionsData[extOffset+3])
+			extOffset += 4
+			if _, duplicate := seenExtensions[extType]; duplicate {
+				return fmt.Errorf("duplicate ServerHello extension %d", extType)
+			}
+			seenExtensions[extType] = struct{}{}
+
+			c.logger.Debug("Found extension", zap.Uint16("type", extType), zap.Uint16("type_hex", extType), zap.Int("length", extLen))
+
+			if extOffset+extLen > len(extensionsData) {
+				return fmt.Errorf("extension %d length %d exceeds buffer", extType, extLen)
+			}
+
+			switch extType {
+			case extensionExtendedMasterSecret:
+				if seenEMS || extLen != 0 {
+					return fmt.Errorf("invalid Extended Master Secret extension")
+				}
+				seenEMS = true
+				c.extendedMasterSecret = true
+				c.logger.Debug("Server supports Extended Master Secret (RFC 7627)")
+			case extensionEncryptThenMAC:
+				if seenEtM || extLen != 0 || !c.offeredEncryptThenMAC {
+					return fmt.Errorf("invalid Encrypt-then-MAC extension")
+				}
+				seenEtM = true
+				c.encryptThenMAC = true
+				c.logger.Debug("Server selected Encrypt-then-MAC (RFC 7366)")
+			}
+
+			extOffset += extLen
 		}
 	} else {
 		c.logger.Debug("TLS 1.2 ServerHello has no extensions")
+	}
+
+	if c.encryptThenMAC && !IsTLS12CBCCipherSuite(c.cipherSuite) {
+		return fmt.Errorf("server selected Encrypt-then-MAC with non-CBC cipher suite 0x%04x", c.cipherSuite)
 	}
 
 	return nil
@@ -1584,6 +1620,21 @@ func (c *Client) GetTLS12AEAD() *TLS12AEADContext {
 	return c.tls12AEAD
 }
 
+// GetTLS12CBC returns the negotiated TLS 1.2 CBC record context.
+func (c *Client) GetTLS12CBC() *TLS12CBCContext {
+	return c.tls12CBC
+}
+
+// TLS12EncryptThenMAC reports whether RFC 7366 was negotiated.
+func (c *Client) TLS12EncryptThenMAC() bool {
+	return c.encryptThenMAC
+}
+
+// TLS12ExtendedMasterSecret reports whether RFC 7627 was negotiated.
+func (c *Client) TLS12ExtendedMasterSecret() bool {
+	return c.extendedMasterSecret
+}
+
 // extractCertificateInfo extracts structured certificate information for verification bundle
 func (c *Client) extractCertificateInfo(certs []*x509.Certificate) *teeproto.CertificateInfo {
 	if len(certs) == 0 {
@@ -1715,6 +1766,12 @@ func (c *Client) parseHelloRetryRequest(hrrData []byte) (selectedGroup uint16, c
 	if len(payload) < 38 {
 		return 0, 0, nil, fmt.Errorf("HelloRetryRequest payload too short")
 	}
+	if uint16(payload[0])<<8|uint16(payload[1]) != VersionTLS12 {
+		return 0, 0, nil, fmt.Errorf("HelloRetryRequest has invalid legacy version")
+	}
+	if !bytes.Equal(payload[2:34], hrrRandom) {
+		return 0, 0, nil, fmt.Errorf("ServerHello is not a HelloRetryRequest")
+	}
 
 	// Parse ServerHello structure: version(2) + random(32) + session_id_len(1) + session_id + cipher_suite(2) + compression(1) + extensions_len(2) + extensions
 	offset := 0
@@ -1728,6 +1785,9 @@ func (c *Client) parseHelloRetryRequest(hrrData []byte) (selectedGroup uint16, c
 	// Parse session ID
 	sessionIDLen := payload[offset]
 	offset++
+	if int(sessionIDLen) > len(payload)-offset {
+		return 0, 0, nil, fmt.Errorf("HelloRetryRequest session ID length exceeds payload")
+	}
 	offset += int(sessionIDLen)
 
 	if len(payload) < offset+3 {
@@ -1748,8 +1808,8 @@ func (c *Client) parseHelloRetryRequest(hrrData []byte) (selectedGroup uint16, c
 	extensionsLen := int(payload[offset])<<8 | int(payload[offset+1])
 	offset += 2
 
-	if len(payload) < offset+extensionsLen {
-		return 0, 0, nil, fmt.Errorf("HelloRetryRequest extensions length exceeds payload")
+	if len(payload)-offset != extensionsLen {
+		return 0, 0, nil, fmt.Errorf("HelloRetryRequest extensions length does not match payload")
 	}
 
 	extensionsData := payload[offset : offset+extensionsLen]
@@ -1758,7 +1818,7 @@ func (c *Client) parseHelloRetryRequest(hrrData []byte) (selectedGroup uint16, c
 	extOffset := 0
 	for extOffset < len(extensionsData) {
 		if extOffset+4 > len(extensionsData) {
-			break
+			return 0, 0, nil, fmt.Errorf("truncated HelloRetryRequest extension header")
 		}
 
 		extType := uint16(extensionsData[extOffset])<<8 | uint16(extensionsData[extOffset+1])
@@ -1766,20 +1826,30 @@ func (c *Client) parseHelloRetryRequest(hrrData []byte) (selectedGroup uint16, c
 		extOffset += 4
 
 		if extOffset+extLen > len(extensionsData) {
-			break
+			return 0, 0, nil, fmt.Errorf("HelloRetryRequest extension length exceeds payload")
 		}
 
 		extData := extensionsData[extOffset : extOffset+extLen]
 
 		switch extType {
-		case 51: // key_share
-			if len(extData) >= 2 {
-				selectedGroup = uint16(extData[0])<<8 | uint16(extData[1])
-				c.logger.Debug("HelloRetryRequest selected key group", zap.Uint16("group", selectedGroup))
+		case extensionKeyShare:
+			if selectedGroup != 0 || len(extData) != 2 {
+				return 0, 0, nil, fmt.Errorf("HelloRetryRequest key_share extension is invalid")
 			}
-		case 44: // cookie
-			cookie = make([]byte, len(extData))
-			copy(cookie, extData)
+			selectedGroup = uint16(extData[0])<<8 | uint16(extData[1])
+			c.logger.Debug("HelloRetryRequest selected key group", zap.Uint16("group", selectedGroup))
+		case extensionCookie:
+			if cookie != nil {
+				return 0, 0, nil, fmt.Errorf("HelloRetryRequest contains duplicate cookie extensions")
+			}
+			if len(extData) < 2 {
+				return 0, 0, nil, fmt.Errorf("HelloRetryRequest cookie extension is truncated")
+			}
+			cookieLen := int(extData[0])<<8 | int(extData[1])
+			if cookieLen == 0 || cookieLen != len(extData)-2 {
+				return 0, 0, nil, fmt.Errorf("HelloRetryRequest cookie extension has invalid length")
+			}
+			cookie = append([]byte(nil), extData[2:]...)
 			c.logger.Debug("HelloRetryRequest contains cookie", zap.Int("bytes", len(cookie)))
 		}
 
@@ -1875,13 +1945,13 @@ func (c *Client) buildClientHelloForHRR(serverName string, selectedGroup uint16,
 
 	hello := &ClientHelloMsg{
 		vers:               0x0303, // TLS 1.2 for compatibility
-		random:             make([]byte, 32),
+		random:             append([]byte(nil), c.clientRandom...),
 		sessionId:          make([]byte, len(c.originalSessionId)),
 		cipherSuites:       cipherSuites,
 		compressionMethods: []uint8{0},
 		serverName:         serverName,
 		supportedCurves:    []uint16{X25519, secp256r1, secp384r1, secp521r1}, // Support all major curves
-		supportedVersions:  []uint16{0x0304},                                  // TLS 1.3
+		supportedVersions:  c.Config.supportedVersions(),
 		supportedSignatureAlgorithms: []uint16{
 			// Modern algorithms (preferred)
 			ed25519, // EdDSA
@@ -1905,15 +1975,8 @@ func (c *Client) buildClientHelloForHRR(serverName string, selectedGroup uint16,
 		cookie:               cookie, // Include cookie if provided
 		alpnProtocols:        alpnProtocols,
 		extendedMasterSecret: true,
+		encryptThenMAC:       c.offeredEncryptThenMAC,
 	}
-
-	// Generate new random values (required for second ClientHello)
-	if _, err := rand.Read(hello.random); err != nil {
-		return nil, fmt.Errorf("failed to generate random bytes: %v", err)
-	}
-	// Keep the cached copy in step with what CH2 actually carries
-	c.clientRandom = make([]byte, len(hello.random))
-	copy(c.clientRandom, hello.random)
 
 	// Use the same session ID as the original ClientHello (RFC 8446 requirement)
 	if len(c.originalSessionId) == 0 {

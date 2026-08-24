@@ -1,8 +1,11 @@
 package client
 
 import (
+	"bytes"
 	"fmt"
+	"slices"
 
+	"github.com/reclaimprotocol/reclaim-tee/minitls"
 	teeproto "github.com/reclaimprotocol/reclaim-tee/proto"
 	"github.com/reclaimprotocol/reclaim-tee/shared"
 	"google.golang.org/protobuf/proto"
@@ -20,6 +23,9 @@ func (c *Client) validateTEEKSignedMessage(envelopeSession string, signed *teepr
 		return nil, err
 	}
 	if err := c.validateSignedMessageSignature("tee_k", signed, body.GetAttestationType()); err != nil {
+		return nil, err
+	}
+	if err := c.validateTEEKTLS12CBCContract(&body, signed); err != nil {
 		return nil, err
 	}
 	return &body, nil
@@ -56,7 +62,156 @@ func (c *Client) validateTEETSignedMessage(envelopeSession string, signed *teepr
 	if err := c.validateSignedMessageSignature("tee_t", signed, body.GetAttestationType()); err != nil {
 		return nil, err
 	}
+	if err := c.validateTEETTLS12CBCContract(&body, signed); err != nil {
+		return nil, err
+	}
 	return &body, nil
+}
+
+func (c *Client) validateTEEKTLS12CBCContract(body *teeproto.KOutputPayload, signed *teeproto.SignedMessage) error {
+	isCBC := minitls.IsTLS12CBCCipherSuite(c.cipherSuite)
+	if !isCBC {
+		if body.GetTls12Cbc() != nil {
+			return fmt.Errorf("TEE_K CBC output present for non-CBC session")
+		}
+		return nil
+	}
+	cbc := body.GetTls12Cbc()
+	if cbc == nil {
+		return fmt.Errorf("TEE_K signed body is missing TLS 1.2 CBC output")
+	}
+	if len(body.GetRedactedRequest()) != 0 || len(body.GetRequestRedactionRanges()) != 0 ||
+		len(body.GetConsolidatedResponseKeystream()) != 0 || len(body.GetResponseRedactionRanges()) != 0 {
+		return fmt.Errorf("TEE_K TLS 1.2 CBC output mixes legacy AEAD fields")
+	}
+	if len(signed.GetResponsePackets()) != 0 || len(signed.GetServerAppKey()) != 0 || signed.GetCipherSuite() != 0 {
+		return fmt.Errorf("TEE_K TLS 1.2 CBC output exposes legacy unsigned TLS metadata")
+	}
+
+	c.cbcMutex.Lock()
+	binding := c.cbcBinding
+	requestDigest := append([]byte(nil), c.cbcRequestDigest...)
+	c.cbcMutex.Unlock()
+	if binding == nil || !proto.Equal(binding, cbc.GetBinding()) {
+		return fmt.Errorf("TEE_K TLS 1.2 CBC session binding mismatch")
+	}
+	if len(requestDigest) != 32 || !bytes.Equal(requestDigest, cbc.GetRequestRecordsSha256()) {
+		return fmt.Errorf("TEE_K TLS 1.2 CBC request record digest mismatch")
+	}
+	signedRanges := cbc.GetRequestRedactionRanges()
+	if len(signedRanges) != len(c.requestRedactionRanges) {
+		return fmt.Errorf("TEE_K TLS 1.2 CBC request redaction range count mismatch")
+	}
+	for i, item := range c.requestRedactionRanges {
+		if signedRanges[i] == nil || signedRanges[i].GetStart() != int32(item.Start) ||
+			signedRanges[i].GetLength() != int32(item.Length) || signedRanges[i].GetType() != item.Type {
+			return fmt.Errorf("TEE_K TLS 1.2 CBC request redaction range %d mismatch", i)
+		}
+	}
+	redacted := cbc.GetAuthenticatedRedactedRequest()
+	if len(redacted) != len(c.requestData) {
+		return fmt.Errorf("TEE_K authenticated redacted request length is %d, want %d", len(redacted), len(c.requestData))
+	}
+	mask := make([]bool, len(c.requestData))
+	for i, item := range c.requestRedactionRanges {
+		if item.Start < 0 || item.Length <= 0 || item.Start > len(mask) || item.Length > len(mask)-item.Start {
+			return fmt.Errorf("local request redaction range %d is invalid", i)
+		}
+		switch item.Type {
+		case shared.RedactionTypeSensitive:
+			for j := item.Start; j < item.Start+item.Length; j++ {
+				mask[j] = true
+			}
+		case shared.RedactionTypeSensitiveProof:
+		default:
+			return fmt.Errorf("local request redaction range %d has invalid type", i)
+		}
+	}
+	for i := range redacted {
+		if !mask[i] && redacted[i] != c.requestData[i] {
+			return fmt.Errorf("TEE_K authenticated redacted request differs outside sensitive ranges")
+		}
+	}
+	return nil
+}
+
+func (c *Client) validateTEETTLS12CBCContract(body *teeproto.TOutputPayload, signed *teeproto.SignedMessage) error {
+	isCBC := minitls.IsTLS12CBCCipherSuite(c.cipherSuite)
+	if !isCBC {
+		if body.GetTls12Cbc() != nil {
+			return fmt.Errorf("TEE_T CBC output present for non-CBC session")
+		}
+		return nil
+	}
+	cbc := body.GetTls12Cbc()
+	if cbc == nil {
+		return fmt.Errorf("TEE_T signed body is missing TLS 1.2 CBC output")
+	}
+	if len(body.GetConsolidatedResponseCiphertext()) != 0 || len(body.GetRequestProofStreams()) != 0 {
+		return fmt.Errorf("TEE_T TLS 1.2 CBC output mixes legacy AEAD fields")
+	}
+	if len(signed.GetResponsePackets()) != 0 || len(signed.GetServerAppKey()) != 0 || signed.GetCipherSuite() != 0 {
+		return fmt.Errorf("TEE_T TLS 1.2 CBC output exposes legacy unsigned TLS metadata")
+	}
+
+	c.cbcMutex.Lock()
+	binding := c.cbcBinding
+	responseDigest := append([]byte(nil), c.cbcResponseDigest...)
+	lengths := append([]uint32(nil), c.cbcResponsePlaintextLengths...)
+	ranges := append([]shared.ResponseRedactionRange(nil), c.cbcResponseRedactionRanges...)
+	c.cbcMutex.Unlock()
+	if binding == nil || !proto.Equal(binding, cbc.GetBinding()) {
+		return fmt.Errorf("TEE_T TLS 1.2 CBC session binding mismatch")
+	}
+	if len(responseDigest) != 32 || !bytes.Equal(responseDigest, cbc.GetResponseRecordsSha256()) {
+		return fmt.Errorf("TEE_T TLS 1.2 CBC response record digest mismatch")
+	}
+	if !slices.Equal(lengths, cbc.GetPlaintextRecordLengths()) {
+		return fmt.Errorf("TEE_T TLS 1.2 CBC plaintext record lengths mismatch")
+	}
+	signedRanges := cbc.GetResponseRedactionRanges()
+	if len(signedRanges) != len(ranges) {
+		return fmt.Errorf("TEE_T TLS 1.2 CBC response redaction range count mismatch")
+	}
+	for i, item := range ranges {
+		if signedRanges[i] == nil || signedRanges[i].GetStart() != int32(item.Start) || signedRanges[i].GetLength() != int32(item.Length) {
+			return fmt.Errorf("TEE_T TLS 1.2 CBC response redaction range %d mismatch", i)
+		}
+	}
+
+	c.responseContentMutex.Lock()
+	seqNums := make([]uint64, 0, len(c.parsedResponseBySeq))
+	for seq := range c.parsedResponseBySeq {
+		seqNums = append(seqNums, seq)
+	}
+	slices.Sort(seqNums)
+	var authenticatedResponse []byte
+	for _, seq := range seqNums {
+		parsed := c.parsedResponseBySeq[seq]
+		if parsed != nil && parsed.ContentType == minitls.RecordTypeApplicationData {
+			authenticatedResponse = append(authenticatedResponse, parsed.ActualContent...)
+		}
+	}
+	c.responseContentMutex.Unlock()
+	redacted := cbc.GetAuthenticatedRedactedResponse()
+	if len(redacted) != len(authenticatedResponse) {
+		return fmt.Errorf("TEE_T authenticated redacted response length is %d, want %d", len(redacted), len(authenticatedResponse))
+	}
+	mask := make([]bool, len(redacted))
+	for i, item := range ranges {
+		if item.Start < 0 || item.Length <= 0 || item.Start > len(mask) || item.Length > len(mask)-item.Start {
+			return fmt.Errorf("local response redaction range %d is invalid", i)
+		}
+		for j := item.Start; j < item.Start+item.Length; j++ {
+			mask[j] = true
+		}
+	}
+	for i := range redacted {
+		if !mask[i] && redacted[i] != authenticatedResponse[i] {
+			return fmt.Errorf("TEE_T authenticated redacted response differs outside redaction ranges")
+		}
+	}
+	return nil
 }
 
 func (c *Client) acceptTEETSignedMessage(envelopeSession string, signed *teeproto.SignedMessage) error {

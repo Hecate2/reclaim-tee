@@ -6,8 +6,11 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/reclaimprotocol/reclaim-tee/minitls"
 	"github.com/reclaimprotocol/reclaim-tee/mpc"
+	teeproto "github.com/reclaimprotocol/reclaim-tee/proto"
 	"github.com/reclaimprotocol/reclaim-tee/shared"
+	"google.golang.org/protobuf/proto"
 )
 
 type pendingOPRFEvaluation struct {
@@ -28,6 +31,20 @@ type TEETSessionState struct {
 	ExpectedFragmentCount          int                                     // Total number of fragments expected
 	RequestProofStreams            [][]byte                                // Store R_SP streams for cryptographic signing
 	ConsolidatedResponseCiphertext []byte                                  // Response ciphertext consolidation
+
+	// Trusted-TEE TLS 1.2 CBC state. CBCReadStateReceived and
+	// ResponseBatchReceived make the key handoff and response transcript
+	// one-shot operations.
+	CBCBinding                       *teeproto.TLS12CBCSessionBinding
+	CBCReadContext                   *minitls.TLS12CBCContext
+	CBCReadStateReceived             atomic.Bool
+	CBCAuthenticatedResponse         []byte
+	CBCAuthenticatedRedactedResponse []byte
+	CBCResponseDigest                []byte
+	CBCPlaintextRecordLengths        []uint32
+	CBCResponseRedactionRanges       []*teeproto.ResponseRedactionRange
+	CBCRedactionSpecReceived         atomic.Bool
+	cbcMu                            sync.Mutex
 
 	// Counter-at-join: each handler increments once; whichever bumps it
 	// to 2 dispatches. Replaces a racy "if other half present" pattern.
@@ -125,7 +142,7 @@ func (t *TEETSessionManager) RemoveTEETSessionState(sessionID string) {
 	state := t.teetStates[sessionID]
 	delete(t.teetStates, sessionID)
 	t.stateMutex.Unlock()
-	state.DestroyOPRFSessions()
+	state.DestroySessionState()
 }
 
 func (t *TEETSessionManager) controlGenerationForSession(session *shared.Session) (uint64, bool) {
@@ -173,7 +190,7 @@ func (t *TEETSessionManager) closeSessionIfCurrent(session *shared.Session) erro
 		delete(t.teetStates, session.ID)
 	}
 	t.stateMutex.Unlock()
-	removed.DestroyOPRFSessions()
+	removed.DestroySessionState()
 	return t.SessionManager.CloseSessionIfCurrent(session)
 }
 
@@ -277,6 +294,72 @@ func (s *TEETSessionState) DestroyOPRFSessions() {
 		pending.Session.Destroy()
 		pending.Payload.Release()
 	}
+}
+
+func (s *TEETSessionState) DestroySessionState() {
+	if s == nil {
+		return
+	}
+	s.DestroyOPRFSessions()
+	s.cbcMu.Lock()
+	defer s.cbcMu.Unlock()
+	s.CBCReadContext.Destroy()
+	clear(s.CBCAuthenticatedResponse)
+	s.CBCAuthenticatedResponse = nil
+	clear(s.CBCAuthenticatedRedactedResponse)
+	s.CBCAuthenticatedRedactedResponse = nil
+	clear(s.ConsolidatedResponseCiphertext)
+	s.ConsolidatedResponseCiphertext = nil
+	clear(s.CBCResponseDigest)
+	s.CBCResponseDigest = nil
+}
+
+type tls12CBCSigningSnapshot struct {
+	binding          *teeproto.TLS12CBCSessionBinding
+	response         []byte
+	redactedResponse []byte
+	digest           []byte
+	plaintextLengths []uint32
+	ranges           []*teeproto.ResponseRedactionRange
+	active           bool
+}
+
+// snapshotCBCResponseForOPRF returns the authenticated CBC plaintext while
+// holding the mutex that publishes and destroys it. The boolean distinguishes
+// a CBC session from the legacy split-AEAD path.
+func (s *TEETSessionState) snapshotCBCResponseForOPRF() ([]byte, bool) {
+	if s == nil {
+		return nil, false
+	}
+	s.cbcMu.Lock()
+	defer s.cbcMu.Unlock()
+	if s.CBCBinding == nil {
+		return nil, false
+	}
+	return append([]byte(nil), s.CBCAuthenticatedResponse...), true
+}
+
+func (s *TEETSessionState) snapshotTLS12CBCSigningState() tls12CBCSigningSnapshot {
+	if s == nil {
+		return tls12CBCSigningSnapshot{}
+	}
+	s.cbcMu.Lock()
+	defer s.cbcMu.Unlock()
+	if s.CBCBinding == nil || s.CBCReadContext == nil {
+		return tls12CBCSigningSnapshot{}
+	}
+	snapshot := tls12CBCSigningSnapshot{
+		binding:          proto.Clone(s.CBCBinding).(*teeproto.TLS12CBCSessionBinding),
+		response:         append([]byte(nil), s.CBCAuthenticatedResponse...),
+		redactedResponse: append([]byte(nil), s.CBCAuthenticatedRedactedResponse...),
+		digest:           append([]byte(nil), s.CBCResponseDigest...),
+		plaintextLengths: append([]uint32(nil), s.CBCPlaintextRecordLengths...),
+		active:           true,
+	}
+	for _, item := range s.CBCResponseRedactionRanges {
+		snapshot.ranges = append(snapshot.ranges, &teeproto.ResponseRedactionRange{Start: item.GetStart(), Length: item.GetLength()})
+	}
+	return snapshot
 }
 
 // GetOPRFResult safely retrieves an OPRF result for the given range index

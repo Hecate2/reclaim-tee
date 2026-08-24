@@ -4,6 +4,21 @@ package teeproto;
 
 option go_package = "tee-mpc/proto;teeproto";
 
+enum TLS12CBCRecordMode {
+  TLS12_CBC_RECORD_MODE_UNSPECIFIED = 0;
+  TLS12_CBC_RECORD_MODE_MAC_THEN_ENCRYPT = 1;
+  TLS12_CBC_RECORD_MODE_ENCRYPT_THEN_MAC = 2;
+}
+
+// Shared, signed binding for the trusted-TEE TLS 1.2 CBC contract.
+message TLS12CBCSessionBinding {
+  uint32 contract_version = 1;
+  uint32 cipher_suite = 2;
+  TLS12CBCRecordMode record_mode = 3;
+  bool extended_master_secret = 4;
+  bytes session_binding = 5; // exactly 32 random bytes
+}
+
 // Shared range types
 message RequestRedactionRange {
   int32 start = 1;
@@ -15,6 +30,12 @@ message RequestRedactionRange {
 message ResponseRedactionRange {
   int32 start = 1;
   int32 length = 2;
+}
+
+message TLSRecord {
+  bytes header = 1;  // exact five-byte TLS record header
+  bytes payload = 2; // exact record payload
+  uint64 seq_num = 3;
 }
 
 // Streams and small shared structures
@@ -41,5 +62,3 @@ message CertificateInfo {
 // Empty placeholders
 message FinishedMessage {}
 message AttestationRequestData {}
-
-

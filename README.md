@@ -1,14 +1,18 @@
 # Reclaim TEE
 
-Secure TLS attestation protocol using Trusted Execution Environments (TEE) and Multi-Party Computation (MPC). Users can prove data from any HTTPS website while keeping sensitive parts private through redaction and zero-knowledge proofs. Runs on GCP Confidential Space.
+Secure TLS attestation protocol that uses Trusted Execution Environments (TEE) and Multi-Party Computation (MPC). It runs on GCP Confidential Space.
+
+The preferred split-AEAD path keeps request and response views separate. The TLS 1.2 CBC compatibility path uses a different trust boundary.
 
 ## Architecture
 
-Two TEE services split the TLS processing so neither has full access alone:
+Two TEE services split AEAD processing so neither service receives the complete request-response pair:
 
 - **TEE_K** (`tee_k/`) -- Holds TLS keys, handles encryption, manages connections to target websites. Port 8080.
 - **TEE_T** (`tee_t/`) -- Computes authentication tags without key access, verifies integrity. Port 8081.
 - **Client** (`client/`, `demo_standalone/`) -- Orchestrates the protocol, handles redaction, generates proofs.
+
+For trusted TLS 1.2 CBC, TEE_K receives the full request. TEE_T receives the full authenticated response.
 
 Supporting:
 - `minitls/` -- Custom TLS 1.2/1.3 with split AEAD support
@@ -52,8 +56,8 @@ go test -cover ./...          # with coverage
 1. Client connects to TEE_K and TEE_T over WebSocket
 2. TEE_K and TEE_T perform mutual attestation and OT precomputation (100,000 initial OTs)
 3. TEE_K establishes TLS connection with the target website
-4. Client sends redacted request through split AEAD (TEE_K encrypts, TEE_T computes tags)
-5. Response decrypted and verified through same split process
+4. TLS negotiation selects the split-AEAD path or the TLS 1.2 CBC path
+5. TEEs process the request and response with the selected trust boundary
 6. MPC OPRF with garbled circuits and precomputed random OT for key derivation proofs
 7. Client generates ZK proofs and verification bundle
 8. Attestor validates the bundle and issues a signed claim
@@ -166,3 +170,5 @@ tail -f /tmp/demo_teet.log
 # Force TLS version
 FORCE_TLS_VERSION=1.3 ./demo.sh
 ```
+
+TLS 1.2 CBC is always available. AEAD suites remain preferred.

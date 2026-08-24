@@ -3,6 +3,15 @@
 Symbolic analysis of the split-AEAD protocol (whitepaper §3.2, Algorithms 3–6)
 in **Tamarin 1.12.0** / Maude 3.5.1.
 
+This report covers only the split-AEAD path. It does not cover the trusted
+TLS 1.2 CBC compatibility path.
+
+In the CBC path, `TEE_K` receives the full request. `TEE_T` authenticates and
+decrypts the full response. The split-view privacy lemmas do not apply there.
+
+The CBC path uses a separate signed endpoint contract. This report does not
+claim a Tamarin result for that contract.
+
 Every lemma below has a definite verdict. Nothing times out, nothing exhausts
 memory. Full suite: `./verify_all.sh`, about four minutes at 8G.
 
@@ -158,6 +167,8 @@ any of them.
   silently inflates the K-direction results.
 - One record per direction; three request segments, two response segments; one
   TEE pair. No OPRF, no key rotation.
+- **No trusted CBC path.** The TLS 1.2 CBC mode has a different trust boundary
+  and different signed fields. None of the results in this report cover it.
 - The invariants prove the **design** has the property and pin exactly what
   must hold. They say nothing about the shipped binary — that gap closes
   through reproducible builds, SEV-SNP measurement and the RA-TLS peer check,

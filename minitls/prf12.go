@@ -51,18 +51,10 @@ func pHash(hashFunc func() hash.Hash, secret, seed []byte, length int) []byte {
 // PRF(secret, label, seed) = P_SHA256(secret, label + seed) for SHA-256 based ciphers
 // PRF(secret, label, seed) = P_SHA384(secret, label + seed) for SHA-384 based ciphers
 func prf12(cipherSuite uint16, secret []byte, label string, seed []byte, length int) []byte {
-	// Determine which hash function to use based on cipher suite
-	var hashFunc func() hash.Hash
-
-	switch cipherSuite {
-	case TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256, TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
-		TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256, TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256:
-		hashFunc = sha256.New
-	case TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384, TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384:
-		hashFunc = sha512.New384 // SHA-384
-	default:
-		// Default to SHA-256 for unknown cipher suites
-		hashFunc = sha256.New
+	// TLS 1.2 suites carry their PRF hash in the negotiated suite metadata.
+	hashFunc := sha256.New
+	if info := GetCipherSuiteInfo(cipherSuite); info != nil && info.HashFunc == "SHA384" {
+		hashFunc = sha512.New384
 	}
 
 	// Construct the seed: label + seed
@@ -192,4 +184,41 @@ func (ks *TLS12KeySchedule) DeriveKeys() (clientWriteKey, clientWriteIV, serverW
 	copy(serverWriteIV, keyBlock[offset:offset+ivLen])
 
 	return clientWriteKey, clientWriteIV, serverWriteKey, serverWriteIV, nil
+}
+
+// TLS12CBCKeys contains the six values derived for a TLS 1.2 block-cipher
+// connection. The ordering follows RFC 5246 section 6.3.
+type TLS12CBCKeys struct {
+	ClientMACKey []byte
+	ServerMACKey []byte
+	ClientKey    []byte
+	ServerKey    []byte
+	ClientIV     []byte
+	ServerIV     []byte
+}
+
+// DeriveCBCKeys derives the MAC keys, AES keys, and IVs for a supported
+// TLS 1.2 AES-CBC suite.
+func (ks *TLS12KeySchedule) DeriveCBCKeys() (*TLS12CBCKeys, error) {
+	info := GetCipherSuiteInfo(ks.cipherSuite)
+	if info == nil || !info.IsCBC || info.MACSize == 0 || info.IVSize == 0 {
+		return nil, fmt.Errorf("unsupported TLS 1.2 CBC cipher suite: 0x%04x", ks.cipherSuite)
+	}
+
+	keyBlock := ks.DeriveKeyBlock(2 * (info.MACSize + info.KeySize + info.IVSize))
+	offset := 0
+	take := func(length int) []byte {
+		value := append([]byte(nil), keyBlock[offset:offset+length]...)
+		offset += length
+		return value
+	}
+
+	return &TLS12CBCKeys{
+		ClientMACKey: take(info.MACSize),
+		ServerMACKey: take(info.MACSize),
+		ClientKey:    take(info.KeySize),
+		ServerKey:    take(info.KeySize),
+		ClientIV:     take(info.IVSize),
+		ServerIV:     take(info.IVSize),
+	}, nil
 }

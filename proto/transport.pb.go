@@ -126,6 +126,11 @@ type Envelope struct {
 	//	*Envelope_SessionCreatedAck
 	//	*Envelope_TeekPairAssignment
 	//	*Envelope_ClientAuth
+	//	*Envelope_Tls12CbcReadState
+	//	*Envelope_Tls12CbcReadStateAck
+	//	*Envelope_Tls12CbcRequest
+	//	*Envelope_BatchedTlsRecords
+	//	*Envelope_AuthenticatedCbcResponse
 	Payload       isEnvelope_Payload `protobuf_oneof:"payload"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -590,6 +595,51 @@ func (x *Envelope) GetClientAuth() *ClientAuth {
 	return nil
 }
 
+func (x *Envelope) GetTls12CbcReadState() *TLS12CBCReadState {
+	if x != nil {
+		if x, ok := x.Payload.(*Envelope_Tls12CbcReadState); ok {
+			return x.Tls12CbcReadState
+		}
+	}
+	return nil
+}
+
+func (x *Envelope) GetTls12CbcReadStateAck() *TLS12CBCReadStateAck {
+	if x != nil {
+		if x, ok := x.Payload.(*Envelope_Tls12CbcReadStateAck); ok {
+			return x.Tls12CbcReadStateAck
+		}
+	}
+	return nil
+}
+
+func (x *Envelope) GetTls12CbcRequest() *TLS12CBCRequest {
+	if x != nil {
+		if x, ok := x.Payload.(*Envelope_Tls12CbcRequest); ok {
+			return x.Tls12CbcRequest
+		}
+	}
+	return nil
+}
+
+func (x *Envelope) GetBatchedTlsRecords() *BatchedTLSRecords {
+	if x != nil {
+		if x, ok := x.Payload.(*Envelope_BatchedTlsRecords); ok {
+			return x.BatchedTlsRecords
+		}
+	}
+	return nil
+}
+
+func (x *Envelope) GetAuthenticatedCbcResponse() *AuthenticatedCBCResponse {
+	if x != nil {
+		if x, ok := x.Payload.(*Envelope_AuthenticatedCbcResponse); ok {
+			return x.AuthenticatedCbcResponse
+		}
+	}
+	return nil
+}
+
 type isEnvelope_Payload interface {
 	isEnvelope_Payload()
 }
@@ -782,6 +832,27 @@ type Envelope_ClientAuth struct {
 	ClientAuth *ClientAuth `protobuf:"bytes,85,opt,name=client_auth,json=clientAuth,proto3,oneof"` // Client -> TEE_K/TEE_T
 }
 
+type Envelope_Tls12CbcReadState struct {
+	// Trusted-TEE TLS 1.2 CBC compatibility path.
+	Tls12CbcReadState *TLS12CBCReadState `protobuf:"bytes,86,opt,name=tls12_cbc_read_state,json=tls12CbcReadState,proto3,oneof"` // TEE_K -> TEE_T
+}
+
+type Envelope_Tls12CbcReadStateAck struct {
+	Tls12CbcReadStateAck *TLS12CBCReadStateAck `protobuf:"bytes,87,opt,name=tls12_cbc_read_state_ack,json=tls12CbcReadStateAck,proto3,oneof"` // TEE_T -> TEE_K
+}
+
+type Envelope_Tls12CbcRequest struct {
+	Tls12CbcRequest *TLS12CBCRequest `protobuf:"bytes,88,opt,name=tls12_cbc_request,json=tls12CbcRequest,proto3,oneof"` // Client -> TEE_K
+}
+
+type Envelope_BatchedTlsRecords struct {
+	BatchedTlsRecords *BatchedTLSRecords `protobuf:"bytes,89,opt,name=batched_tls_records,json=batchedTlsRecords,proto3,oneof"` // TEE_K -> Client or Client -> TEE_T
+}
+
+type Envelope_AuthenticatedCbcResponse struct {
+	AuthenticatedCbcResponse *AuthenticatedCBCResponse `protobuf:"bytes,90,opt,name=authenticated_cbc_response,json=authenticatedCbcResponse,proto3,oneof"` // TEE_T -> Client
+}
+
 func (*Envelope_ConnectionReady) isEnvelope_Payload() {}
 
 func (*Envelope_TcpReady) isEnvelope_Payload() {}
@@ -867,6 +938,16 @@ func (*Envelope_SessionCreatedAck) isEnvelope_Payload() {}
 func (*Envelope_TeekPairAssignment) isEnvelope_Payload() {}
 
 func (*Envelope_ClientAuth) isEnvelope_Payload() {}
+
+func (*Envelope_Tls12CbcReadState) isEnvelope_Payload() {}
+
+func (*Envelope_Tls12CbcReadStateAck) isEnvelope_Payload() {}
+
+func (*Envelope_Tls12CbcRequest) isEnvelope_Payload() {}
+
+func (*Envelope_BatchedTlsRecords) isEnvelope_Payload() {}
+
+func (*Envelope_AuthenticatedCbcResponse) isEnvelope_Payload() {}
 
 // Basic types aligned with existing JSON models
 type RequestConnection struct {
@@ -1086,10 +1167,11 @@ func (x *TCPData) GetData() []byte {
 }
 
 type HandshakeComplete struct {
-	state            protoimpl.MessageState `protogen:"open.v1"`
-	Success          bool                   `protobuf:"varint,1,opt,name=success,proto3" json:"success,omitempty"`
-	CertificateChain [][]byte               `protobuf:"bytes,2,rep,name=certificate_chain,json=certificateChain,proto3" json:"certificate_chain,omitempty"`
-	CipherSuite      uint32                 `protobuf:"varint,3,opt,name=cipher_suite,json=cipherSuite,proto3" json:"cipher_suite,omitempty"` // Negotiated cipher suite for consolidated verification
+	state            protoimpl.MessageState  `protogen:"open.v1"`
+	Success          bool                    `protobuf:"varint,1,opt,name=success,proto3" json:"success,omitempty"`
+	CertificateChain [][]byte                `protobuf:"bytes,2,rep,name=certificate_chain,json=certificateChain,proto3" json:"certificate_chain,omitempty"`
+	CipherSuite      uint32                  `protobuf:"varint,3,opt,name=cipher_suite,json=cipherSuite,proto3" json:"cipher_suite,omitempty"`              // Negotiated cipher suite for consolidated verification
+	Tls12CbcBinding  *TLS12CBCSessionBinding `protobuf:"bytes,4,opt,name=tls12_cbc_binding,json=tls12CbcBinding,proto3" json:"tls12_cbc_binding,omitempty"` // present only for trusted CBC
 	unknownFields    protoimpl.UnknownFields
 	sizeCache        protoimpl.SizeCache
 }
@@ -1143,6 +1225,13 @@ func (x *HandshakeComplete) GetCipherSuite() uint32 {
 		return x.CipherSuite
 	}
 	return 0
+}
+
+func (x *HandshakeComplete) GetTls12CbcBinding() *TLS12CBCSessionBinding {
+	if x != nil {
+		return x.Tls12CbcBinding
+	}
+	return nil
 }
 
 type HandshakeKeyDisclosure struct {
@@ -3549,6 +3638,290 @@ func (x *ClientAuth) GetClientVersion() string {
 	return ""
 }
 
+type TLS12CBCReadState struct {
+	state         protoimpl.MessageState  `protogen:"open.v1"`
+	Binding       *TLS12CBCSessionBinding `protobuf:"bytes,1,opt,name=binding,proto3" json:"binding,omitempty"`
+	ReadKey       []byte                  `protobuf:"bytes,2,opt,name=read_key,json=readKey,proto3" json:"read_key,omitempty"`
+	ReadMacKey    []byte                  `protobuf:"bytes,3,opt,name=read_mac_key,json=readMacKey,proto3" json:"read_mac_key,omitempty"`
+	ReadIv        []byte                  `protobuf:"bytes,4,opt,name=read_iv,json=readIv,proto3" json:"read_iv,omitempty"`
+	ReadSequence  uint64                  `protobuf:"varint,5,opt,name=read_sequence,json=readSequence,proto3" json:"read_sequence,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *TLS12CBCReadState) Reset() {
+	*x = TLS12CBCReadState{}
+	mi := &file_transport_proto_msgTypes[47]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *TLS12CBCReadState) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*TLS12CBCReadState) ProtoMessage() {}
+
+func (x *TLS12CBCReadState) ProtoReflect() protoreflect.Message {
+	mi := &file_transport_proto_msgTypes[47]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use TLS12CBCReadState.ProtoReflect.Descriptor instead.
+func (*TLS12CBCReadState) Descriptor() ([]byte, []int) {
+	return file_transport_proto_rawDescGZIP(), []int{47}
+}
+
+func (x *TLS12CBCReadState) GetBinding() *TLS12CBCSessionBinding {
+	if x != nil {
+		return x.Binding
+	}
+	return nil
+}
+
+func (x *TLS12CBCReadState) GetReadKey() []byte {
+	if x != nil {
+		return x.ReadKey
+	}
+	return nil
+}
+
+func (x *TLS12CBCReadState) GetReadMacKey() []byte {
+	if x != nil {
+		return x.ReadMacKey
+	}
+	return nil
+}
+
+func (x *TLS12CBCReadState) GetReadIv() []byte {
+	if x != nil {
+		return x.ReadIv
+	}
+	return nil
+}
+
+func (x *TLS12CBCReadState) GetReadSequence() uint64 {
+	if x != nil {
+		return x.ReadSequence
+	}
+	return 0
+}
+
+type TLS12CBCReadStateAck struct {
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	SessionBinding []byte                 `protobuf:"bytes,1,opt,name=session_binding,json=sessionBinding,proto3" json:"session_binding,omitempty"`
+	Success        bool                   `protobuf:"varint,2,opt,name=success,proto3" json:"success,omitempty"`
+	ErrorMessage   string                 `protobuf:"bytes,3,opt,name=error_message,json=errorMessage,proto3" json:"error_message,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *TLS12CBCReadStateAck) Reset() {
+	*x = TLS12CBCReadStateAck{}
+	mi := &file_transport_proto_msgTypes[48]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *TLS12CBCReadStateAck) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*TLS12CBCReadStateAck) ProtoMessage() {}
+
+func (x *TLS12CBCReadStateAck) ProtoReflect() protoreflect.Message {
+	mi := &file_transport_proto_msgTypes[48]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use TLS12CBCReadStateAck.ProtoReflect.Descriptor instead.
+func (*TLS12CBCReadStateAck) Descriptor() ([]byte, []int) {
+	return file_transport_proto_rawDescGZIP(), []int{48}
+}
+
+func (x *TLS12CBCReadStateAck) GetSessionBinding() []byte {
+	if x != nil {
+		return x.SessionBinding
+	}
+	return nil
+}
+
+func (x *TLS12CBCReadStateAck) GetSuccess() bool {
+	if x != nil {
+		return x.Success
+	}
+	return false
+}
+
+func (x *TLS12CBCReadStateAck) GetErrorMessage() string {
+	if x != nil {
+		return x.ErrorMessage
+	}
+	return ""
+}
+
+type TLS12CBCRequest struct {
+	state           protoimpl.MessageState   `protogen:"open.v1"`
+	FullRequest     []byte                   `protobuf:"bytes,1,opt,name=full_request,json=fullRequest,proto3" json:"full_request,omitempty"`
+	RedactionRanges []*RequestRedactionRange `protobuf:"bytes,2,rep,name=redaction_ranges,json=redactionRanges,proto3" json:"redaction_ranges,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *TLS12CBCRequest) Reset() {
+	*x = TLS12CBCRequest{}
+	mi := &file_transport_proto_msgTypes[49]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *TLS12CBCRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*TLS12CBCRequest) ProtoMessage() {}
+
+func (x *TLS12CBCRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_transport_proto_msgTypes[49]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use TLS12CBCRequest.ProtoReflect.Descriptor instead.
+func (*TLS12CBCRequest) Descriptor() ([]byte, []int) {
+	return file_transport_proto_rawDescGZIP(), []int{49}
+}
+
+func (x *TLS12CBCRequest) GetFullRequest() []byte {
+	if x != nil {
+		return x.FullRequest
+	}
+	return nil
+}
+
+func (x *TLS12CBCRequest) GetRedactionRanges() []*RequestRedactionRange {
+	if x != nil {
+		return x.RedactionRanges
+	}
+	return nil
+}
+
+type BatchedTLSRecords struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Records       []*TLSRecord           `protobuf:"bytes,1,rep,name=records,proto3" json:"records,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *BatchedTLSRecords) Reset() {
+	*x = BatchedTLSRecords{}
+	mi := &file_transport_proto_msgTypes[50]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *BatchedTLSRecords) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*BatchedTLSRecords) ProtoMessage() {}
+
+func (x *BatchedTLSRecords) ProtoReflect() protoreflect.Message {
+	mi := &file_transport_proto_msgTypes[50]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use BatchedTLSRecords.ProtoReflect.Descriptor instead.
+func (*BatchedTLSRecords) Descriptor() ([]byte, []int) {
+	return file_transport_proto_rawDescGZIP(), []int{50}
+}
+
+func (x *BatchedTLSRecords) GetRecords() []*TLSRecord {
+	if x != nil {
+		return x.Records
+	}
+	return nil
+}
+
+type AuthenticatedCBCResponse struct {
+	state         protoimpl.MessageState               `protogen:"open.v1"`
+	Fragments     []*AuthenticatedCBCResponse_Fragment `protobuf:"bytes,1,rep,name=fragments,proto3" json:"fragments,omitempty"`
+	CloseNotify   bool                                 `protobuf:"varint,2,opt,name=close_notify,json=closeNotify,proto3" json:"close_notify,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AuthenticatedCBCResponse) Reset() {
+	*x = AuthenticatedCBCResponse{}
+	mi := &file_transport_proto_msgTypes[51]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AuthenticatedCBCResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AuthenticatedCBCResponse) ProtoMessage() {}
+
+func (x *AuthenticatedCBCResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_transport_proto_msgTypes[51]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AuthenticatedCBCResponse.ProtoReflect.Descriptor instead.
+func (*AuthenticatedCBCResponse) Descriptor() ([]byte, []int) {
+	return file_transport_proto_rawDescGZIP(), []int{51}
+}
+
+func (x *AuthenticatedCBCResponse) GetFragments() []*AuthenticatedCBCResponse_Fragment {
+	if x != nil {
+		return x.Fragments
+	}
+	return nil
+}
+
+func (x *AuthenticatedCBCResponse) GetCloseNotify() bool {
+	if x != nil {
+		return x.CloseNotify
+	}
+	return false
+}
+
 type BatchedResponseLengths_Length struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Length        int32                  `protobuf:"varint,1,opt,name=length,proto3" json:"length,omitempty"`
@@ -3561,7 +3934,7 @@ type BatchedResponseLengths_Length struct {
 
 func (x *BatchedResponseLengths_Length) Reset() {
 	*x = BatchedResponseLengths_Length{}
-	mi := &file_transport_proto_msgTypes[47]
+	mi := &file_transport_proto_msgTypes[52]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3573,7 +3946,7 @@ func (x *BatchedResponseLengths_Length) String() string {
 func (*BatchedResponseLengths_Length) ProtoMessage() {}
 
 func (x *BatchedResponseLengths_Length) ProtoReflect() protoreflect.Message {
-	mi := &file_transport_proto_msgTypes[47]
+	mi := &file_transport_proto_msgTypes[52]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3627,7 +4000,7 @@ type BatchedTagSecrets_TagSecret struct {
 
 func (x *BatchedTagSecrets_TagSecret) Reset() {
 	*x = BatchedTagSecrets_TagSecret{}
-	mi := &file_transport_proto_msgTypes[48]
+	mi := &file_transport_proto_msgTypes[53]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3639,7 +4012,7 @@ func (x *BatchedTagSecrets_TagSecret) String() string {
 func (*BatchedTagSecrets_TagSecret) ProtoMessage() {}
 
 func (x *BatchedTagSecrets_TagSecret) ProtoReflect() protoreflect.Message {
-	mi := &file_transport_proto_msgTypes[48]
+	mi := &file_transport_proto_msgTypes[53]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3680,7 +4053,7 @@ type BatchedTagVerifications_Verification struct {
 
 func (x *BatchedTagVerifications_Verification) Reset() {
 	*x = BatchedTagVerifications_Verification{}
-	mi := &file_transport_proto_msgTypes[49]
+	mi := &file_transport_proto_msgTypes[54]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3692,7 +4065,7 @@ func (x *BatchedTagVerifications_Verification) String() string {
 func (*BatchedTagVerifications_Verification) ProtoMessage() {}
 
 func (x *BatchedTagVerifications_Verification) ProtoReflect() protoreflect.Message {
-	mi := &file_transport_proto_msgTypes[49]
+	mi := &file_transport_proto_msgTypes[54]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3729,11 +4102,71 @@ func (x *BatchedTagVerifications_Verification) GetMessage() string {
 	return ""
 }
 
+type AuthenticatedCBCResponse_Fragment struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	SeqNum        uint64                 `protobuf:"varint,1,opt,name=seq_num,json=seqNum,proto3" json:"seq_num,omitempty"`
+	RecordType    uint32                 `protobuf:"varint,2,opt,name=record_type,json=recordType,proto3" json:"record_type,omitempty"`
+	Plaintext     []byte                 `protobuf:"bytes,3,opt,name=plaintext,proto3" json:"plaintext,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AuthenticatedCBCResponse_Fragment) Reset() {
+	*x = AuthenticatedCBCResponse_Fragment{}
+	mi := &file_transport_proto_msgTypes[55]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AuthenticatedCBCResponse_Fragment) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AuthenticatedCBCResponse_Fragment) ProtoMessage() {}
+
+func (x *AuthenticatedCBCResponse_Fragment) ProtoReflect() protoreflect.Message {
+	mi := &file_transport_proto_msgTypes[55]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AuthenticatedCBCResponse_Fragment.ProtoReflect.Descriptor instead.
+func (*AuthenticatedCBCResponse_Fragment) Descriptor() ([]byte, []int) {
+	return file_transport_proto_rawDescGZIP(), []int{51, 0}
+}
+
+func (x *AuthenticatedCBCResponse_Fragment) GetSeqNum() uint64 {
+	if x != nil {
+		return x.SeqNum
+	}
+	return 0
+}
+
+func (x *AuthenticatedCBCResponse_Fragment) GetRecordType() uint32 {
+	if x != nil {
+		return x.RecordType
+	}
+	return 0
+}
+
+func (x *AuthenticatedCBCResponse_Fragment) GetPlaintext() []byte {
+	if x != nil {
+		return x.Plaintext
+	}
+	return nil
+}
+
 var File_transport_proto protoreflect.FileDescriptor
 
 const file_transport_proto_rawDesc = "" +
 	"\n" +
-	"\x0ftransport.proto\x12\bteeproto\x1a\fcommon.proto\x1a\rsigning.proto\x1a\x12attestor_api.proto\"\xb9\x1b\n" +
+	"\x0ftransport.proto\x12\bteeproto\x1a\fcommon.proto\x1a\rsigning.proto\x1a\x12attestor_api.proto\"\xdf\x1e\n" +
 	"\bEnvelope\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x10\n" +
@@ -3785,7 +4218,12 @@ const file_transport_proto_rawDesc = "" +
 	"\x13session_created_ack\x18S \x01(\v2\x1b.teeproto.SessionCreatedAckH\x00R\x11sessionCreatedAck\x12P\n" +
 	"\x14teek_pair_assignment\x18T \x01(\v2\x1c.teeproto.TEEKPairAssignmentH\x00R\x12teekPairAssignment\x127\n" +
 	"\vclient_auth\x18U \x01(\v2\x14.teeproto.ClientAuthH\x00R\n" +
-	"clientAuthB\t\n" +
+	"clientAuth\x12N\n" +
+	"\x14tls12_cbc_read_state\x18V \x01(\v2\x1b.teeproto.TLS12CBCReadStateH\x00R\x11tls12CbcReadState\x12X\n" +
+	"\x18tls12_cbc_read_state_ack\x18W \x01(\v2\x1e.teeproto.TLS12CBCReadStateAckH\x00R\x14tls12CbcReadStateAck\x12G\n" +
+	"\x11tls12_cbc_request\x18X \x01(\v2\x19.teeproto.TLS12CBCRequestH\x00R\x0ftls12CbcRequest\x12M\n" +
+	"\x13batched_tls_records\x18Y \x01(\v2\x1b.teeproto.BatchedTLSRecordsH\x00R\x11batchedTlsRecords\x12b\n" +
+	"\x1aauthenticated_cbc_response\x18Z \x01(\v2\".teeproto.AuthenticatedCBCResponseH\x00R\x18authenticatedCbcResponseB\t\n" +
 	"\apayload\"\xc3\x01\n" +
 	"\x11RequestConnection\x12\x1a\n" +
 	"\bhostname\x18\x01 \x01(\tR\bhostname\x12\x12\n" +
@@ -3799,11 +4237,12 @@ const file_transport_proto_rawDesc = "" +
 	"\bTCPReady\x12\x18\n" +
 	"\asuccess\x18\x01 \x01(\bR\asuccess\"\x1d\n" +
 	"\aTCPData\x12\x12\n" +
-	"\x04data\x18\x01 \x01(\fR\x04data\"}\n" +
+	"\x04data\x18\x01 \x01(\fR\x04data\"\xcb\x01\n" +
 	"\x11HandshakeComplete\x12\x18\n" +
 	"\asuccess\x18\x01 \x01(\bR\asuccess\x12+\n" +
 	"\x11certificate_chain\x18\x02 \x03(\fR\x10certificateChain\x12!\n" +
-	"\fcipher_suite\x18\x03 \x01(\rR\vcipherSuite\"\xea\x01\n" +
+	"\fcipher_suite\x18\x03 \x01(\rR\vcipherSuite\x12L\n" +
+	"\x11tls12_cbc_binding\x18\x04 \x01(\v2 .teeproto.TLS12CBCSessionBindingR\x0ftls12CbcBinding\"\xea\x01\n" +
 	"\x16HandshakeKeyDisclosure\x12#\n" +
 	"\rhandshake_key\x18\x01 \x01(\fR\fhandshakeKey\x12!\n" +
 	"\fhandshake_iv\x18\x02 \x01(\fR\vhandshakeIv\x12-\n" +
@@ -4009,7 +4448,31 @@ const file_transport_proto_rawDesc = "" +
 	"\n" +
 	"ClientAuth\x12\x10\n" +
 	"\x03jwt\x18\x01 \x01(\tR\x03jwt\x12%\n" +
-	"\x0eclient_version\x18\x02 \x01(\tR\rclientVersion*U\n" +
+	"\x0eclient_version\x18\x02 \x01(\tR\rclientVersion\"\xca\x01\n" +
+	"\x11TLS12CBCReadState\x12:\n" +
+	"\abinding\x18\x01 \x01(\v2 .teeproto.TLS12CBCSessionBindingR\abinding\x12\x19\n" +
+	"\bread_key\x18\x02 \x01(\fR\areadKey\x12 \n" +
+	"\fread_mac_key\x18\x03 \x01(\fR\n" +
+	"readMacKey\x12\x17\n" +
+	"\aread_iv\x18\x04 \x01(\fR\x06readIv\x12#\n" +
+	"\rread_sequence\x18\x05 \x01(\x04R\freadSequence\"~\n" +
+	"\x14TLS12CBCReadStateAck\x12'\n" +
+	"\x0fsession_binding\x18\x01 \x01(\fR\x0esessionBinding\x12\x18\n" +
+	"\asuccess\x18\x02 \x01(\bR\asuccess\x12#\n" +
+	"\rerror_message\x18\x03 \x01(\tR\ferrorMessage\"\x80\x01\n" +
+	"\x0fTLS12CBCRequest\x12!\n" +
+	"\ffull_request\x18\x01 \x01(\fR\vfullRequest\x12J\n" +
+	"\x10redaction_ranges\x18\x02 \x03(\v2\x1f.teeproto.RequestRedactionRangeR\x0fredactionRanges\"B\n" +
+	"\x11BatchedTLSRecords\x12-\n" +
+	"\arecords\x18\x01 \x03(\v2\x13.teeproto.TLSRecordR\arecords\"\xec\x01\n" +
+	"\x18AuthenticatedCBCResponse\x12I\n" +
+	"\tfragments\x18\x01 \x03(\v2+.teeproto.AuthenticatedCBCResponse.FragmentR\tfragments\x12!\n" +
+	"\fclose_notify\x18\x02 \x01(\bR\vcloseNotify\x1ab\n" +
+	"\bFragment\x12\x17\n" +
+	"\aseq_num\x18\x01 \x01(\x04R\x06seqNum\x12\x1f\n" +
+	"\vrecord_type\x18\x02 \x01(\rR\n" +
+	"recordType\x12\x1c\n" +
+	"\tplaintext\x18\x03 \x01(\fR\tplaintext*U\n" +
 	"\x06Sender\x12\x16\n" +
 	"\x12SENDER_UNSPECIFIED\x10\x00\x12\x0f\n" +
 	"\vSENDER_USER\x10\x01\x12\x10\n" +
@@ -4029,7 +4492,7 @@ func file_transport_proto_rawDescGZIP() []byte {
 }
 
 var file_transport_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_transport_proto_msgTypes = make([]protoimpl.MessageInfo, 50)
+var file_transport_proto_msgTypes = make([]protoimpl.MessageInfo, 56)
 var file_transport_proto_goTypes = []any{
 	(Sender)(0),                                    // 0: teeproto.Sender
 	(*Envelope)(nil),                               // 1: teeproto.Envelope
@@ -4079,24 +4542,32 @@ var file_transport_proto_goTypes = []any{
 	(*SessionClosed)(nil),                          // 45: teeproto.SessionClosed
 	(*TEEKPairAssignment)(nil),                     // 46: teeproto.TEEKPairAssignment
 	(*ClientAuth)(nil),                             // 47: teeproto.ClientAuth
-	(*BatchedResponseLengths_Length)(nil),          // 48: teeproto.BatchedResponseLengths.Length
-	(*BatchedTagSecrets_TagSecret)(nil),            // 49: teeproto.BatchedTagSecrets.TagSecret
-	(*BatchedTagVerifications_Verification)(nil),   // 50: teeproto.BatchedTagVerifications.Verification
-	(*ErrorData)(nil),                              // 51: teeproto.ErrorData
-	(*FinishedMessage)(nil),                        // 52: teeproto.FinishedMessage
-	(*SignedMessage)(nil),                          // 53: teeproto.SignedMessage
-	(*RequestRedactionRange)(nil),                  // 54: teeproto.RequestRedactionRange
-	(*ResponseRedactionRange)(nil),                 // 55: teeproto.ResponseRedactionRange
-	(*ResponseDecryptionStreamData)(nil),           // 56: teeproto.ResponseDecryptionStreamData
-	(*SignedRedactedDecryptionStream)(nil),         // 57: teeproto.SignedRedactedDecryptionStream
-	(*AttestationReport)(nil),                      // 58: teeproto.AttestationReport
+	(*TLS12CBCReadState)(nil),                      // 48: teeproto.TLS12CBCReadState
+	(*TLS12CBCReadStateAck)(nil),                   // 49: teeproto.TLS12CBCReadStateAck
+	(*TLS12CBCRequest)(nil),                        // 50: teeproto.TLS12CBCRequest
+	(*BatchedTLSRecords)(nil),                      // 51: teeproto.BatchedTLSRecords
+	(*AuthenticatedCBCResponse)(nil),               // 52: teeproto.AuthenticatedCBCResponse
+	(*BatchedResponseLengths_Length)(nil),          // 53: teeproto.BatchedResponseLengths.Length
+	(*BatchedTagSecrets_TagSecret)(nil),            // 54: teeproto.BatchedTagSecrets.TagSecret
+	(*BatchedTagVerifications_Verification)(nil),   // 55: teeproto.BatchedTagVerifications.Verification
+	(*AuthenticatedCBCResponse_Fragment)(nil),      // 56: teeproto.AuthenticatedCBCResponse.Fragment
+	(*ErrorData)(nil),                              // 57: teeproto.ErrorData
+	(*FinishedMessage)(nil),                        // 58: teeproto.FinishedMessage
+	(*SignedMessage)(nil),                          // 59: teeproto.SignedMessage
+	(*TLS12CBCSessionBinding)(nil),                 // 60: teeproto.TLS12CBCSessionBinding
+	(*RequestRedactionRange)(nil),                  // 61: teeproto.RequestRedactionRange
+	(*ResponseRedactionRange)(nil),                 // 62: teeproto.ResponseRedactionRange
+	(*ResponseDecryptionStreamData)(nil),           // 63: teeproto.ResponseDecryptionStreamData
+	(*SignedRedactedDecryptionStream)(nil),         // 64: teeproto.SignedRedactedDecryptionStream
+	(*AttestationReport)(nil),                      // 65: teeproto.AttestationReport
+	(*TLSRecord)(nil),                              // 66: teeproto.TLSRecord
 }
 var file_transport_proto_depIdxs = []int32{
 	0,  // 0: teeproto.Envelope.sender:type_name -> teeproto.Sender
 	3,  // 1: teeproto.Envelope.connection_ready:type_name -> teeproto.ConnectionReady
 	4,  // 2: teeproto.Envelope.tcp_ready:type_name -> teeproto.TCPReady
-	51, // 3: teeproto.Envelope.error:type_name -> teeproto.ErrorData
-	52, // 4: teeproto.Envelope.finished:type_name -> teeproto.FinishedMessage
+	57, // 3: teeproto.Envelope.error:type_name -> teeproto.ErrorData
+	58, // 4: teeproto.Envelope.finished:type_name -> teeproto.FinishedMessage
 	26, // 5: teeproto.Envelope.session_created:type_name -> teeproto.SessionCreated
 	28, // 6: teeproto.Envelope.session_ready:type_name -> teeproto.SessionReady
 	2,  // 7: teeproto.Envelope.request_connection:type_name -> teeproto.RequestConnection
@@ -4116,7 +4587,7 @@ var file_transport_proto_depIdxs = []int32{
 	22, // 21: teeproto.Envelope.batched_tag_secrets:type_name -> teeproto.BatchedTagSecrets
 	23, // 22: teeproto.Envelope.batched_tag_verifications:type_name -> teeproto.BatchedTagVerifications
 	24, // 23: teeproto.Envelope.batched_decryption_streams:type_name -> teeproto.BatchedDecryptionStreams
-	53, // 24: teeproto.Envelope.signed_message:type_name -> teeproto.SignedMessage
+	59, // 24: teeproto.Envelope.signed_message:type_name -> teeproto.SignedMessage
 	29, // 25: teeproto.Envelope.teek_attestation:type_name -> teeproto.TEEKAttestationRequest
 	30, // 26: teeproto.Envelope.teet_attestation:type_name -> teeproto.TEETAttestationResponse
 	32, // 27: teeproto.Envelope.oprf_ranges_submission:type_name -> teeproto.OPRFRangesSubmission
@@ -4136,25 +4607,35 @@ var file_transport_proto_depIdxs = []int32{
 	27, // 41: teeproto.Envelope.session_created_ack:type_name -> teeproto.SessionCreatedAck
 	46, // 42: teeproto.Envelope.teek_pair_assignment:type_name -> teeproto.TEEKPairAssignment
 	47, // 43: teeproto.Envelope.client_auth:type_name -> teeproto.ClientAuth
-	11, // 44: teeproto.BatchedEncryptedDataResponse.fragments:type_name -> teeproto.EncryptedDataResponse
-	54, // 45: teeproto.RedactedRequest.redaction_ranges:type_name -> teeproto.RequestRedactionRange
-	55, // 46: teeproto.ResponseRedactionSpec.ranges:type_name -> teeproto.ResponseRedactionRange
-	17, // 47: teeproto.BatchedEncryptedRequest.fragments:type_name -> teeproto.EncryptedRequest
-	54, // 48: teeproto.EncryptedRequest.redaction_ranges:type_name -> teeproto.RequestRedactionRange
-	18, // 49: teeproto.BatchedEncryptedResponses.responses:type_name -> teeproto.EncryptedResponseData
-	48, // 50: teeproto.BatchedResponseLengths.lengths:type_name -> teeproto.BatchedResponseLengths.Length
-	49, // 51: teeproto.BatchedTagSecrets.tag_secrets:type_name -> teeproto.BatchedTagSecrets.TagSecret
-	50, // 52: teeproto.BatchedTagVerifications.verifications:type_name -> teeproto.BatchedTagVerifications.Verification
-	56, // 53: teeproto.BatchedDecryptionStreams.decryption_streams:type_name -> teeproto.ResponseDecryptionStreamData
-	57, // 54: teeproto.BatchedSignedRedactedDecryptionStreams.signed_redacted_streams:type_name -> teeproto.SignedRedactedDecryptionStream
-	58, // 55: teeproto.TEEKAttestationRequest.attestation_report:type_name -> teeproto.AttestationReport
-	58, // 56: teeproto.TEETAttestationResponse.attestation_report:type_name -> teeproto.AttestationReport
-	31, // 57: teeproto.OPRFRangesSubmission.ranges:type_name -> teeproto.OPRFRangeSpec
-	58, // [58:58] is the sub-list for method output_type
-	58, // [58:58] is the sub-list for method input_type
-	58, // [58:58] is the sub-list for extension type_name
-	58, // [58:58] is the sub-list for extension extendee
-	0,  // [0:58] is the sub-list for field type_name
+	48, // 44: teeproto.Envelope.tls12_cbc_read_state:type_name -> teeproto.TLS12CBCReadState
+	49, // 45: teeproto.Envelope.tls12_cbc_read_state_ack:type_name -> teeproto.TLS12CBCReadStateAck
+	50, // 46: teeproto.Envelope.tls12_cbc_request:type_name -> teeproto.TLS12CBCRequest
+	51, // 47: teeproto.Envelope.batched_tls_records:type_name -> teeproto.BatchedTLSRecords
+	52, // 48: teeproto.Envelope.authenticated_cbc_response:type_name -> teeproto.AuthenticatedCBCResponse
+	60, // 49: teeproto.HandshakeComplete.tls12_cbc_binding:type_name -> teeproto.TLS12CBCSessionBinding
+	11, // 50: teeproto.BatchedEncryptedDataResponse.fragments:type_name -> teeproto.EncryptedDataResponse
+	61, // 51: teeproto.RedactedRequest.redaction_ranges:type_name -> teeproto.RequestRedactionRange
+	62, // 52: teeproto.ResponseRedactionSpec.ranges:type_name -> teeproto.ResponseRedactionRange
+	17, // 53: teeproto.BatchedEncryptedRequest.fragments:type_name -> teeproto.EncryptedRequest
+	61, // 54: teeproto.EncryptedRequest.redaction_ranges:type_name -> teeproto.RequestRedactionRange
+	18, // 55: teeproto.BatchedEncryptedResponses.responses:type_name -> teeproto.EncryptedResponseData
+	53, // 56: teeproto.BatchedResponseLengths.lengths:type_name -> teeproto.BatchedResponseLengths.Length
+	54, // 57: teeproto.BatchedTagSecrets.tag_secrets:type_name -> teeproto.BatchedTagSecrets.TagSecret
+	55, // 58: teeproto.BatchedTagVerifications.verifications:type_name -> teeproto.BatchedTagVerifications.Verification
+	63, // 59: teeproto.BatchedDecryptionStreams.decryption_streams:type_name -> teeproto.ResponseDecryptionStreamData
+	64, // 60: teeproto.BatchedSignedRedactedDecryptionStreams.signed_redacted_streams:type_name -> teeproto.SignedRedactedDecryptionStream
+	65, // 61: teeproto.TEEKAttestationRequest.attestation_report:type_name -> teeproto.AttestationReport
+	65, // 62: teeproto.TEETAttestationResponse.attestation_report:type_name -> teeproto.AttestationReport
+	31, // 63: teeproto.OPRFRangesSubmission.ranges:type_name -> teeproto.OPRFRangeSpec
+	60, // 64: teeproto.TLS12CBCReadState.binding:type_name -> teeproto.TLS12CBCSessionBinding
+	61, // 65: teeproto.TLS12CBCRequest.redaction_ranges:type_name -> teeproto.RequestRedactionRange
+	66, // 66: teeproto.BatchedTLSRecords.records:type_name -> teeproto.TLSRecord
+	56, // 67: teeproto.AuthenticatedCBCResponse.fragments:type_name -> teeproto.AuthenticatedCBCResponse.Fragment
+	68, // [68:68] is the sub-list for method output_type
+	68, // [68:68] is the sub-list for method input_type
+	68, // [68:68] is the sub-list for extension type_name
+	68, // [68:68] is the sub-list for extension extendee
+	0,  // [0:68] is the sub-list for field type_name
 }
 
 func init() { file_transport_proto_init() }
@@ -4209,6 +4690,11 @@ func file_transport_proto_init() {
 		(*Envelope_SessionCreatedAck)(nil),
 		(*Envelope_TeekPairAssignment)(nil),
 		(*Envelope_ClientAuth)(nil),
+		(*Envelope_Tls12CbcReadState)(nil),
+		(*Envelope_Tls12CbcReadStateAck)(nil),
+		(*Envelope_Tls12CbcRequest)(nil),
+		(*Envelope_BatchedTlsRecords)(nil),
+		(*Envelope_AuthenticatedCbcResponse)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
@@ -4216,7 +4702,7 @@ func file_transport_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_transport_proto_rawDesc), len(file_transport_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   50,
+			NumMessages:   56,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

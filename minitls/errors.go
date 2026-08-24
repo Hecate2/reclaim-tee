@@ -1,6 +1,14 @@
 package minitls
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+)
+
+// ErrBadRecordMAC is deliberately shared by all CBC authentication, padding,
+// and public ciphertext-shape failures. Callers must terminate the session
+// without exposing a more specific error.
+var ErrBadRecordMAC = errors.New("tls: bad record MAC")
 
 // CertErrorType represents different types of certificate validation errors
 type CertErrorType int

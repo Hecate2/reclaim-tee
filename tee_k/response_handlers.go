@@ -258,13 +258,18 @@ func finalSignaturePrerequisitesReady(session *shared.Session, teekState *TEEKSe
 	if session == nil || teekState == nil {
 		return false
 	}
+	session.StreamsMutex.Lock()
+	redactionReady := session.RedactionProcessingComplete
+	legacyStreamsReady := len(session.RedactedStreams) > 0
+	session.StreamsMutex.Unlock()
+	if isTLS12CBCSession(teekState) {
+		return teekState.CBCRequestReceived.Load() && teekState.tls12CBCRequestTranscriptReady() &&
+			teekState.CBCCiphertextReady.Load() && redactionReady && isOPRFReady(teekState.OPRFState.Load())
+	}
 	session.TranscriptMutex.Lock()
 	transcriptReady := len(session.TranscriptData) > 0
 	session.TranscriptMutex.Unlock()
-	session.StreamsMutex.Lock()
-	ready := session.RedactionProcessingComplete && len(session.RedactedStreams) > 0 && isOPRFReady(teekState.OPRFState.Load())
-	session.StreamsMutex.Unlock()
-	return transcriptReady && ready
+	return transcriptReady && redactionReady && legacyStreamsReady && isOPRFReady(teekState.OPRFState.Load())
 }
 
 // checkAndSendSignatureIfReady checks if all processing is complete and sends signature if ready

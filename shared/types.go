@@ -173,6 +173,7 @@ const (
 	MsgBatchedTagVerifications   MessageType = "batched_tag_verifications"
 	MsgBatchedDecryptionStreams  MessageType = "batched_decryption_streams"
 	MsgBatchedEncryptedRequest   MessageType = "batched_encrypted_request"
+	MsgBatchedTLSRecords         MessageType = "batched_tls_records"
 )
 
 // Message represents a protocol message with session context
@@ -476,9 +477,10 @@ type TCPData struct {
 
 // TEE_K to Client: TLS handshake completed
 type HandshakeCompleteData struct {
-	Success          bool     `json:"success"`
-	CertificateChain [][]byte `json:"certificate_chain"`
-	CipherSuite      uint16   `json:"cipher_suite"` // Negotiated cipher suite
+	Success          bool                             `json:"success"`
+	CertificateChain [][]byte                         `json:"certificate_chain"`
+	CipherSuite      uint16                           `json:"cipher_suite"` // Negotiated cipher suite
+	TLS12CBCBinding  *teeproto.TLS12CBCSessionBinding `json:"-"`
 }
 
 // TEE_K to Client: Handshake key disclosure for certificate verification

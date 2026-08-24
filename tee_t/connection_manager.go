@@ -911,6 +911,12 @@ func (cm *TEEKConnectionManager) handleSessionMessages(sessionID string, session
 			}
 			handlerErr = cm.teet.handleBatchedEncryptedRequest(identity, msg)
 
+		case *teeproto.Envelope_Tls12CbcReadState:
+			handlerErr = cm.teet.handleTLS12CBCReadState(identity, p.Tls12CbcReadState)
+
+		case *teeproto.Envelope_ResponseRedactionSpec:
+			handlerErr = cm.teet.handleTLS12CBCResponseRedactionSpec(identity, p.ResponseRedactionSpec)
+
 		case *teeproto.Envelope_Finished:
 			msg := &shared.Message{
 				SessionID: sessionID,

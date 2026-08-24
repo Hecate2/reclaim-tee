@@ -90,7 +90,7 @@ func TestCipherSuitesDefaults(t *testing.T) {
 	}
 
 	cipherSuites12 := config12.cipherSuites()
-	expectedTLS12 := defaultCipherSuites(VersionTLS12)
+	expectedTLS12 := append(defaultCipherSuites(VersionTLS12), tls12CBCCipherSuites()...)
 
 	if len(cipherSuites12) != len(expectedTLS12) {
 		t.Errorf("TLS 1.2 cipherSuites() length = %d, want %d", len(cipherSuites12), len(expectedTLS12))

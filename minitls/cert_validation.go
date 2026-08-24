@@ -58,15 +58,20 @@ func (c *Client) verifyCertificateChainWithDepth(certs []*x509.Certificate, serv
 		}
 	}
 
-	// Verify key usage flags — digitalSignature is required when KeyUsage
-	// is present. Matches Chrome/Firefox/NSS/JSSE/OpenSSL-TLS behavior;
-	// CA/B Forum BR §7.1.2.7.6 mandates it on public WebPKI subscriber
-	// certs (100% of top sites checked). Cert lacking the extension
-	// entirely (KeyUsage == 0) still passes — that's the legacy/IoT escape.
-	if leafCert.KeyUsage != 0 && leafCert.KeyUsage&x509.KeyUsageDigitalSignature == 0 {
+	// ECDHE and TLS 1.3 authenticate the handshake with the certificate key.
+	// Static RSA encrypts the premaster secret to the certificate key instead.
+	// A certificate without the KeyUsage extension remains accepted for legacy
+	// compatibility, matching the existing behavior.
+	requiredKeyUsage := x509.KeyUsageDigitalSignature
+	requiredKeyUsageName := "digitalSignature"
+	if TLS12CipherSuiteKeyExchange(c.cipherSuite) == TLS12KeyExchangeRSA {
+		requiredKeyUsage = x509.KeyUsageKeyEncipherment
+		requiredKeyUsageName = "keyEncipherment"
+	}
+	if leafCert.KeyUsage != 0 && leafCert.KeyUsage&requiredKeyUsage == 0 {
 		return &CertificateError{
 			Type:    CertErrorVerification,
-			Message: fmt.Sprintf("server certificate KeyUsage 0x%x lacks digitalSignature", leafCert.KeyUsage),
+			Message: fmt.Sprintf("server certificate KeyUsage 0x%x lacks %s", leafCert.KeyUsage, requiredKeyUsageName),
 		}
 	}
 

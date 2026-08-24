@@ -6,10 +6,102 @@ import (
 	"strings"
 
 	"github.com/reclaimprotocol/reclaim-tee/minitls"
+	teeproto "github.com/reclaimprotocol/reclaim-tee/proto"
 	"github.com/reclaimprotocol/reclaim-tee/shared"
 
 	"go.uber.org/zap"
 )
+
+func (c *Client) handleAuthenticatedTLS12CBCResponse(sessionID string, response *teeproto.AuthenticatedCBCResponse) error {
+	c.cbcMutex.Lock()
+	hasBinding := c.cbcBinding != nil
+	c.cbcMutex.Unlock()
+	if !hasBinding || !minitls.IsTLS12CBCCipherSuite(c.cipherSuite) {
+		return fmt.Errorf("authenticated CBC response received outside a TLS 1.2 CBC session")
+	}
+	if sessionID == "" || sessionID != c.sessionID {
+		return fmt.Errorf("authenticated CBC response session mismatch")
+	}
+	fragments := response.GetFragments()
+	if len(fragments) == 0 || len(fragments) > shared.MaxEncryptedFragments {
+		return fmt.Errorf("invalid authenticated CBC response fragment count: %d", len(fragments))
+	}
+
+	closeNotify := false
+	applicationRecords := 0
+	plaintextLengths := make([]uint32, 0, len(fragments))
+	parsedBySeq := make(map[uint64]*TLSResponseData, len(fragments))
+	plaintextBySeq := make(map[uint64][]byte, len(fragments))
+	for i, fragment := range fragments {
+		if fragment == nil {
+			return fmt.Errorf("nil authenticated CBC response fragment at index %d", i)
+		}
+		if closeNotify {
+			return fmt.Errorf("authenticated CBC response fragment follows close_notify")
+		}
+		wantSeq := uint64(i + 1)
+		if fragment.GetSeqNum() != wantSeq {
+			return fmt.Errorf("authenticated CBC response sequence is %d, want %d", fragment.GetSeqNum(), wantSeq)
+		}
+		contentType := byte(fragment.GetRecordType())
+		plaintext := fragment.GetPlaintext()
+		switch contentType {
+		case minitls.RecordTypeApplicationData:
+			applicationRecords++
+			plaintextLengths = append(plaintextLengths, uint32(len(plaintext)))
+			plaintextBySeq[wantSeq] = append([]byte(nil), plaintext...)
+			parsedBySeq[wantSeq] = &TLSResponseData{
+				ActualContent: append([]byte(nil), plaintext...), ContentType: contentType, OriginalLen: len(plaintext),
+			}
+		case minitls.RecordTypeAlert:
+			if len(plaintext) != 2 {
+				return fmt.Errorf("invalid authenticated CBC alert length %d", len(plaintext))
+			}
+			alertLevel, alertDesc := plaintext[0], plaintext[1]
+			if alertLevel == 2 && alertDesc != 0 {
+				return fmt.Errorf("TLS alert received: level=%d, desc=%d (%s)", alertLevel, alertDesc, minitls.AlertDescriptionString(alertDesc))
+			}
+			if alertDesc == 0 {
+				closeNotify = true
+			}
+			plaintextBySeq[wantSeq] = append([]byte(nil), plaintext...)
+			parsedBySeq[wantSeq] = &TLSResponseData{
+				ActualContent: append([]byte(nil), plaintext...), ContentType: contentType, OriginalLen: len(plaintext),
+			}
+		default:
+			return fmt.Errorf("unsupported authenticated CBC response record type %d", contentType)
+		}
+	}
+	if applicationRecords == 0 {
+		return fmt.Errorf("authenticated CBC response contains no application data")
+	}
+	if response.GetCloseNotify() != closeNotify {
+		return fmt.Errorf("authenticated CBC response close_notify flag mismatch")
+	}
+	c.responseContentMutex.Lock()
+	if len(c.parsedResponseBySeq) != 0 || len(c.ciphertextBySeq) != 0 {
+		c.responseContentMutex.Unlock()
+		return fmt.Errorf("authenticated CBC response state is not empty")
+	}
+	for seq, plaintext := range plaintextBySeq {
+		c.ciphertextBySeq[seq] = plaintext
+		c.parsedResponseBySeq[seq] = parsedBySeq[seq]
+	}
+	c.responseContentMutex.Unlock()
+	c.cbcMutex.Lock()
+	c.cbcResponsePlaintextLengths = plaintextLengths
+	c.cbcMutex.Unlock()
+
+	if err := c.reconstructHTTPResponseFromDecryptedData(); err != nil {
+		return fmt.Errorf("reconstruct authenticated CBC HTTP response: %w", err)
+	}
+	c.responseReconstructed = true
+	c.advanceToPhase(PhaseSendingRedaction)
+	if err := c.sendRedactionSpec(); err != nil {
+		return fmt.Errorf("send authenticated CBC response redaction spec: %w", err)
+	}
+	return nil
+}
 
 // handleBatchedDecryptionStreams handles batched decryption streams
 func (c *Client) handleBatchedDecryptionStreams(msg *shared.Message) {

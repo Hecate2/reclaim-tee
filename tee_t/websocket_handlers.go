@@ -109,6 +109,8 @@ func (t *TEET) handleClientWebSocket(w http.ResponseWriter, r *http.Request) {
 				arr = append(arr, shared.EncryptedResponseData{EncryptedData: r.GetEncryptedData(), Tag: r.GetTag(), RecordHeader: r.GetRecordHeader(), SeqNum: r.GetSeqNum(), ExplicitIV: r.GetExplicitIv()})
 			}
 			msg = &shared.Message{SessionID: env.GetSessionId(), Type: shared.MsgBatchedEncryptedResponses, Data: shared.BatchedEncryptedResponseData{Responses: arr, SessionID: p.BatchedEncryptedResponses.GetSessionId(), TotalCount: int(p.BatchedEncryptedResponses.GetTotalCount())}}
+		case *teeproto.Envelope_BatchedTlsRecords:
+			msg = &shared.Message{SessionID: env.GetSessionId(), Type: shared.MsgBatchedTLSRecords, Data: p.BatchedTlsRecords}
 		default:
 			// `continue` so a nil msg never reaches msg.Type below.
 			t.logger.Warn("Unknown envelope payload from client; ignoring",
@@ -172,6 +174,9 @@ func (t *TEET) handleClientWebSocket(w http.ResponseWriter, r *http.Request) {
 		case shared.MsgBatchedEncryptedResponses:
 			t.logger.WithSession(sessionID).Debug("Handling batched encrypted responses")
 			handlerErr = t.handleBatchedEncryptedResponses(sessionIdentity, msg)
+		case shared.MsgBatchedTLSRecords:
+			t.logger.WithSession(sessionID).Debug("Handling TLS 1.2 CBC response records")
+			handlerErr = t.handleTLS12CBCResponseRecords(sessionIdentity, msg.Data.(*teeproto.BatchedTLSRecords))
 		default:
 			err := fmt.Errorf("unknown message type: %s", string(msg.Type))
 			t.terminateSessionWithErrorForIdentity(sessionIdentity, shared.ReasonUnknownMessageType, err, "Unknown message type")

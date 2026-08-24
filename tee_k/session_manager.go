@@ -12,6 +12,7 @@ import (
 	"github.com/reclaimprotocol/reclaim-tee/shared"
 
 	"github.com/gorilla/websocket"
+	"google.golang.org/protobuf/proto"
 )
 
 type TEEKSessionState struct {
@@ -24,6 +25,22 @@ type TEEKSessionState struct {
 	KeyBlock          []byte
 	KeyShare          []byte
 	CipherSuite       uint16
+
+	// Trusted-TEE TLS 1.2 CBC state. The acknowledgment channel is registered
+	// before the read-state handoff is sent so the peer response cannot race it.
+	CBCBinding                      *teeproto.TLS12CBCSessionBinding
+	CBCReadStateAck                 chan error
+	CBCReadStateAcked               atomic.Bool
+	CBCRequestDigest                []byte
+	CBCAuthenticatedRedactedRequest []byte
+	CBCRequestRedactionRanges       []*teeproto.RequestRedactionRange
+	CBCRequestReceived              atomic.Bool
+	CBCCiphertextReadyReceived      atomic.Bool
+	CBCCiphertextReady              atomic.Bool
+	CBCRedactionSpecReceived        atomic.Bool
+	CBCRedactionForwarded           atomic.Bool
+	cbcMu                           sync.Mutex
+	cbcResponseRedactionSpec        *shared.ResponseRedactionSpec
 
 	TLSClient         *minitls.Client
 	WSConn2TLS        *WebSocketConn
@@ -57,6 +74,60 @@ type TEEKSessionState struct {
 	// Per-session mutex for thread-safe access to OPRF state
 	// Must be held when accessing GarblerOnlineSessions, OPRFResults, or OPRFRanges
 	oprfMu sync.Mutex
+}
+
+func (s *TEEKSessionState) setCBCResponseRedactionSpec(spec shared.ResponseRedactionSpec) {
+	s.cbcMu.Lock()
+	defer s.cbcMu.Unlock()
+	ranges := append([]shared.ResponseRedactionRange(nil), spec.Ranges...)
+	s.cbcResponseRedactionSpec = &shared.ResponseRedactionSpec{Ranges: ranges}
+}
+
+func (s *TEEKSessionState) getCBCResponseRedactionSpec() *shared.ResponseRedactionSpec {
+	s.cbcMu.Lock()
+	defer s.cbcMu.Unlock()
+	if s.cbcResponseRedactionSpec == nil {
+		return nil
+	}
+	return &shared.ResponseRedactionSpec{Ranges: append([]shared.ResponseRedactionRange(nil), s.cbcResponseRedactionSpec.Ranges...)}
+}
+
+type tls12CBCKSigningSnapshot struct {
+	binding           *teeproto.TLS12CBCSessionBinding
+	redactedRequest   []byte
+	requestDigest     []byte
+	requestRedactions []*teeproto.RequestRedactionRange
+}
+
+func (s *TEEKSessionState) snapshotTLS12CBCSigningState() tls12CBCKSigningSnapshot {
+	if s == nil {
+		return tls12CBCKSigningSnapshot{}
+	}
+	s.cbcMu.Lock()
+	defer s.cbcMu.Unlock()
+	snapshot := tls12CBCKSigningSnapshot{
+		redactedRequest:   append([]byte(nil), s.CBCAuthenticatedRedactedRequest...),
+		requestDigest:     append([]byte(nil), s.CBCRequestDigest...),
+		requestRedactions: make([]*teeproto.RequestRedactionRange, 0, len(s.CBCRequestRedactionRanges)),
+	}
+	for _, item := range s.CBCRequestRedactionRanges {
+		if item != nil {
+			snapshot.requestRedactions = append(snapshot.requestRedactions, proto.Clone(item).(*teeproto.RequestRedactionRange))
+		}
+	}
+	if s.CBCBinding != nil {
+		snapshot.binding = proto.Clone(s.CBCBinding).(*teeproto.TLS12CBCSessionBinding)
+	}
+	return snapshot
+}
+
+func (s *TEEKSessionState) tls12CBCRequestTranscriptReady() bool {
+	if s == nil {
+		return false
+	}
+	s.cbcMu.Lock()
+	defer s.cbcMu.Unlock()
+	return len(s.CBCRequestDigest) == 32 && len(s.CBCAuthenticatedRedactedRequest) != 0
 }
 
 type senderOTReservation struct {
@@ -140,7 +211,7 @@ func (t *TEEKSessionManager) RemoveTEEKSessionState(sessionID string) {
 	state := t.teekStates[sessionID]
 	delete(t.teekStates, sessionID)
 	t.stateMutex.Unlock()
-	state.DestroyOPRFSessions()
+	state.DestroySessionState()
 }
 
 func (t *TEEKSessionManager) CloseSession(sessionID string) error {
@@ -159,7 +230,7 @@ func (t *TEEKSessionManager) CloseSessionIfCurrent(session *shared.Session) erro
 		delete(t.teekStates, session.ID)
 	}
 	t.stateMutex.Unlock()
-	removed.DestroyOPRFSessions()
+	removed.DestroySessionState()
 	return t.SessionManager.CloseSessionIfCurrent(session)
 }
 
@@ -324,6 +395,23 @@ func (s *TEEKSessionState) DestroyOPRFSessions() {
 	for _, session := range sessions {
 		session.Destroy()
 	}
+}
+
+func (s *TEEKSessionState) DestroySessionState() {
+	if s == nil {
+		return
+	}
+	s.DestroyOPRFSessions()
+	s.cbcMu.Lock()
+	defer s.cbcMu.Unlock()
+	if s.TLSClient != nil {
+		s.TLSClient.GetTLS12CBC().Destroy()
+	}
+	clear(s.CBCAuthenticatedRedactedRequest)
+	s.CBCAuthenticatedRedactedRequest = nil
+	clear(s.CBCRequestDigest)
+	s.CBCRequestDigest = nil
+	s.CBCRequestRedactionRanges = nil
 }
 
 // SetOPRFResult safely sets an OPRF result for the given range index

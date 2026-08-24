@@ -107,7 +107,7 @@ func defaultCipherSuites(version uint16) []uint16 {
 			TLS_AES_256_GCM_SHA384,
 		}
 	case VersionTLS12:
-		return []uint16{
+		suites := []uint16{
 			// ECDSA ciphers first (smaller keys, faster on mobile)
 			TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
 			TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
@@ -117,8 +117,28 @@ func defaultCipherSuites(version uint16) []uint16 {
 			TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
 			TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
 		}
+		return suites
 	default:
 		return nil
+	}
+}
+
+// tls12CBCCipherSuites returns the complete AES-CBC compatibility set in
+// preference order. AEAD suites are always advertised before this list.
+func tls12CBCCipherSuites() []uint16 {
+	return []uint16{
+		TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA,
+		TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA,
+		TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA,
+		TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA,
+		TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256,
+		TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256,
+		TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA384,
+		TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA384,
+		TLS_RSA_WITH_AES_128_CBC_SHA,
+		TLS_RSA_WITH_AES_256_CBC_SHA,
+		TLS_RSA_WITH_AES_128_CBC_SHA256,
+		TLS_RSA_WITH_AES_256_CBC_SHA256,
 	}
 }
 
@@ -137,6 +157,9 @@ func (c *Config) cipherSuites() []uint16 {
 	// Note: TLS 1.2 and TLS 1.3 cipher suites are disjoint, so no deduplication needed
 	for _, ver := range versions {
 		suites = append(suites, defaultCipherSuites(ver)...)
+		if ver == VersionTLS12 {
+			suites = append(suites, tls12CBCCipherSuites()...)
+		}
 	}
 
 	return suites
@@ -148,6 +171,39 @@ const (
 	recordTypeAlert            = 21
 	recordTypeHandshake        = 22
 	recordTypeApplicationData  = 23
+)
+
+// TLS 1.2 AES-CBC cipher suites supported by the trusted-TEE compatibility
+// path. TLS 1.0 and TLS 1.1 are not supported.
+const (
+	TLS_RSA_WITH_AES_128_CBC_SHA            = 0x002f
+	TLS_RSA_WITH_AES_256_CBC_SHA            = 0x0035
+	TLS_RSA_WITH_AES_128_CBC_SHA256         = 0x003c
+	TLS_RSA_WITH_AES_256_CBC_SHA256         = 0x003d
+	TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA    = 0xc009
+	TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA    = 0xc00a
+	TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA      = 0xc013
+	TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA      = 0xc014
+	TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256 = 0xc023
+	TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA384 = 0xc024
+	TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256   = 0xc027
+	TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA384   = 0xc028
+)
+
+type TLS12KeyExchange uint8
+
+const (
+	TLS12KeyExchangeUnknown TLS12KeyExchange = iota
+	TLS12KeyExchangeECDHE
+	TLS12KeyExchangeRSA
+)
+
+type TLS12Authentication uint8
+
+const (
+	TLS12AuthenticationUnknown TLS12Authentication = iota
+	TLS12AuthenticationRSA
+	TLS12AuthenticationECDSA
 )
 
 type HandshakeType uint8
@@ -189,14 +245,19 @@ const (
 
 // CipherSuiteInfo provides information about a cipher suite
 type CipherSuiteInfo struct {
-	ID        uint16
-	Name      string
-	KeySize   int    // Key size in bytes
-	BlockSize int    // Block size in bytes (16 for AES, 64 for ChaCha20)
-	IVSize    int    // IV/Nonce size in bytes
-	TagSize   int    // Auth tag size in bytes
-	HashFunc  string // Hash function name
-	IsTLS13   bool
+	ID             uint16
+	Name           string
+	KeySize        int    // Key size in bytes
+	BlockSize      int    // Block size in bytes (16 for AES, 64 for ChaCha20)
+	IVSize         int    // IV/Nonce size in bytes
+	TagSize        int    // Auth tag size in bytes
+	HashFunc       string // Hash function name
+	IsTLS13        bool
+	IsCBC          bool
+	MACSize        int
+	MACHash        string
+	KeyExchange    TLS12KeyExchange
+	Authentication TLS12Authentication
 }
 
 // GetCipherSuiteInfo returns information about a cipher suite
@@ -226,40 +287,76 @@ func GetCipherSuiteInfo(cipherSuite uint16) *CipherSuiteInfo {
 		return &CipherSuiteInfo{
 			ID: TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256, Name: "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256",
 			KeySize: 16, BlockSize: 16, IVSize: 12, TagSize: 16,
-			HashFunc: "SHA256", IsTLS13: false,
+			HashFunc: "SHA256", IsTLS13: false, KeyExchange: TLS12KeyExchangeECDHE, Authentication: TLS12AuthenticationRSA,
 		}
 	case TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256:
 		return &CipherSuiteInfo{
 			ID: TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256, Name: "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256",
 			KeySize: 16, BlockSize: 16, IVSize: 12, TagSize: 16,
-			HashFunc: "SHA256", IsTLS13: false,
+			HashFunc: "SHA256", IsTLS13: false, KeyExchange: TLS12KeyExchangeECDHE, Authentication: TLS12AuthenticationECDSA,
 		}
 	case TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384:
 		return &CipherSuiteInfo{
 			ID: TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384, Name: "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384",
 			KeySize: 32, BlockSize: 16, IVSize: 12, TagSize: 16,
-			HashFunc: "SHA384", IsTLS13: false,
+			HashFunc: "SHA384", IsTLS13: false, KeyExchange: TLS12KeyExchangeECDHE, Authentication: TLS12AuthenticationRSA,
 		}
 	case TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384:
 		return &CipherSuiteInfo{
 			ID: TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384, Name: "TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384",
 			KeySize: 32, BlockSize: 16, IVSize: 12, TagSize: 16,
-			HashFunc: "SHA384", IsTLS13: false,
+			HashFunc: "SHA384", IsTLS13: false, KeyExchange: TLS12KeyExchangeECDHE, Authentication: TLS12AuthenticationECDSA,
 		}
 	case TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256:
 		return &CipherSuiteInfo{
 			ID: TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256, Name: "TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256",
 			KeySize: 32, BlockSize: 64, IVSize: 12, TagSize: 16,
-			HashFunc: "SHA256", IsTLS13: false,
+			HashFunc: "SHA256", IsTLS13: false, KeyExchange: TLS12KeyExchangeECDHE, Authentication: TLS12AuthenticationRSA,
 		}
 	case TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256:
 		return &CipherSuiteInfo{
 			ID: TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256, Name: "TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256",
 			KeySize: 32, BlockSize: 64, IVSize: 12, TagSize: 16,
-			HashFunc: "SHA256", IsTLS13: false,
+			HashFunc: "SHA256", IsTLS13: false, KeyExchange: TLS12KeyExchangeECDHE, Authentication: TLS12AuthenticationECDSA,
 		}
+	case TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA:
+		return tls12CBCSuiteInfo(cipherSuite, "TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA", 16, 20, "SHA1", TLS12KeyExchangeECDHE, TLS12AuthenticationECDSA)
+	case TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA:
+		return tls12CBCSuiteInfo(cipherSuite, "TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA", 16, 20, "SHA1", TLS12KeyExchangeECDHE, TLS12AuthenticationRSA)
+	case TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA:
+		return tls12CBCSuiteInfo(cipherSuite, "TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA", 32, 20, "SHA1", TLS12KeyExchangeECDHE, TLS12AuthenticationECDSA)
+	case TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA:
+		return tls12CBCSuiteInfo(cipherSuite, "TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA", 32, 20, "SHA1", TLS12KeyExchangeECDHE, TLS12AuthenticationRSA)
+	case TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256:
+		return tls12CBCSuiteInfo(cipherSuite, "TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256", 16, 32, "SHA256", TLS12KeyExchangeECDHE, TLS12AuthenticationECDSA)
+	case TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256:
+		return tls12CBCSuiteInfo(cipherSuite, "TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256", 16, 32, "SHA256", TLS12KeyExchangeECDHE, TLS12AuthenticationRSA)
+	case TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA384:
+		return tls12CBCSuiteInfo(cipherSuite, "TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA384", 32, 48, "SHA384", TLS12KeyExchangeECDHE, TLS12AuthenticationECDSA)
+	case TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA384:
+		return tls12CBCSuiteInfo(cipherSuite, "TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA384", 32, 48, "SHA384", TLS12KeyExchangeECDHE, TLS12AuthenticationRSA)
+	case TLS_RSA_WITH_AES_128_CBC_SHA:
+		return tls12CBCSuiteInfo(cipherSuite, "TLS_RSA_WITH_AES_128_CBC_SHA", 16, 20, "SHA1", TLS12KeyExchangeRSA, TLS12AuthenticationRSA)
+	case TLS_RSA_WITH_AES_256_CBC_SHA:
+		return tls12CBCSuiteInfo(cipherSuite, "TLS_RSA_WITH_AES_256_CBC_SHA", 32, 20, "SHA1", TLS12KeyExchangeRSA, TLS12AuthenticationRSA)
+	case TLS_RSA_WITH_AES_128_CBC_SHA256:
+		return tls12CBCSuiteInfo(cipherSuite, "TLS_RSA_WITH_AES_128_CBC_SHA256", 16, 32, "SHA256", TLS12KeyExchangeRSA, TLS12AuthenticationRSA)
+	case TLS_RSA_WITH_AES_256_CBC_SHA256:
+		return tls12CBCSuiteInfo(cipherSuite, "TLS_RSA_WITH_AES_256_CBC_SHA256", 32, 32, "SHA256", TLS12KeyExchangeRSA, TLS12AuthenticationRSA)
 	default:
 		return nil
+	}
+}
+
+func tls12CBCSuiteInfo(id uint16, name string, keySize, macSize int, macHash string, keyExchange TLS12KeyExchange, authentication TLS12Authentication) *CipherSuiteInfo {
+	prfHash := "SHA256"
+	if macHash == "SHA384" {
+		prfHash = "SHA384"
+	}
+	return &CipherSuiteInfo{
+		ID: id, Name: name, KeySize: keySize, BlockSize: 16, IVSize: 16,
+		TagSize: macSize, HashFunc: prfHash, IsTLS13: false, IsCBC: true,
+		MACSize: macSize, MACHash: macHash, KeyExchange: keyExchange, Authentication: authentication,
 	}
 }
 
@@ -272,7 +369,31 @@ func IsChaCha20(cipherSuite uint16) bool {
 // IsAESGCM returns true if the cipher suite uses AES-GCM
 func IsAESGCM(cipherSuite uint16) bool {
 	info := GetCipherSuiteInfo(cipherSuite)
-	return info != nil && info.BlockSize == 16
+	return info != nil && !info.IsCBC && info.BlockSize == 16
+}
+
+func IsTLS12CBCCipherSuite(cipherSuite uint16) bool {
+	info := GetCipherSuiteInfo(cipherSuite)
+	return info != nil && !info.IsTLS13 && info.IsCBC
+}
+
+func TLS12CipherSuiteKeyExchange(cipherSuite uint16) TLS12KeyExchange {
+	info := GetCipherSuiteInfo(cipherSuite)
+	if info == nil || info.IsTLS13 {
+		return TLS12KeyExchangeUnknown
+	}
+	if info.KeyExchange != TLS12KeyExchangeUnknown {
+		return info.KeyExchange
+	}
+	return TLS12KeyExchangeECDHE
+}
+
+func TLS12CipherSuiteAuthentication(cipherSuite uint16) TLS12Authentication {
+	info := GetCipherSuiteInfo(cipherSuite)
+	if info == nil || info.IsTLS13 {
+		return TLS12AuthenticationUnknown
+	}
+	return info.Authentication
 }
 
 // ParseCipherSuite converts a cipher suite string (hex or name) to uint16 ID
@@ -321,6 +442,30 @@ func ParseCipherSuite(cipherSuite string) (uint16, error) {
 		return TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256, nil
 	case "TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256":
 		return TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256, nil
+	case "TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA":
+		return TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA, nil
+	case "TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA":
+		return TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA, nil
+	case "TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA":
+		return TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA, nil
+	case "TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA":
+		return TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA, nil
+	case "TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256":
+		return TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256, nil
+	case "TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256":
+		return TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256, nil
+	case "TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA384":
+		return TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA384, nil
+	case "TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA384":
+		return TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA384, nil
+	case "TLS_RSA_WITH_AES_128_CBC_SHA":
+		return TLS_RSA_WITH_AES_128_CBC_SHA, nil
+	case "TLS_RSA_WITH_AES_256_CBC_SHA":
+		return TLS_RSA_WITH_AES_256_CBC_SHA, nil
+	case "TLS_RSA_WITH_AES_128_CBC_SHA256":
+		return TLS_RSA_WITH_AES_128_CBC_SHA256, nil
+	case "TLS_RSA_WITH_AES_256_CBC_SHA256":
+		return TLS_RSA_WITH_AES_256_CBC_SHA256, nil
 	}
 
 	return 0, fmt.Errorf("unknown cipher suite '%s'", cipherSuite)
@@ -362,9 +507,11 @@ const (
 	extensionSignatureAlgorithms  = 13
 	extensionHeartbeat            = 15
 	extensionALPN                 = 16
+	extensionEncryptThenMAC       = 22
 	extensionExtendedMasterSecret = 23
 	extensionSessionTicket        = 35
 	extensionSupportedVersions    = 43
+	extensionCookie               = 44
 	extensionKeyShare             = 51
 	extensionRenegotiationInfo    = 0xff01
 )
@@ -459,6 +606,7 @@ type ClientHelloMsg struct {
 	cookie                       []byte
 	keyShares                    []keyShare
 	extendedMasterSecret         bool
+	encryptThenMAC               bool
 }
 
 func (m *ClientHelloMsg) Marshal() []byte {
@@ -503,6 +651,13 @@ func (m *ClientHelloMsg) Marshal() []byte {
 		extensions = append(extensions, 0) // Name type: host_name
 		extensions = append(extensions, byte(len(m.serverName)>>8), byte(len(m.serverName)))
 		extensions = append(extensions, m.serverName...)
+	}
+
+	// 3.5. Encrypt-then-MAC (22) - RFC 7366. A server may echo this
+	// extension only when it selects a block-cipher suite.
+	if m.encryptThenMAC {
+		extensions = append(extensions, byte(extensionEncryptThenMAC>>8), byte(extensionEncryptThenMAC))
+		extensions = append(extensions, 0, 0)
 	}
 
 	// 2. Supported Groups (10)
@@ -592,6 +747,15 @@ func (m *ClientHelloMsg) Marshal() []byte {
 		for _, v := range m.supportedVersions {
 			extensions = append(extensions, byte(v>>8), byte(v))
 		}
+	}
+
+	// Cookie (44) is present in ClientHello2 only when supplied by an HRR.
+	if len(m.cookie) > 0 {
+		extensions = append(extensions, byte(extensionCookie>>8), byte(extensionCookie))
+		extLen := len(m.cookie) + 2
+		extensions = append(extensions, byte(extLen>>8), byte(extLen))
+		extensions = append(extensions, byte(len(m.cookie)>>8), byte(len(m.cookie)))
+		extensions = append(extensions, m.cookie...)
 	}
 
 	// 7. Key Share (51) - only for TLS 1.3

@@ -95,6 +95,13 @@ message Envelope {
     // Router-mode client authentication. The first envelope a client sends
     // on /ws to either TEE; carries the allocation JWT minted by /allocate.
     ClientAuth client_auth = 85;                          // Client -> TEE_K/TEE_T
+
+    // Trusted-TEE TLS 1.2 CBC compatibility path.
+    TLS12CBCReadState tls12_cbc_read_state = 86;          // TEE_K -> TEE_T
+    TLS12CBCReadStateAck tls12_cbc_read_state_ack = 87;   // TEE_T -> TEE_K
+    TLS12CBCRequest tls12_cbc_request = 88;               // Client -> TEE_K
+    BatchedTLSRecords batched_tls_records = 89;           // TEE_K -> Client or Client -> TEE_T
+    AuthenticatedCBCResponse authenticated_cbc_response = 90; // TEE_T -> Client
   }
 }
 
@@ -116,6 +123,7 @@ message HandshakeComplete {
   bool success = 1;
   repeated bytes certificate_chain = 2;
   uint32 cipher_suite = 3;  // Negotiated cipher suite for consolidated verification
+  TLS12CBCSessionBinding tls12_cbc_binding = 4; // present only for trusted CBC
 }
 
 message HandshakeKeyDisclosure {
@@ -396,4 +404,37 @@ message ClientAuth {
   // Client build identifier, logged by the TEE so a tag failure can be
   // attributed to a specific client build (empty = pre-versioning build).
   string client_version = 2;
+}
+
+message TLS12CBCReadState {
+  TLS12CBCSessionBinding binding = 1;
+  bytes read_key = 2;
+  bytes read_mac_key = 3;
+  bytes read_iv = 4;
+  uint64 read_sequence = 5;
+}
+
+message TLS12CBCReadStateAck {
+  bytes session_binding = 1;
+  bool success = 2;
+  string error_message = 3;
+}
+
+message TLS12CBCRequest {
+  bytes full_request = 1;
+  repeated RequestRedactionRange redaction_ranges = 2;
+}
+
+message BatchedTLSRecords {
+  repeated TLSRecord records = 1;
+}
+
+message AuthenticatedCBCResponse {
+  message Fragment {
+    uint64 seq_num = 1;
+    uint32 record_type = 2;
+    bytes plaintext = 3;
+  }
+  repeated Fragment fragments = 1;
+  bool close_notify = 2;
 }

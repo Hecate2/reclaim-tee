@@ -481,6 +481,32 @@ func (t *TEEK) handleCiphertextReady(identity *teekSessionIdentity, msg *teeprot
 	if err != nil {
 		return fmt.Errorf("failed to get TEE_K session state: %w", err)
 	}
+	if isTLS12CBCSession(teekState) {
+		ciphertextLen := int(msg.GetTotalLength())
+		if ciphertextLen <= 0 || ciphertextLen > shared.MaxEncryptedFragments*16384 {
+			return fmt.Errorf("invalid authenticated TLS 1.2 CBC response length: %d", ciphertextLen)
+		}
+		if !teekState.CBCCiphertextReadyReceived.CompareAndSwap(false, true) {
+			return fmt.Errorf("multiple TLS 1.2 CBC ciphertext-ready messages received")
+		}
+		// In the trusted CBC contract TEE_T owns the authenticated plaintext.
+		// A zero K share preserves the existing XOR-share MPC OPRF interface:
+		// zero XOR plaintext = plaintext.
+		shouldProcessOPRF := teekState.publishOPRFKeystream(make([]byte, ciphertextLen))
+		if shouldProcessOPRF {
+			if err := t.processQueuedOPRFRanges(sessionID, teekState); err != nil {
+				return fmt.Errorf("process queued TLS 1.2 CBC OPRF ranges: %w", err)
+			}
+		}
+		teekState.CBCCiphertextReady.Store(true)
+		if teekState.CBCRedactionSpecReceived.Load() {
+			if err := t.processTLS12CBCResponseRedactionSpec(sessionID, teekState); err != nil {
+				return err
+			}
+		}
+		t.logger.WithSession(sessionID).Debug("Authenticated TLS 1.2 CBC response ready", zap.Int("bytes", ciphertextLen))
+		return nil
+	}
 
 	keystreamLen := len(teekState.ConsolidatedKeystream)
 	ciphertextLen := int(msg.TotalLength)

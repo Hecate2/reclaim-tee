@@ -163,6 +163,30 @@ func (m *ClientKeyExchangeMsg) Marshal() []byte {
 	return msg
 }
 
+// RSAClientKeyExchangeMsg carries the PKCS#1 v1.5-encrypted pre-master secret
+// for a TLS 1.2 static-RSA cipher suite.
+type RSAClientKeyExchangeMsg struct {
+	encryptedPreMasterSecret []byte
+}
+
+func NewRSAClientKeyExchange(encryptedPreMasterSecret []byte) *RSAClientKeyExchangeMsg {
+	return &RSAClientKeyExchangeMsg{
+		encryptedPreMasterSecret: append([]byte(nil), encryptedPreMasterSecret...),
+	}
+}
+
+func (m *RSAClientKeyExchangeMsg) Marshal() []byte {
+	bodyLen := 2 + len(m.encryptedPreMasterSecret)
+	msg := make([]byte, 4+bodyLen)
+	msg[0] = byte(typeClientKeyExchange)
+	msg[1] = byte(bodyLen >> 16)
+	msg[2] = byte(bodyLen >> 8)
+	msg[3] = byte(bodyLen)
+	binary.BigEndian.PutUint16(msg[4:6], uint16(len(m.encryptedPreMasterSecret)))
+	copy(msg[6:], m.encryptedPreMasterSecret)
+	return msg
+}
+
 // ServerHelloDoneMsg represents the TLS 1.2 ServerHelloDone message
 type ServerHelloDoneMsg struct{}
 

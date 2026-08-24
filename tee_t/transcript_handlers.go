@@ -82,10 +82,15 @@ func (t *TEET) checkFinishedCondition(identity *teetSessionIdentity) error {
 			zap.String("session_id", sessionID),
 			zap.String("oprf_state", shared.OPRFSessionState(teetState.OPRFState.Load()).String()))
 
-		// Snapshot the consolidated ciphertext under the same mutex that guards
-		// its append in verifyTagForResponse, so signing never races a write.
+		cbcSnapshot := teetState.snapshotTLS12CBCSigningState()
+		isCBC := cbcSnapshot.active
+		// Snapshot the legacy consolidated ciphertext under the same mutex that
+		// guards its append. CBC response state is immutable after the one-shot
+		// terminal batch and is copied directly.
 		var ciphertext []byte
-		if session.ResponseState != nil {
+		if isCBC {
+			ciphertext = cbcSnapshot.response
+		} else if session.ResponseState != nil {
 			session.ResponseState.ResponsesMutex.Lock()
 			if n := len(teetState.ConsolidatedResponseCiphertext); n > 0 {
 				ciphertext = make([]byte, n)
@@ -132,11 +137,24 @@ func (t *TEET) checkFinishedCondition(identity *teetSessionIdentity) error {
 			signedAttestationType = attestationReportType()
 		}
 		tOutput := &teeproto.TOutputPayload{
-			SessionId:                      sessionID,                     // Bind to session for cross-TEE verification
-			ConsolidatedResponseCiphertext: ciphertext,                    // Consolidated response ciphertext (locked snapshot)
-			RequestProofStreams:            teetState.RequestProofStreams, // TEE_T signs R_SP streams
-			TimestampMs:                    uint64(timestampMs),           // Include signed timestamp
-			AttestationType:                signedAttestationType,
+			SessionId:       sessionID,
+			TimestampMs:     uint64(timestampMs),
+			AttestationType: signedAttestationType,
+		}
+		if isCBC {
+			if len(cbcSnapshot.redactedResponse) != len(ciphertext) || len(cbcSnapshot.digest) != 32 {
+				return fmt.Errorf("TLS 1.2 CBC signed response transcript is incomplete")
+			}
+			tOutput.Tls12Cbc = &teeproto.TLS12CBCTOutput{
+				Binding:                       cbcSnapshot.binding,
+				AuthenticatedRedactedResponse: cbcSnapshot.redactedResponse,
+				ResponseRecordsSha256:         cbcSnapshot.digest,
+				ResponseRedactionRanges:       cbcSnapshot.ranges,
+				PlaintextRecordLengths:        cbcSnapshot.plaintextLengths,
+			}
+		} else {
+			tOutput.ConsolidatedResponseCiphertext = ciphertext
+			tOutput.RequestProofStreams = teetState.RequestProofStreams
 		}
 
 		// Include OPRF outputs in signed payload
@@ -146,7 +164,7 @@ func (t *TEET) checkFinishedCondition(identity *teetSessionIdentity) error {
 			t.logger.WithSession(sessionID).Debug("Included OPRF outputs in TEE_T signed payload", zap.Int("count", len(oprfOutputs)))
 		}
 
-		t.logger.Debug("Including consolidated response ciphertext and R_SP streams in TEE_T signature",
+		t.logger.Debug("Including authenticated response transcript in TEE_T signature",
 			zap.String("session_id", sessionID),
 			zap.Int("consolidated_response_ciphertext_bytes", len(ciphertext)),
 			zap.Int("proof_streams_count", len(teetState.RequestProofStreams)))

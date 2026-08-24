@@ -182,6 +182,12 @@ func (t *TEEK) handleSharedTEETMessage(identity *teekSessionIdentity, msgBytes [
 		}
 		return handlerErr
 
+	case *teeproto.Envelope_Tls12CbcReadStateAck:
+		if handlerErr = t.handleTLS12CBCReadStateAck(identity, p.Tls12CbcReadStateAck); handlerErr != nil {
+			t.terminateSessionWithErrorForIdentity(identity, shared.ReasonProtocolViolation, handlerErr, "TLS 1.2 CBC read-state acknowledgment failed")
+		}
+		return handlerErr
+
 	default:
 		err := fmt.Errorf("unknown TEE_T message type: %T", p)
 		t.terminateSessionWithErrorForIdentity(identity, shared.ReasonUnknownMessageType, err, "Unknown TEE_T message type")
@@ -321,6 +327,8 @@ func (t *TEEK) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			rr := shared.RedactedRequestData{RedactedRequest: p.RedactedRequest.GetRedactedRequest(), RedactionRanges: ranges}
 			msg := &shared.Message{SessionID: sessionID, Type: shared.MsgRedactedRequest, Data: rr}
 			handlerErr = t.handleRedactedRequest(sessionID, msg)
+		case *teeproto.Envelope_Tls12CbcRequest:
+			handlerErr = t.handleTLS12CBCRequest(sessionID, p.Tls12CbcRequest)
 		case *teeproto.Envelope_ResponseRedactionSpec:
 			// Convert to shared type for existing handler logic
 			var ranges []shared.ResponseRedactionRange
@@ -414,7 +422,6 @@ func (t *TEEK) notifyTEETNewSession(sessionID string) error {
 	if err != nil {
 		return err
 	}
-
 	t.logger.WithSession(sessionID).Debug("TEE_T acknowledged session creation")
 
 	// Step 3: Establish per-session connection

@@ -2,14 +2,17 @@ package client
 
 import (
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+	"time"
+
 	"github.com/reclaimprotocol/reclaim-tee/minitls"
 	teeproto "github.com/reclaimprotocol/reclaim-tee/proto"
 	"github.com/reclaimprotocol/reclaim-tee/shared"
-	"time"
 
 	"go.uber.org/zap"
+	"google.golang.org/protobuf/proto"
 )
 
 // recordDiag is a non-revealing fingerprint of one response record: its seq,
@@ -48,6 +51,29 @@ func (c *Client) handleHandshakeComplete(msg *shared.Message) {
 		}
 
 		c.cipherSuite = completeData.CipherSuite
+		isCBC := minitls.IsTLS12CBCCipherSuite(completeData.CipherSuite)
+		if isCBC {
+			binding := completeData.TLS12CBCBinding
+			validRecordMode := binding != nil && (binding.GetRecordMode() == teeproto.TLS12CBCRecordMode_TLS12_CBC_RECORD_MODE_MAC_THEN_ENCRYPT ||
+				binding.GetRecordMode() == teeproto.TLS12CBCRecordMode_TLS12_CBC_RECORD_MODE_ENCRYPT_THEN_MAC)
+			if binding == nil || binding.GetContractVersion() != 1 ||
+				binding.GetCipherSuite() != uint32(completeData.CipherSuite) ||
+				len(binding.GetSessionBinding()) != 32 ||
+				!validRecordMode {
+				c.terminateConnectionWithError("Invalid TLS 1.2 CBC handshake binding", fmt.Errorf("missing or inconsistent CBC session binding"))
+				return
+			}
+			if len(c.oprfRedactionRanges) != 0 {
+				c.terminateConnectionWithError("Unsupported TLS 1.2 CBC OPRF mode", fmt.Errorf("legacy ZK TOPRF is not supported for TLS 1.2 CBC; use MPC OPRF ranges"))
+				return
+			}
+			c.cbcMutex.Lock()
+			c.cbcBinding = proto.Clone(binding).(*teeproto.TLS12CBCSessionBinding)
+			c.cbcMutex.Unlock()
+		} else if completeData.TLS12CBCBinding != nil {
+			c.terminateConnectionWithError("Invalid AEAD handshake binding", fmt.Errorf("TLS 1.2 CBC binding present for non-CBC cipher suite"))
+			return
+		}
 
 		// Set responseSeqNum BEFORE the atomic Store so the TCP reader sees
 		// both consistently when it observes handshakeComplete=true.
@@ -60,13 +86,40 @@ func (c *Client) handleHandshakeComplete(msg *shared.Message) {
 
 		c.advanceToPhase(PhaseCollectingResponses)
 
-		// Phase 3: Redaction System - Send redacted HTTP request to TEE_K for encryption
-		c.sendRedactedRequest()
+		if isCBC {
+			if err := c.sendTLS12CBCRequest(); err != nil {
+				c.terminateConnectionWithError("Failed to send TLS 1.2 CBC request", err)
+			}
+		} else {
+			// Phase 3: Redaction System - Send redacted HTTP request to TEE_K for encryption
+			c.sendRedactedRequest()
+		}
 
 	} else {
 		c.logger.Error("Handshake completed with errors")
 		c.terminateConnectionWithError("TLS handshake failed", fmt.Errorf("handshake completed with errors"))
 	}
+}
+
+func (c *Client) sendTLS12CBCRequest() error {
+	if len(c.requestData) == 0 {
+		return fmt.Errorf("HTTP request data is empty")
+	}
+	ranges := make([]*teeproto.RequestRedactionRange, 0, len(c.requestRedactionRanges))
+	for _, item := range c.requestRedactionRanges {
+		ranges = append(ranges, &teeproto.RequestRedactionRange{
+			Start: int32(item.Start), Length: int32(item.Length), Type: item.Type,
+		})
+	}
+	return c.sendEnvelope(&teeproto.Envelope{
+		TimestampMs: time.Now().UnixMilli(),
+		Payload: &teeproto.Envelope_Tls12CbcRequest{
+			Tls12CbcRequest: &teeproto.TLS12CBCRequest{
+				FullRequest:     append([]byte(nil), c.requestData...),
+				RedactionRanges: ranges,
+			},
+		},
+	})
 }
 
 // sendRedactedRequest creates and sends the redacted HTTP request to TEE_K
@@ -156,6 +209,22 @@ func (c *Client) sendRedactedRequest() {
 
 // processSingleTLSRecord handles a single, complete TLS record
 func (c *Client) processTLSRecordData(record []byte, recordType byte, recordLength int) {
+	if minitls.IsTLS12CBCCipherSuite(c.cipherSuite) {
+		if len(record) != 5+recordLength || len(record) < 5 ||
+			binary.BigEndian.Uint16(record[1:3]) != minitls.VersionTLS12 ||
+			(recordType != minitls.RecordTypeApplicationData && recordType != minitls.RecordTypeAlert) {
+			c.terminateConnectionWithError("Invalid TLS 1.2 CBC response record", fmt.Errorf("unsupported record type or shape: type=%d length=%d", recordType, recordLength))
+			return
+		}
+		c.cbcResponseRecords = append(c.cbcResponseRecords, &teeproto.TLSRecord{
+			Header:  append([]byte(nil), record[:5]...),
+			Payload: append([]byte(nil), record[5:]...),
+			SeqNum:  c.responseSeqNum,
+		})
+		c.responseSeqNum++
+		return
+	}
+
 	switch recordType {
 	case minitls.RecordTypeApplicationData: // ApplicationData
 		// fmt.Printf("[Client] → ApplicationData record, processing with split AEAD\n")
@@ -268,6 +337,35 @@ func (c *Client) processTLSRecord(record []byte) {
 
 // Send batched responses when EOF is detected
 func (c *Client) sendBatchedResponses() error {
+	if minitls.IsTLS12CBCCipherSuite(c.cipherSuite) {
+		if len(c.cbcResponseRecords) == 0 {
+			c.logger.Info("No TLS 1.2 CBC response records to send")
+			return nil
+		}
+		if len(c.cbcResponseRecords) > shared.MaxEncryptedFragments {
+			return fmt.Errorf("too many TLS 1.2 CBC response records: %d", len(c.cbcResponseRecords))
+		}
+		digest, err := shared.TLS12CBCRecordDigest(shared.TLS12CBCResponseDigestDomain, c.cbcResponseRecords)
+		if err != nil {
+			return fmt.Errorf("digest TLS 1.2 CBC response records: %w", err)
+		}
+		c.cbcMutex.Lock()
+		c.cbcResponseDigest = digest
+		c.cbcMutex.Unlock()
+		env := &teeproto.Envelope{
+			TimestampMs: time.Now().UnixMilli(),
+			Payload: &teeproto.Envelope_BatchedTlsRecords{
+				BatchedTlsRecords: &teeproto.BatchedTLSRecords{Records: c.cbcResponseRecords},
+			},
+		}
+		if err := c.sendEnvelopeToTEET(env); err != nil {
+			return fmt.Errorf("send TLS 1.2 CBC response records to TEE_T: %w", err)
+		}
+		c.expectedRedactedStreams = len(c.cbcResponseRecords)
+		c.advanceToPhase(PhaseReceivingDecryption)
+		c.cbcResponseRecords = nil
+		return nil
+	}
 
 	if len(c.batchedResponses) == 0 {
 		c.logger.Info("No response packets to send")
@@ -333,6 +431,13 @@ func (c *Client) sendBatchedResponses() error {
 	// Clear the batch after successful send
 	c.batchedResponses = make([]shared.EncryptedResponseData, 0)
 	return nil
+}
+
+func (c *Client) hasCapturedResponseRecords() bool {
+	if minitls.IsTLS12CBCCipherSuite(c.cipherSuite) {
+		return len(c.cbcResponseRecords) > 0
+	}
+	return len(c.batchedResponses) > 0
 }
 
 // removeTLSPadding removes TLS 1.3 padding from decrypted content (TLS 1.2 has no padding)
