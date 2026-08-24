@@ -138,9 +138,9 @@ func (c *Client) tcpToWebsocket() {
 
 	buffer := make([]byte, TCPBufferSize)
 	var pending []byte // Buffer for incomplete TLS packets
-	// Idle-after-request-sent: 5 consecutive 1s read timeouts after we've
-	// forwarded the HTTP request, with no pending mid-record bytes. See
-	// [[tcp-idle-flush-2026-06-10]].
+	// Post-response idle flush: after at least one complete response record,
+	// treat 5 consecutive 1s read timeouts between records as end-of-response.
+	// Before the first response record, the core protocol timeout owns the wait.
 	const idleFlushAfter = 5
 	idleStreak := 0
 	var requestSentObserved bool
@@ -177,12 +177,11 @@ func (c *Client) tcpToWebsocket() {
 				eofReceived = true // Mark EOF but continue to process any final data
 			} else {
 				if netErr, ok := errors.AsType[net.Error](err); ok && netErr.Timeout() {
-					// Only treat idle as "done" when we're cleanly between
-					// records (no incomplete bytes pending), past the
-					// handshake, and have captured ≥1 record. Multi-second
-					// gap is the safe threshold — sub-second inter-record
-					// gaps shouldn't trigger this.
-					if c.httpRequestSent.Load() && pending == nil {
+					// Only treat idle as "done" after capturing at least one
+					// complete response record and while cleanly between records.
+					// Pre-response silence remains bounded by the core protocol
+					// timeout instead of being mistaken for a completed response.
+					if c.httpRequestSent.Load() && len(c.batchedResponses) > 0 && pending == nil {
 						idleStreak++
 						if idleStreak >= idleFlushAfter {
 							c.logger.Info("Server idle after response — flushing to TEE_T",
@@ -203,7 +202,8 @@ func (c *Client) tcpToWebsocket() {
 						}
 						continue
 					} else {
-						// Request sent but mid-record: wait for the rest of the record.
+						// Request sent, but no complete response exists yet or a record
+						// is incomplete: keep waiting.
 						continue
 					}
 				} else if !isClientNetworkShutdownError(err) {
@@ -302,13 +302,11 @@ func (c *Client) tcpToWebsocket() {
 
 		// After processing any final data, break if EOF was received
 		if eofReceived {
-			// Fast-fail: empty batch means the target sent zero response
-			// records (idle-flush fired on no data). Downstream protocol
-			// has nothing to verify; aborting early beats waiting 55s for
-			// the 60s wall.
+			// A real EOF before any response record leaves downstream with
+			// nothing to verify, so terminate immediately.
 			if len(c.batchedResponses) == 0 {
 				err := fmt.Errorf("target server returned no response data")
-				c.logger.Error("No response captured before idle/EOF — aborting session", zap.Error(err))
+				c.logger.Error("No response captured before EOF — aborting session", zap.Error(err))
 				c.terminateConnectionWithError("Target server returned no response data", err)
 				return
 			}
