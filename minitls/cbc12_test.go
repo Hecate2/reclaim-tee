@@ -471,6 +471,7 @@ func TestTLS12CertificateKeyUsageMatchesKeyExchange(t *testing.T) {
 	}
 	enciphermentCert, enciphermentRoots := newRSACertificate(x509.KeyUsageKeyEncipherment)
 	signingCert, signingRoots := newRSACertificate(x509.KeyUsageDigitalSignature)
+	unrelatedCert, unrelatedRoots := newRSACertificate(x509.KeyUsageKeyAgreement)
 	t.Cleanup(func() { shared.SetRootCAPool(nil) })
 
 	tests := []struct {
@@ -481,7 +482,8 @@ func TestTLS12CertificateKeyUsageMatchesKeyExchange(t *testing.T) {
 		wantErr bool
 	}{
 		{name: "static RSA accepts key encipherment", suite: TLS_RSA_WITH_AES_128_CBC_SHA, cert: enciphermentCert, roots: enciphermentRoots},
-		{name: "static RSA rejects signing only", suite: TLS_RSA_WITH_AES_128_CBC_SHA, cert: signingCert, roots: signingRoots, wantErr: true},
+		{name: "static RSA accepts signing only for WebPKI compatibility", suite: TLS_RSA_WITH_AES_128_CBC_SHA, cert: signingCert, roots: signingRoots},
+		{name: "static RSA rejects unrelated usage", suite: TLS_RSA_WITH_AES_128_CBC_SHA, cert: unrelatedCert, roots: unrelatedRoots, wantErr: true},
 		{name: "ECDHE RSA accepts signing", suite: TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA, cert: signingCert, roots: signingRoots},
 		{name: "ECDHE RSA rejects encipherment only", suite: TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA, cert: enciphermentCert, roots: enciphermentRoots, wantErr: true},
 	}

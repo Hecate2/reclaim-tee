@@ -250,7 +250,8 @@ func NewAEAD(key, iv []byte, cipherSuite uint16) (*AEAD, error) {
 
 	// Select cipher based on TLS cipher suite, not just key length
 	switch cipherSuite {
-	case TLS_AES_128_GCM_SHA256, TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256, TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256:
+	case TLS_AES_128_GCM_SHA256, TLS_RSA_WITH_AES_128_GCM_SHA256,
+		TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256, TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256:
 		// AES-128-GCM
 		block, err := aes.NewCipher(key)
 		if err != nil {
@@ -261,7 +262,8 @@ func NewAEAD(key, iv []byte, cipherSuite uint16) (*AEAD, error) {
 			return nil, err
 		}
 
-	case TLS_AES_256_GCM_SHA384, TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384, TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384:
+	case TLS_AES_256_GCM_SHA384, TLS_RSA_WITH_AES_256_GCM_SHA384,
+		TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384, TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384:
 		// AES-256-GCM
 		block, err := aes.NewCipher(key)
 		if err != nil {
@@ -404,6 +406,7 @@ func (sa *SplitAEAD) EncryptWithoutTag(plaintext, additionalData []byte) ([]byte
 
 	switch sa.cipherSuite {
 	case TLS_AES_128_GCM_SHA256, TLS_AES_256_GCM_SHA384,
+		TLS_RSA_WITH_AES_128_GCM_SHA256, TLS_RSA_WITH_AES_256_GCM_SHA384,
 		TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256, TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
 		TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384, TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384:
 		// AES-GCM case: split AEAD - encrypt with CTR mode, let TEE_T compute GCM tag
@@ -481,7 +484,8 @@ func (sa *SplitAEAD) constructNonce(seqNum uint64) []byte {
 		return nonce
 
 	// TLS 1.2 AES-GCM - explicit nonce format (RFC 5288)
-	case TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256, TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+	case TLS_RSA_WITH_AES_128_GCM_SHA256, TLS_RSA_WITH_AES_256_GCM_SHA384,
+		TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256, TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
 		TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384, TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384:
 		// 12-byte nonce = implicit_iv(4) || explicit_nonce(8)
 		nonce := make([]byte, 12)
@@ -532,10 +536,7 @@ func (sa *SplitAEAD) generateGCMTagSecrets(block cipher.Block, nonce []byte) []b
 // This handles the special case where TLS 1.2 AES-GCM uses explicit IV in the record
 func ConstructTLS12NonceWithExplicitIV(implicitIV, explicitIV []byte, cipherSuite uint16) ([]byte, error) {
 	// Only applies to TLS 1.2 AES-GCM cipher suites
-	if cipherSuite != TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256 &&
-		cipherSuite != TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256 &&
-		cipherSuite != TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384 &&
-		cipherSuite != TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384 {
+	if !IsTLS12AESGCMCipherSuite(cipherSuite) {
 		return nil, fmt.Errorf("explicit IV only used with TLS 1.2 AES-GCM, got cipher suite 0x%04x", cipherSuite)
 	}
 
@@ -579,6 +580,7 @@ func GenerateDecryptionStreamWithNonce(key, iv []byte, seqNum uint64, length int
 	var err error
 	switch cipherSuite {
 	case TLS_AES_128_GCM_SHA256, TLS_AES_256_GCM_SHA384,
+		TLS_RSA_WITH_AES_128_GCM_SHA256, TLS_RSA_WITH_AES_256_GCM_SHA384,
 		TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256, TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
 		TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384, TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384:
 		stream, err = generateAESDecryptionStream(key, nonce, length)
@@ -738,6 +740,7 @@ func ComputeTagFromSecrets(ciphertext, tagSecrets []byte, cipherSuite uint16, ad
 
 	switch cipherSuite {
 	case TLS_AES_128_GCM_SHA256, TLS_AES_256_GCM_SHA384,
+		TLS_RSA_WITH_AES_128_GCM_SHA256, TLS_RSA_WITH_AES_256_GCM_SHA384,
 		TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256, TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
 		TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384, TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384:
 		// Extract E_K(0^128) and E_K(IV || 0^31 || 1) from tag secrets

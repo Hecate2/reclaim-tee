@@ -637,10 +637,7 @@ func (c *Client) sendTLS12Finished(isClient bool) error {
 	// For AES-GCM: explicit_iv(8) + plaintext + AEAD_tag(16)
 	// For ChaCha20: plaintext + AEAD_tag(16)
 	var expectedCiphertextLen int
-	if c.cipherSuite == TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256 ||
-		c.cipherSuite == TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256 ||
-		c.cipherSuite == TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384 ||
-		c.cipherSuite == TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384 {
+	if IsTLS12AESGCMCipherSuite(c.cipherSuite) {
 		expectedCiphertextLen = 8 + len(plaintext) + 16 // AES-GCM: explicit_iv + plaintext + auth_tag
 	} else {
 		expectedCiphertextLen = len(plaintext) + 16 // ChaCha20: plaintext + auth_tag

@@ -240,6 +240,8 @@ const (
 
 // TLS 1.2 AEAD Cipher Suites (following Go's crypto/tls constants)
 const (
+	TLS_RSA_WITH_AES_128_GCM_SHA256               = 0x009c
+	TLS_RSA_WITH_AES_256_GCM_SHA384               = 0x009d
 	TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256         = 0xc02f
 	TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256       = 0xc02b
 	TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384         = 0xc030
@@ -288,6 +290,18 @@ func GetCipherSuiteInfo(cipherSuite uint16) *CipherSuiteInfo {
 			HashFunc: "SHA256", IsTLS13: true,
 		}
 	// TLS 1.2 cipher suites
+	case TLS_RSA_WITH_AES_128_GCM_SHA256:
+		return &CipherSuiteInfo{
+			ID: TLS_RSA_WITH_AES_128_GCM_SHA256, Name: "TLS_RSA_WITH_AES_128_GCM_SHA256",
+			KeySize: 16, BlockSize: 16, IVSize: 12, TagSize: 16,
+			HashFunc: "SHA256", IsTLS13: false, KeyExchange: TLS12KeyExchangeRSA, Authentication: TLS12AuthenticationRSA,
+		}
+	case TLS_RSA_WITH_AES_256_GCM_SHA384:
+		return &CipherSuiteInfo{
+			ID: TLS_RSA_WITH_AES_256_GCM_SHA384, Name: "TLS_RSA_WITH_AES_256_GCM_SHA384",
+			KeySize: 32, BlockSize: 16, IVSize: 12, TagSize: 16,
+			HashFunc: "SHA384", IsTLS13: false, KeyExchange: TLS12KeyExchangeRSA, Authentication: TLS12AuthenticationRSA,
+		}
 	case TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256:
 		return &CipherSuiteInfo{
 			ID: TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256, Name: "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256",
@@ -435,6 +449,10 @@ func ParseCipherSuite(cipherSuite string) (uint16, error) {
 	case "TLS_CHACHA20_POLY1305_SHA256":
 		return TLS_CHACHA20_POLY1305_SHA256, nil
 	// TLS 1.2
+	case "TLS_RSA_WITH_AES_128_GCM_SHA256":
+		return TLS_RSA_WITH_AES_128_GCM_SHA256, nil
+	case "TLS_RSA_WITH_AES_256_GCM_SHA384":
+		return TLS_RSA_WITH_AES_256_GCM_SHA384, nil
 	case "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256":
 		return TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256, nil
 	case "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256":

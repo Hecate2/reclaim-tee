@@ -142,9 +142,11 @@ func (ks *TLS12KeySchedule) DeriveFinishedData(handshakeHash []byte, isClient bo
 // GetKeyAndIVLengths returns the key and IV lengths for the cipher suite
 func (ks *TLS12KeySchedule) GetKeyAndIVLengths() (keyLen, ivLen int) {
 	switch ks.cipherSuite {
-	case TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256, TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256:
+	case TLS_RSA_WITH_AES_128_GCM_SHA256,
+		TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256, TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256:
 		return 16, 4 // AES-128: 16-byte key, 4-byte implicit IV
-	case TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384, TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384:
+	case TLS_RSA_WITH_AES_256_GCM_SHA384,
+		TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384, TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384:
 		return 32, 4 // AES-256: 32-byte key, 4-byte implicit IV
 	case TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256, TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256:
 		return 32, 12 // ChaCha20: 32-byte key, 12-byte implicit IV

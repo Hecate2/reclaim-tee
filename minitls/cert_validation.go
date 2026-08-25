@@ -62,16 +62,20 @@ func (c *Client) verifyCertificateChainWithDepth(certs []*x509.Certificate, serv
 	// Static RSA encrypts the premaster secret to the certificate key instead.
 	// A certificate without the KeyUsage extension remains accepted for legacy
 	// compatibility, matching the existing behavior.
-	requiredKeyUsage := x509.KeyUsageDigitalSignature
-	requiredKeyUsageName := "digitalSignature"
+	acceptedKeyUsage := x509.KeyUsageDigitalSignature
+	acceptedKeyUsageName := "digitalSignature"
 	if TLS12CipherSuiteKeyExchange(c.cipherSuite) == TLS12KeyExchangeRSA {
-		requiredKeyUsage = x509.KeyUsageKeyEncipherment
-		requiredKeyUsageName = "keyEncipherment"
+		// Go and OpenSSL accept public WebPKI RSA leaves marked only for
+		// digitalSignature when negotiating legacy static-RSA suites. Retain
+		// keyEncipherment as the native usage while allowing that compatibility
+		// behavior.
+		acceptedKeyUsage = x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature
+		acceptedKeyUsageName = "keyEncipherment or digitalSignature"
 	}
-	if leafCert.KeyUsage != 0 && leafCert.KeyUsage&requiredKeyUsage == 0 {
+	if leafCert.KeyUsage != 0 && leafCert.KeyUsage&acceptedKeyUsage == 0 {
 		return &CertificateError{
 			Type:    CertErrorVerification,
-			Message: fmt.Sprintf("server certificate KeyUsage 0x%x lacks %s", leafCert.KeyUsage, requiredKeyUsageName),
+			Message: fmt.Sprintf("server certificate KeyUsage 0x%x lacks %s", uint32(leafCert.KeyUsage), acceptedKeyUsageName),
 		}
 	}
 

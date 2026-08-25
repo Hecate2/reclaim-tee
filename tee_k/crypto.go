@@ -396,6 +396,7 @@ func (t *TEEK) generateSingleDecryptionStreamForSession(session *shared.Session,
 	var err error
 	switch tlsState.CipherSuite {
 	case minitls.TLS_AES_128_GCM_SHA256, minitls.TLS_AES_256_GCM_SHA384,
+		minitls.TLS_RSA_WITH_AES_128_GCM_SHA256, minitls.TLS_RSA_WITH_AES_256_GCM_SHA384,
 		minitls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256, minitls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
 		minitls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384, minitls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384:
 		decryptionStream, err = minitls.GenerateAESKeystream(serverAppKey, nonce, responseLength)

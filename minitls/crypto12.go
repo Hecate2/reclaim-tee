@@ -65,9 +65,11 @@ func NewTLS12AEADContext(writeKey, writeIV, readKey, readIV []byte, cipherSuite 
 // getTLS12AEADKeyLengths returns the key and IV lengths for TLS 1.2 AEAD cipher suites
 func getTLS12AEADKeyLengths(cipherSuite uint16) (keyLen int, ivLen int) {
 	switch cipherSuite {
-	case TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256, TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256:
+	case TLS_RSA_WITH_AES_128_GCM_SHA256,
+		TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256, TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256:
 		return 16, 4 // AES-128: 16-byte key, 4-byte implicit IV
-	case TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384, TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384:
+	case TLS_RSA_WITH_AES_256_GCM_SHA384,
+		TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384, TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384:
 		return 32, 4 // AES-256: 32-byte key, 4-byte implicit IV
 	case TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256, TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256:
 		return 32, 12 // ChaCha20: 32-byte key, 12-byte implicit IV
@@ -86,7 +88,8 @@ func (ctx *TLS12AEADContext) Encrypt(plaintext []byte, recordHeader []byte) ([]b
 	var err error
 
 	switch ctx.cipherSuite {
-	case TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256, TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+	case TLS_RSA_WITH_AES_128_GCM_SHA256, TLS_RSA_WITH_AES_256_GCM_SHA384,
+		TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256, TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
 		TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384, TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384:
 		// AES-GCM using native Go crypto
 		block, err := aes.NewCipher(ctx.writeKey)
@@ -139,10 +142,7 @@ func (ctx *TLS12AEADContext) Encrypt(plaintext []byte, recordHeader []byte) ([]b
 
 	// For AES-GCM, prepend explicit IV to ciphertext (RFC 5288 Section 3)
 	var ciphertext []byte
-	if ctx.cipherSuite == TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256 ||
-		ctx.cipherSuite == TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256 ||
-		ctx.cipherSuite == TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384 ||
-		ctx.cipherSuite == TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384 {
+	if IsTLS12AESGCMCipherSuite(ctx.cipherSuite) {
 		// AES-GCM: record = explicit_iv || AEAD_ciphertext
 		explicitIV := make([]byte, 8)
 		binary.BigEndian.PutUint64(explicitIV, ctx.writeSeq)
@@ -168,7 +168,8 @@ func (ctx *TLS12AEADContext) Decrypt(ciphertext []byte, recordHeader []byte) ([]
 	var err error
 
 	switch ctx.cipherSuite {
-	case TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256, TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+	case TLS_RSA_WITH_AES_128_GCM_SHA256, TLS_RSA_WITH_AES_256_GCM_SHA384,
+		TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256, TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
 		TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384, TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384:
 		// AES-GCM using native Go crypto
 		block, err := aes.NewCipher(ctx.readKey)
@@ -227,10 +228,7 @@ func (ctx *TLS12AEADContext) Decrypt(ciphertext []byte, recordHeader []byte) ([]
 
 	// For AES-GCM, strip explicit IV from ciphertext before decryption
 	var aeadCiphertext []byte
-	if ctx.cipherSuite == TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256 ||
-		ctx.cipherSuite == TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256 ||
-		ctx.cipherSuite == TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384 ||
-		ctx.cipherSuite == TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384 {
+	if IsTLS12AESGCMCipherSuite(ctx.cipherSuite) {
 		// AES-GCM: strip 8-byte explicit IV
 		aeadCiphertext = ciphertext[8:]
 	} else {
