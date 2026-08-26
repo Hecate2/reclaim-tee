@@ -43,14 +43,6 @@ func NewRouterClient(baseURL string, tokens TokenSource) *RouterClient {
 	}
 }
 
-// Attestation types carried in the /register body. The router dispatches its
-// validator on this; empty means CS for backward compatibility.
-const (
-	AttestationTypeCS         = "cs"
-	AttestationTypeSEVSNP     = "sev-snp"
-	AttestationTypeSecureBoot = "secure-boot"
-)
-
 // RegisterRequest is the body of POST /register. SPKIDer + BodySignature
 // bind the body to the attestation: the TEE signs RegistrationSigningDigest
 // with the RA-TLS private key whose public half's hash is committed in the
