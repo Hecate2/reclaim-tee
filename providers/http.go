@@ -26,6 +26,32 @@ var clientReservedHeaders = map[string]struct{}{
 	"accept-encoding": {},
 }
 
+// validHTTPHeaderName matches the RFC token rule enforced by TEE_K's strict
+// CBC request validator. Each complete header line remains sensitive while its
+// trailing CRLF framing stays visible to strict validation and the attestor.
+func validHTTPHeaderName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for i := range len(name) {
+		c := name[i]
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') {
+			continue
+		}
+		switch c {
+		case '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~':
+			continue
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func validSecretHeaderValue(value string) bool {
+	return !strings.ContainsAny(value, "\r\n\x00")
+}
+
 // CreateRequest builds the HTTP/1.1 request bytes and redaction ranges
 func CreateRequest(secret *HTTPProviderSecretParams, params *HTTPProviderParams) (CreateRequestResult, error) {
 	if params == nil {
@@ -56,12 +82,24 @@ func CreateRequest(secret *HTTPProviderSecretParams, params *HTTPProviderParams)
 	// Build secret headers list in TS order: Cookie, Authorization, then any extra secret headers
 	secHeadersList := []string{}
 	if secret.CookieStr != "" {
+		if !validSecretHeaderValue(secret.CookieStr) {
+			return CreateRequestResult{}, fmt.Errorf("invalid secret header value")
+		}
 		secHeadersList = append(secHeadersList, fmt.Sprintf("Cookie: %s", secret.CookieStr))
 	}
 	if secret.AuthorisationHeader != "" {
+		if !validSecretHeaderValue(secret.AuthorisationHeader) {
+			return CreateRequestResult{}, fmt.Errorf("invalid secret header value")
+		}
 		secHeadersList = append(secHeadersList, fmt.Sprintf("Authorization: %s", secret.AuthorisationHeader))
 	}
 	for k, v := range secret.Headers {
+		if !validHTTPHeaderName(k) {
+			return CreateRequestResult{}, fmt.Errorf("invalid secret header name")
+		}
+		if !validSecretHeaderValue(v) {
+			return CreateRequestResult{}, fmt.Errorf("invalid secret header value")
+		}
 		secHeadersList = append(secHeadersList, fmt.Sprintf("%s: %s", k, v))
 	}
 
@@ -87,15 +125,16 @@ func CreateRequest(secret *HTTPProviderSecretParams, params *HTTPProviderParams)
 
 	// A config header duplicating one the client sets is appended after ours and
 	// a server may honor it as an override; reject instead of sending a conflict.
-	for _, h := range []struct {
-		src map[string]string
-		lbl string
-	}{{pubHeaders, "provider"}, {secret.Headers, "secret"}} {
-		for k := range h.src {
-			if _, reserved := clientReservedHeaders[strings.ToLower(strings.TrimSpace(k))]; reserved {
-				logger.Error("reserved header overridden by config", zap.String("component", "HTTP"), zap.String("operation", "CreateRequest"), zap.String("header", k), zap.String("source", h.lbl))
-				return CreateRequestResult{}, fmt.Errorf("%s header %q overrides a client-managed header (Host/Connection/Content-Length/Accept-Encoding); remove it from the provider config", h.lbl, k)
-			}
+	for k := range pubHeaders {
+		if _, reserved := clientReservedHeaders[strings.ToLower(strings.TrimSpace(k))]; reserved {
+			logger.Error("reserved header overridden by config", zap.String("component", "HTTP"), zap.String("operation", "CreateRequest"), zap.String("header", k), zap.String("source", "provider"))
+			return CreateRequestResult{}, fmt.Errorf("provider header %q overrides a client-managed header (Host/Connection/Content-Length/Accept-Encoding); remove it from the provider config", k)
+		}
+	}
+	for k := range secret.Headers {
+		if _, reserved := clientReservedHeaders[strings.ToLower(strings.TrimSpace(k))]; reserved {
+			logger.Error("reserved secret header overridden by config", zap.String("component", "HTTP"), zap.String("operation", "CreateRequest"), zap.String("source", "secret"))
+			return CreateRequestResult{}, fmt.Errorf("a secret header overrides a client-managed header (Host/Connection/Content-Length/Accept-Encoding); remove it from the provider config")
 		}
 	}
 
@@ -113,7 +152,7 @@ func CreateRequest(secret *HTTPProviderSecretParams, params *HTTPProviderParams)
 		logger.Error("invalid url", zap.String("component", "HTTP"), zap.String("operation", "CreateRequest"), zap.Error(err))
 		return CreateRequestResult{}, fmt.Errorf("invalid url: %w", err)
 	}
-	logger.Debug("Parsed URL", zap.String("component", "HTTP"), zap.String("operation", "CreateRequest"), zap.String("level", "verbose"), zap.String("host", u.Host), zap.String("path", u.Path))
+	logger.Debug("Parsed URL", zap.String("component", "HTTP"), zap.String("operation", "CreateRequest"), zap.String("level", "verbose"), zap.String("host", u.Host))
 	path := u.EscapedPath()
 	if path == "" {
 		path = "/"
@@ -124,7 +163,7 @@ func CreateRequest(secret *HTTPProviderSecretParams, params *HTTPProviderParams)
 		reqTarget = reqTarget + "?" + query
 	}
 	reqLine := fmt.Sprintf("%s %s HTTP/1.1", p.Method, reqTarget)
-	logger.Debug("Built request line", zap.String("component", "HTTP"), zap.String("operation", "CreateRequest"), zap.String("request_line", reqLine))
+	logger.Debug("Built request line", zap.String("component", "HTTP"), zap.String("operation", "CreateRequest"), zap.String("method", p.Method), zap.Int("request_target_bytes", len(reqTarget)))
 
 	logger.Info("Step 3/5: Building request body and headers", zap.String("component", "HTTP"), zap.String("operation", "CreateRequest"), zap.Int("step", 3), zap.Int("total", 5))
 	bodyBytes := strToUint8Array(p.Body)
@@ -146,6 +185,7 @@ func CreateRequest(secret *HTTPProviderSecretParams, params *HTTPProviderParams)
 		"Accept-Encoding: identity",
 	}
 	lines = append(lines, pubHeadersList...)
+	secretHeadersStart := len(joinCRLF(lines)) + len("\r\n")
 	lines = append(lines, secHeadersList...)
 	lines = append(lines, "\r\n")
 	logger.Info("Step 4/5: Assembling final request", zap.String("component", "HTTP"), zap.String("operation", "CreateRequest"), zap.Int("step", 4), zap.Int("total", 5))
@@ -154,14 +194,17 @@ func CreateRequest(secret *HTTPProviderSecretParams, params *HTTPProviderParams)
 	data := append(headerBytes, bodyBytes...)
 
 	logger.Info("Step 5/5: Computing redaction ranges", zap.String("component", "HTTP"), zap.String("operation", "CreateRequest"), zap.Int("step", 5), zap.Int("total", 5))
-	// redactions: hide all secret headers block
+	// Hide each complete secret header line while leaving CRLF structural bytes
+	// visible for TEE_K's strict CBC request validation.
 	redactions := []shared.RequestRedactionRange{}
-	if len(secHeadersList) > 0 {
-		secHeadersStr := joinCRLF(secHeadersList)
-		idx := bytes.Index(data, []byte(secHeadersStr))
-		if idx >= 0 {
-			redactions = append(redactions, shared.RequestRedactionRange{Start: idx, Length: len(secHeadersStr), Type: "sensitive"})
-		}
+	secretHeaderCursor := secretHeadersStart
+	for _, line := range secHeadersList {
+		redactions = append(redactions, shared.RequestRedactionRange{
+			Start:  secretHeaderCursor,
+			Length: len(line),
+			Type:   shared.RedactionTypeSensitive,
+		})
+		secretHeaderCursor += len(line) + len("\r\n")
 	}
 	// hidden body parts
 	for _, hb := range sp.HiddenBodyParts {
@@ -175,12 +218,14 @@ func CreateRequest(secret *HTTPProviderSecretParams, params *HTTPProviderParams)
 			redactions = append(redactions, shared.RequestRedactionRange{Start: hu.Index, Length: hu.Length, Type: "sensitive"})
 		}
 	}
+	if len(redactions) > shared.MaxRedactionRanges {
+		return CreateRequestResult{}, fmt.Errorf("too many redaction ranges: %d (max %d)", len(redactions), shared.MaxRedactionRanges)
+	}
 	sort.Slice(redactions, func(i, j int) bool {
 		return redactions[i].Start+redactions[i].Length < redactions[j].Start+redactions[j].Length
 	})
 
 	logger.Debug("Created redaction ranges", zap.String("component", "HTTP"), zap.String("operation", "CreateRequest"), zap.Int("redaction_ranges", len(redactions)))
-	logger.Debug("Request headers", zap.String("component", "HTTP"), zap.String("operation", "CreateRequest"), zap.String("headers", string(headerBytes)))
 
 	logger.Info("Request created successfully", zap.String("component", "HTTP"), zap.String("operation", "CreateRequest"))
 	return CreateRequestResult{Data: data, Redactions: redactions}, nil

@@ -143,52 +143,69 @@ func validateTLS12CBCBinding(binding *teeproto.TLS12CBCSessionBinding) error {
 	return nil
 }
 
+func (t *TEEK) failTLS12CBCRequest(
+	sessionID string,
+	reason shared.TerminationReason,
+	handlerErr error,
+	reportedErr error,
+	message string,
+) error {
+	t.terminateSessionWithError(sessionID, reason, reportedErr, message)
+	return handlerErr
+}
+
 func (t *TEEK) handleTLS12CBCRequest(sessionID string, request *teeproto.TLS12CBCRequest) error {
 	if request == nil {
-		return fmt.Errorf("TLS 1.2 CBC request is nil")
+		err := fmt.Errorf("TLS 1.2 CBC request is nil")
+		return t.failTLS12CBCRequest(sessionID, shared.ReasonInvalidDataFormat, err, err, "Invalid TLS 1.2 CBC request")
 	}
 	state, err := t.getSessionTLSState(sessionID)
 	if err != nil {
-		return err
+		return t.failTLS12CBCRequest(sessionID, shared.ReasonSessionManagerFailure, err, err, "Failed to get TLS 1.2 CBC session state")
 	}
 	if !isTLS12CBCSession(state) || !state.HandshakeComplete || state.TLSClient == nil || state.TLSClient.GetTLS12CBC() == nil {
-		return fmt.Errorf("TLS 1.2 CBC request received outside a completed CBC session")
+		err := fmt.Errorf("TLS 1.2 CBC request received outside a completed CBC session")
+		return t.failTLS12CBCRequest(sessionID, shared.ReasonInvalidMessageOrder, err, nil, err.Error())
 	}
 	if !state.CBCRequestReceived.CompareAndSwap(false, true) {
-		return fmt.Errorf("multiple TLS 1.2 CBC requests received")
+		err := fmt.Errorf("multiple TLS 1.2 CBC requests received")
+		return t.failTLS12CBCRequest(sessionID, shared.ReasonInvalidMessageOrder, err, nil, "Multiple TLS 1.2 CBC requests received")
 	}
 	fullRequest := request.GetFullRequest()
 	if err := validateTLS12CBCRequestPlaintext(fullRequest); err != nil {
-		return err
+		return t.failTLS12CBCRequest(sessionID, shared.ReasonInvalidDataFormat, err, err, "Invalid TLS 1.2 CBC request")
 	}
 	if len(request.GetRedactionRanges()) > shared.MaxRedactionRanges {
-		return fmt.Errorf("too many TLS 1.2 CBC request redaction ranges")
+		err := fmt.Errorf("too many TLS 1.2 CBC request redaction ranges")
+		return t.failTLS12CBCRequest(sessionID, shared.ReasonInvalidDataFormat, err, err, "Invalid TLS 1.2 CBC request redaction ranges")
 	}
 	ranges := make([]shared.RequestRedactionRange, 0, len(request.GetRedactionRanges()))
 	for _, item := range request.GetRedactionRanges() {
 		if item == nil {
-			return fmt.Errorf("nil TLS 1.2 CBC request redaction range")
+			err := fmt.Errorf("nil TLS 1.2 CBC request redaction range")
+			return t.failTLS12CBCRequest(sessionID, shared.ReasonInvalidDataFormat, err, err, "Invalid TLS 1.2 CBC request redaction ranges")
 		}
 		ranges = append(ranges, shared.RequestRedactionRange{
 			Start: int(item.GetStart()), Length: int(item.GetLength()), Type: item.GetType(),
 		})
 	}
 	if err := t.validateRedactionPositions(ranges, len(fullRequest)); err != nil {
-		return err
+		return t.failTLS12CBCRequest(sessionID, shared.ReasonInvalidDataFormat, err, nil, "Invalid TLS 1.2 CBC request redaction ranges")
 	}
 	session, err := t.sessionManager.GetSession(sessionID)
 	if err != nil {
-		return err
+		return t.failTLS12CBCRequest(sessionID, shared.ReasonSessionManagerFailure, err, err, "Failed to get TLS 1.2 CBC session")
 	}
 	if err := t.validateTLS12CBCHTTPRequestFormat(fullRequest, ranges, session.ConnectionData); err != nil {
-		return err
+		return t.failTLS12CBCRequest(sessionID, shared.ReasonInvalidDataFormat, err, nil, "Invalid TLS 1.2 CBC HTTP request")
 	}
 
-	authenticatedRedactedRequest := append([]byte(nil), fullRequest...)
+	authenticatedRedactedRequest := bytes.Clone(fullRequest)
 	for _, item := range ranges {
 		if item.Type == shared.RedactionTypeSensitive {
 			if _, err := rand.Read(authenticatedRedactedRequest[item.Start : item.Start+item.Length]); err != nil {
-				return fmt.Errorf("redact TLS 1.2 CBC request: %w", err)
+				err = fmt.Errorf("redact TLS 1.2 CBC request: %w", err)
+				return t.failTLS12CBCRequest(sessionID, shared.ReasonCryptoStreamGenerationFailed, err, err, "Failed to randomize redacted TLS 1.2 CBC request bytes")
 			}
 		}
 	}
@@ -197,17 +214,19 @@ func (t *TEEK) handleTLS12CBCRequest(sessionID string, request *teeproto.TLS12CB
 	seq := ctx.GetWriteSequence()
 	record, err := ctx.EncryptRecord(minitls.RecordTypeApplicationData, fullRequest)
 	if err != nil {
-		return fmt.Errorf("encrypt TLS 1.2 CBC request record: %w", err)
+		err = fmt.Errorf("encrypt TLS 1.2 CBC request record: %w", err)
+		return t.failTLS12CBCRequest(sessionID, shared.ReasonInternalError, err, err, "Failed to encrypt TLS 1.2 CBC request")
 	}
 	records := []*teeproto.TLSRecord{{
-		Header: append([]byte(nil), record[:5]...), Payload: append([]byte(nil), record[5:]...), SeqNum: seq,
+		Header: bytes.Clone(record[:5]), Payload: bytes.Clone(record[5:]), SeqNum: seq,
 	}}
 	if len(records) > shared.MaxEncryptedFragments {
-		return fmt.Errorf("TLS 1.2 CBC request has too many records")
+		err := fmt.Errorf("TLS 1.2 CBC request has too many records")
+		return t.failTLS12CBCRequest(sessionID, shared.ReasonInternalError, err, err, "Invalid TLS 1.2 CBC encryption result")
 	}
 	digest, err := shared.TLS12CBCRecordDigest(shared.TLS12CBCRequestDigestDomain, records)
 	if err != nil {
-		return err
+		return t.failTLS12CBCRequest(sessionID, shared.ReasonInternalError, err, err, "Failed to digest TLS 1.2 CBC request records")
 	}
 	state.cbcMu.Lock()
 	state.CBCAuthenticatedRedactedRequest = authenticatedRedactedRequest
@@ -228,7 +247,8 @@ func (t *TEEK) handleTLS12CBCRequest(sessionID string, request *teeproto.TLS12CB
 		},
 	}
 	if err := t.sessionManager.RouteToClient(sessionID, env); err != nil {
-		return fmt.Errorf("send TLS 1.2 CBC request records to client: %w", err)
+		err = fmt.Errorf("send TLS 1.2 CBC request records to client: %w", err)
+		return t.failTLS12CBCRequest(sessionID, shared.ReasonNetworkFailure, err, err, "Failed to send TLS 1.2 CBC request records to client")
 	}
 	return nil
 }

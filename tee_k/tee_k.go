@@ -416,8 +416,15 @@ func (t *TEEK) terminateSessionWithError(sessionID string, reason shared.Termina
 		t.logger.WithSession(sessionID).Warn("Failed to send error to client", zap.Error(routeErr))
 	}
 
-	// Send error to TEE_T
-	if sendErr := t.sendEnvelopeToTEET(sessionID, env); sendErr != nil {
+	// Terminal notification is best-effort and must not use sendToTEET: its
+	// attestation failure path terminates the session, which would recurse here.
+	var sendErr error
+	if t.connManager == nil {
+		sendErr = fmt.Errorf("connection manager not initialized")
+	} else {
+		sendErr = t.connManager.SendOnControl(env)
+	}
+	if sendErr != nil {
 		t.logger.WithSession(sessionID).Warn("Failed to send error to TEE_T", zap.Error(sendErr))
 	}
 

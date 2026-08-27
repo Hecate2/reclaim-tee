@@ -1,6 +1,7 @@
 package providers
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json/v2"
 	"fmt"
@@ -641,6 +642,138 @@ func TestCreateRequest_AuthRequired(t *testing.T) {
 	}
 }
 
+func TestCreateRequest_SecretHeaderRedactionsPreserveLineFraming(t *testing.T) {
+	params := HTTPProviderParams{
+		URL:     "https://example.com/path?q=1",
+		Method:  "GET",
+		Headers: map[string]string{"User-Agent": "unit-test"},
+	}
+	secret := HTTPProviderSecretParams{
+		CookieStr:           "session=opaque-cookie",
+		AuthorisationHeader: "Bearer opaque-auth",
+		Headers: map[string]string{
+			"X-API-Key":       "opaque-one",
+			"X-Client-Secret": "opaque-two",
+		},
+	}
+
+	res, err := CreateRequest(&secret, &params)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	prefix := "GET /path?q=1 HTTP/1.1\r\n" +
+		"Host: example.com\r\n" +
+		"Connection: close\r\n" +
+		"Content-Length: 0\r\n" +
+		"Accept-Encoding: identity\r\n" +
+		"User-Agent: unit-test\r\n" +
+		"Cookie: session=opaque-cookie\r\n" +
+		"Authorization: Bearer opaque-auth\r\n"
+	wantA := prefix + "X-API-Key: opaque-one\r\nX-Client-Secret: opaque-two\r\n\r\n"
+	wantB := prefix + "X-Client-Secret: opaque-two\r\nX-API-Key: opaque-one\r\n\r\n"
+	wire := string(res.Data)
+	if wire != wantA && wire != wantB {
+		t.Fatalf("request wire bytes changed:\n%q", wire)
+	}
+
+	wantRedactedLines := map[string]bool{
+		"Cookie: session=opaque-cookie":     false,
+		"Authorization: Bearer opaque-auth": false,
+		"X-API-Key: opaque-one":             false,
+		"X-Client-Secret: opaque-two":       false,
+	}
+	if len(res.Redactions) != len(wantRedactedLines) {
+		t.Fatalf("expected %d redactions, got %d", len(wantRedactedLines), len(res.Redactions))
+	}
+
+	masked := bytes.Clone(res.Data)
+	for i, redaction := range res.Redactions {
+		if redaction.Type != shared.RedactionTypeSensitive {
+			t.Errorf("redaction %d type = %q, want %q", i, redaction.Type, shared.RedactionTypeSensitive)
+		}
+		line := string(res.Data[redaction.Start : redaction.Start+redaction.Length])
+		seen, ok := wantRedactedLines[line]
+		if !ok {
+			t.Errorf("redaction %d covers unexpected bytes %q", i, line)
+		} else if seen {
+			t.Errorf("secret header line %q was redacted more than once", line)
+		} else {
+			wantRedactedLines[line] = true
+		}
+		if strings.ContainsAny(line, "\r\n\x00") {
+			t.Errorf("redaction %d contains an HTTP structural byte: %q", i, line)
+		}
+		end := redaction.Start + redaction.Length
+		if end+2 > len(res.Data) || !bytes.Equal(res.Data[end:end+2], []byte("\r\n")) {
+			t.Errorf("redaction %d does not end before CRLF", i)
+		}
+		for j := redaction.Start; j < end; j++ {
+			masked[j] = '*'
+		}
+	}
+	for line, seen := range wantRedactedLines {
+		if !seen {
+			t.Errorf("secret header line %q was not redacted", line)
+		}
+	}
+
+	maskedText := string(masked)
+	for _, secretPart := range []string{"Cookie", "opaque-cookie", "Authorization", "opaque-auth", "X-API-Key", "opaque-one", "X-Client-Secret", "opaque-two"} {
+		if strings.Contains(maskedText, secretPart) {
+			t.Errorf("masked request reveals %q", secretPart)
+		}
+	}
+	if strings.Count(maskedText, "\r\n") != strings.Count(wire, "\r\n") {
+		t.Fatal("masking changed the number of HTTP structural lines")
+	}
+	if !strings.Contains(maskedText, "\r\n\r\n") {
+		t.Fatal("masking removed the header/body separator")
+	}
+}
+
+func TestCreateRequest_RejectsInvalidSecretHeaders(t *testing.T) {
+	params := HTTPProviderParams{URL: "https://example.com/", Method: "GET"}
+	tests := []struct {
+		name   string
+		secret HTTPProviderSecretParams
+	}{
+		{name: "invalid name token", secret: HTTPProviderSecretParams{Headers: map[string]string{"Bad Header": "secret"}}},
+		{name: "name contains newline", secret: HTTPProviderSecretParams{Headers: map[string]string{"X-Good\nInjected": "secret"}}},
+		{name: "cookie contains carriage return", secret: HTTPProviderSecretParams{CookieStr: "a=b\rInjected: yes"}},
+		{name: "authorization contains newline", secret: HTTPProviderSecretParams{AuthorisationHeader: "Bearer value\nInjected: yes"}},
+		{name: "extra value contains NUL", secret: HTTPProviderSecretParams{Headers: map[string]string{"X-Secret": "value\x00suffix"}}},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := CreateRequest(&test.secret, &params)
+			if err == nil {
+				t.Fatal("invalid secret header was accepted")
+			}
+			if !strings.Contains(err.Error(), "invalid secret header") {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
+func TestCreateRequest_RejectsTooManyRedactionRanges(t *testing.T) {
+	params := HTTPProviderParams{URL: "https://example.com/", Method: "GET"}
+	secret := HTTPProviderSecretParams{Headers: make(map[string]string, shared.MaxRedactionRanges+1)}
+	for i := range shared.MaxRedactionRanges + 1 {
+		secret.Headers[fmt.Sprintf("X-Secret-%d", i)] = "value"
+	}
+
+	_, err := CreateRequest(&secret, &params)
+	if err == nil {
+		t.Fatal("request with too many redaction ranges was accepted")
+	}
+	if !strings.Contains(err.Error(), "too many redaction ranges") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestCreateRequest_ReplacesParamsInBodyCorrectly(t *testing.T) {
 	params := HTTPProviderParams{
 		URL:    "https://example.{{param1}}/",
@@ -674,8 +807,8 @@ func TestCreateRequest_ReplacesParamsInBodyCorrectly(t *testing.T) {
 	if want := "hello crazy aaaaa crazy1 crazy2 {{b}} crazy1 crazy {{b}} crazy2 {{b}} aaaaa world"; !contains(reqText, want) {
 		t.Fatalf("request body missing expected content: %q", want)
 	}
-	if len(res.Redactions) != 7 {
-		t.Fatalf("expected 7 redactions, got %d", len(res.Redactions))
+	if len(res.Redactions) != 8 {
+		t.Fatalf("expected 8 redactions, got %d", len(res.Redactions))
 	}
 
 	expectRedaction := func(index int, expected string) {
@@ -686,13 +819,14 @@ func TestCreateRequest_ReplacesParamsInBodyCorrectly(t *testing.T) {
 		}
 	}
 
-	expectRedaction(0, "Cookie: <cookie-str>\r\nAuthorization: abc")
-	expectRedaction(1, "crazy")
-	expectRedaction(2, "crazy1")
-	expectRedaction(3, "crazy2")
-	expectRedaction(4, "crazy1")
-	expectRedaction(5, "crazy")
-	expectRedaction(6, "crazy2")
+	expectRedaction(0, "Cookie: <cookie-str>")
+	expectRedaction(1, "Authorization: abc")
+	expectRedaction(2, "crazy")
+	expectRedaction(3, "crazy1")
+	expectRedaction(4, "crazy2")
+	expectRedaction(5, "crazy1")
+	expectRedaction(6, "crazy")
+	expectRedaction(7, "crazy2")
 }
 
 func TestCreateRequest_ReplacesParamsInBodyCase2(t *testing.T) {

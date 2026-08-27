@@ -103,6 +103,75 @@ func TestTLS12CBCSignedContractsAcceptExplicitFields(t *testing.T) {
 	}
 }
 
+func TestTLS12CBCSignedContractProtectsCleartextBetweenSecretHeaderRanges(t *testing.T) {
+	pair, err := shared.GenerateSigningKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const (
+		publicPrefix = "GET / HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n"
+		firstSecret  = "Authorization: first-secret"
+		secondSecret = "X-Token: second-secret"
+	)
+	c := newCBCContractClient("cbc-header-lines")
+	c.requestData = []byte(publicPrefix + firstSecret + "\r\n" + secondSecret + "\r\n\r\n")
+	c.requestRedactionRanges = []shared.RequestRedactionRange{
+		{Start: len(publicPrefix), Length: len(firstSecret), Type: shared.RedactionTypeSensitive},
+		{Start: len(publicPrefix) + len(firstSecret) + len("\r\n"), Length: len(secondSecret), Type: shared.RedactionTypeSensitive},
+	}
+	c.cbcRequestDigest = make([]byte, 32)
+
+	redactedRequest := bytes.Clone(c.requestData)
+	requestRanges := make([]*teeproto.RequestRedactionRange, 0, len(c.requestRedactionRanges))
+	for _, item := range c.requestRedactionRanges {
+		for offset := range item.Length {
+			redactedRequest[item.Start+offset] = '*'
+		}
+		requestRanges = append(requestRanges, &teeproto.RequestRedactionRange{
+			Start: int32(item.Start), Length: int32(item.Length), Type: item.Type,
+		})
+	}
+
+	newKMessage := func(authenticatedRedactedRequest []byte) *teeproto.SignedMessage {
+		body, marshalErr := proto.Marshal(&teeproto.KOutputPayload{
+			SessionId: "cbc-header-lines",
+			Tls12Cbc: &teeproto.TLS12CBCKOutput{
+				Binding:                      c.cbcBinding,
+				AuthenticatedRedactedRequest: authenticatedRedactedRequest,
+				RequestRecordsSha256:         make([]byte, 32),
+				RequestRedactionRanges:       requestRanges,
+			},
+		})
+		if marshalErr != nil {
+			t.Fatal(marshalErr)
+		}
+		return signCBCContractBody(t, pair, teeproto.BodyType_BODY_TYPE_K_OUTPUT, body)
+	}
+
+	if _, err := c.validateTEEKSignedMessage("cbc-header-lines", newKMessage(redactedRequest)); err != nil {
+		t.Fatalf("valid separated secret-header ranges rejected: %v", err)
+	}
+
+	separatorStart := c.requestRedactionRanges[0].Start + c.requestRedactionRanges[0].Length
+	for _, mutation := range []struct {
+		name   string
+		offset int
+	}{
+		{name: "carriage return", offset: separatorStart},
+		{name: "line feed", offset: separatorStart + 1},
+	} {
+		t.Run(mutation.name, func(t *testing.T) {
+			tamperedRequest := bytes.Clone(redactedRequest)
+			tamperedRequest[mutation.offset] = 'X'
+			_, err := c.validateTEEKSignedMessage("cbc-header-lines", newKMessage(tamperedRequest))
+			if err == nil || !strings.Contains(err.Error(), "outside sensitive ranges") {
+				t.Fatalf("cleartext separator mutation result=%v", err)
+			}
+		})
+	}
+}
+
 func TestTLS12CBCSignedContractsRejectLegacyMixAndCleartextChanges(t *testing.T) {
 	pair, err := shared.GenerateSigningKeyPair()
 	if err != nil {
