@@ -63,3 +63,4 @@ deploy/secure-boot/*.key
 deploy/snp-img-key*
 deploy/snp-digests.env
 deploy/snp-fleet-digests.env
+.workbuddy
