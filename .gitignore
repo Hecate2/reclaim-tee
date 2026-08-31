@@ -1,3 +1,6 @@
+# Local simulation
+.sim/
+
 # Build artifacts
 bin/
 *.exe
