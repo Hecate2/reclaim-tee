@@ -3,6 +3,17 @@
 日期：2026-09-03
 状态：完成（C4，本地全栈仿真规划的最后一段）
 
+> **2026-09-03 增补：Policy 信任模型修订（随 C4 一并落地）**
+>
+> 本清单原按「Policy 由 Provider 签名、随请求下发」撰写。产品简化后，Policy 改为 **Hub 预定义白名单、随 TEE 部署配置加载、由 attestation measurement 背书**，Provider 不再需要签名与定期轮换：
+>
+> 1. **定价权与白名单解耦**（commit `ac25fe1`）：`policy.Policy` 删除 RateCard（CBOR 键 12 永久作废）。价格移入 `hub.RateCard` + `hub.Config.Rates`（卖家上报的商业报价表），`hub` 不再 import `policy`。
+> 2. **Policy 无签名装载**（commit `1fe17fc`）：`policy.Set.Install/InstallAll` 只做结构/时间窗/防回滚校验；部署配置（`.sim/policy.cbor` 等）就是裸 canonical Policy。`SignPolicy`/`VerifySignedPolicy`/`Set.Add` 保留为兼容门。
+> 3. **Policy hash 绑定进 attestation**（commit `1a920d6`）：`policy.Set.Hash()` 折叠全部 provider 白名单；`simulated.NewDeploymentEpoch(hash)` 把 hash 写入证据 `policy_set_hash` 字段；`CheckEvidenceForDeployment` 供验证方断言「这份 TEE 装的就是这份白名单」。真实 SEV-SNP 中 policy 随镜像被 measurement 覆盖，无需代码差异。
+> 4. **审计端校验绑定**（commit `3ee4801`）：`hub -audit` 用本地部署 policy-set hash 逐一核对回执证据；faketee 与 cmd/tee 装载同一全集，仿真内零误报。
+>
+> 因此本清单 1.1 的"Epoch 来源"与上文 0 节的装配点不变，只是 `buildEpoch` 现在额外接收 policy-set hash 用于 simulated 绑定。
+
 本文件是《TokenHive 改造计划：连接驻留 TEE 与本地全栈仿真.md》第 8 节（切换到真实云 TEE）核对清单的逐项落账：每一项给出**代码位置**、**当前本地仿真的做法**、**云上装配要翻转的开关**与**验收方式**。C4 的立场与计划一致——不在本机执行真实 SEV-SNP（Apple silicon 无 AMD 安全处理器），只保证业务代码与装配层在本地仿真中全量执行、云上部署只改装配不改逻辑。
 
 ---
