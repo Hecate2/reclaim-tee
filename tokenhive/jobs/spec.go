@@ -84,10 +84,6 @@ var (
 // The field order here is not significant — canonical CBOR sorts by the integer
 // key — but the keys themselves are part of the wire format and must never be
 // renumbered or reused once a version ships.
-//
-// Key 14 was UserKeyID. It was removed with the User signature and is retired
-// rather than reassigned: a decoder that still emits it would otherwise be
-// read as a different field. No future field may use 14 in VersionV1.
 type Spec struct {
 	Version          uint32            `cbor:"1,keyasint"`
 	JobID            []byte            `cbor:"2,keyasint"`
@@ -102,6 +98,14 @@ type Spec struct {
 	ExpiresAt        int64             `cbor:"11,keyasint"`
 	MaxResponseBytes uint64            `cbor:"12,keyasint"`
 	Stream           bool              `cbor:"13,keyasint"`
+
+	// Session marks a streaming WebSocket-style session request. When set, the
+	// TEE performs an HTTP Upgrade handshake to the provider instead of a plain
+	// exchange, then relays an opaque bidirectional byte pipe. All frame and
+	// content semantics (WebSocket frames, JSON payloads, close handshakes) are
+	// the Hub's business: the TEE only moves, metes, and digests bytes. The
+	// body of a session job must be empty — it has a handshake, not a payload.
+	Session bool `cbor:"14,keyasint,omitempty"`
 }
 
 // SupportedMethods are the HTTP methods a job may request. HEAD is excluded:
