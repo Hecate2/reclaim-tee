@@ -9,7 +9,7 @@
 
 ## 0. 术语约定
 
-首次出现时给出全称，后文直接使用缩写。TEE（Trusted Execution Environment）即可信执行环境；TLS（Transport Layer Security）为传输层安全协议；WebSocket 为在单条 TCP 连接上提供全双工通信的应用层协议；SSE（Server-Sent Events）为服务器推送事件流；SOCKS5 为一种通用 TCP 代理协议；CBOR（Concise Binary Object Representation）为确定性二进制编码（RFC 8949）；ALPN（Application-Layer Protocol Negotiation）为 TLS 的应用层协议协商扩展；mTLS 为双向认证的 TLS。JobSpec 为 Hub 交给 TEE 的作业描述；RateCard（费率卡）为按 provider 记录的定价数据；Receipt 为 TEE 签发的带证据的作业回执；ProviderSeq 为 TEE 内的单调序号；attestation（远程证明）为 TEE 向外部证明自身代码与配置身份的证据机制。
+首次出现时给出全称，后文直接使用缩写。TEE（Trusted Execution Environment）即可信执行环境；TLS（Transport Layer Security）为传输层安全协议；WebSocket 为在单条 TCP 连接上提供全双工通信的应用层协议；SSE（Server-Sent Events）为服务器推送事件流；CBOR（Concise Binary Object Representation）为确定性二进制编码（RFC 8949）；ALPN（Application-Layer Protocol Negotiation）为 TLS 的应用层协议协商扩展；mTLS 为双向认证的 TLS。JobSpec 为 Hub 交给 TEE 的作业描述；RateCard（费率卡）为按 provider 记录的定价数据；Receipt 为 TEE 签发的带证据的作业回执；ProviderSeq 为 TEE 内的单调序号；attestation（远程证明）为 TEE 向外部证明自身代码与配置身份的证据机制。
 
 ---
 
@@ -56,9 +56,9 @@ User ─HTTP/SSE 或 WS─► Hub ─┬─ /v1/execute（请求模式）─► 
 
 各组件的最低职责是系统的稳定面，本节是集中陈述。
 
-**TEE（TEE 进程）**：只负责建立并保持到上游的连接，以及作为连接上的字节层。具体是：凭证注入、Policy 白名单判定、JobSpec 结构校验与 body_hash 绑定、TLS 记录层、HTTP/1.1 请求序列化与响应分帧读取、流式摘要与回执签名、ProviderSeq 单调序号、连接（Channel）生命周期管理。TEE 对流式会话只做 TLS 加解密、双向字节计量与下行明文摘要，不解析任何 WebSocket 帧。TEE 不可见 model、不可见 tenant、不可见任何账务字段——JobSpec 是纯粹的「要执行的 HTTP 请求」描述（键 1–14，见第 7 节）。
+**TEE（TEE 进程）**：只负责建立并保持到上游的连接，以及作为连接上的字节层。具体是：凭证注入、Policy 白名单判定、JobSpec 结构校验与 body_hash 绑定、TLS 记录层、HTTP/1.1 请求序列化与响应分帧读取、流式摘要与回执签名、ProviderSeq 单调序号、连接（Channel）生命周期管理。TEE 对流式会话只做 TLS 加解密、双向字节计量与下行明文摘要，不解析任何 WebSocket 帧。TEE 不可见 model、不可见 tenant、不可见任何账务字段——JobSpec 是纯粹的「要执行的 HTTP 请求」描述（键 1–15，其中键 15 是随作业携带的加密凭证信封，见第 7 节）。
 
-**Hub**：持有全部需要理解业务语义的逻辑。用户面 API（/v1/chat/completions、/v1/messages、/v1/responses、/v1/session）、模型到 Provider 的最低在线价调度、配额、计价与佣金、账本、回执审计、usage（token 用量）解析、重试与故障回退。Hub 还承担反向隧道的两端服务器角色（见第 4 节）：Agent 拨入的注册门（AgentGate）与 TEE 拨入的中继端点（TeeRelay）。Hub 不持有凭证，不接触 TLS 密钥。
+**Hub**：持有全部需要理解业务语义的逻辑。用户面 API（/v1/chat/completions、/v1/messages、/v1/responses、/v1/session）、模型到 Provider 的最低在线价调度、配额、计价与佣金、账本、回执审计、usage（token 用量）解析、重试与故障回退。Hub 还承担反向隧道的两端服务器角色（见第 4 节）：Agent 拨入的注册门（AgentGate）与 TEE 拨入的中继端点（TeeRelay）。Hub 只持有加密的凭证信封（见第 7 节，键 15），永不见明文 token、不接触 TLS 密钥。
 
 **Provider Agent（tokenhive/provider）**：纯粹的反向隧道客户端。拨向 Hub 的 AgentGate 并保持一条多路复用 WebSocket；注册上线后，对 Hub 在隧道上打开的每条中继流，拨向一个固定的允许列表（allowlist）之内的上游 host，然后双向复制字节。Agent 不读取所搬运的字节——TEE 与上游之间的 TLS 会话端到端加密，Agent 只看到自己并未参与会话的一段密文。Agent 强制执行且只强制执行一件事：allowlist，杜绝把贡献者机器变成通用代理。
 
@@ -72,7 +72,7 @@ User ─HTTP/SSE 或 WS─► Hub ─┬─ /v1/execute（请求模式）─► 
 
 Hub 侧维护两个 WebSocket 端点，这是它作为「NAT 背后贡献者和 TEE 的汇合点」的存在方式。两端的处理逻辑在 tokenhive/hub/agenthttp.go 与 agentnet.go。
 
-**AgentGate（/v1/agent）**：Agent 拨入以在线。握手时校验 Agent 预设的共享密钥（agentKeyMatches 做常数时间比较，任何与 Hub 的 AgentSecret 不匹配的握手中断），随后把连接包成多路复用隧道，等待 Agent 的第一条控制流。控制流的开流元数据是 AgentRegister——它声明为哪个 provider 出口、可选展示名、以及可选的自我报价（SelfPrice）。控制流保持打开期间该 Agent 视为在线；控制流一旦关闭，Agent 从调度器离线，隧道拆除。Agent 未声明自价时接受 Hub 为该 provider 声明的平台默认价；若 provider 无平台默认价，该 Agent 无法注册。
+**AgentGate（/v1/agent）**：Agent 拨入以在线。握手时校验 Agent 预设的共享密钥（agentKeyMatches 做常数时间比较，任何与 Hub 的 AgentSecret 不匹配的握手中断），随后把连接包成多路复用隧道，等待 Agent 的第一条控制流。控制流的开流元数据是 AgentRegister——它声明为哪个 provider 出口、可选展示名、可选的自我报价（SelfPrice），以及**密封在 `Credential` 里的 token**：Agent 从 Hub 的 /v1/credential-key 拉取 TEE 收件公钥，把自己的 token 加密成凭证信封（tee.EncryptCredential）后随注册上报，Hub 只把密文信封存入凭证库、永不见明文。控制流保持打开期间该 Agent 视为在线；控制流一旦关闭，Agent 从调度器离线、隧道拆除，Hub 同时从凭证库撤销该 provider 的信封。Agent 未声明自价时接受 Hub 为该 provider 声明的平台默认价；若 provider 无平台默认价，该 Agent 无法注册。
 
 在线注册表（agentRegistry）以 provider 为主键：同一 provider 任一时刻只有一个在线 Agent，后注册者顶掉先前者并关闭其隧道（杜绝同一 provider 的双重身份与陈旧隧道）。每个在线 Agent 连同其有效价一起登记，调度器只把新工作路由到此刻在线者。
 
@@ -90,7 +90,7 @@ ChannelManager（transport/channel.go）持有连接驻留语义：以 (provider
 
 Relay（transport/relay.go）是 ChannelManager 的拨号器：持有与 Hub TeeRelay 的一条持久多路复用隧道，把每条 (provider, host) 拨号变成隧道上的一条流，以 net.Conn 的表面（streamConn）交还给 TEE，让 TLS 握手照常在 TEE 内完成。隧道掉线则重建一次并重试该流。TLS 永远在 TEE 内终止——Hub 与 Agent 看到的都是这条 TLS 会话的密文。
 
-ChannelConfig 有二选一的 egress 配置：RelayURL（经 Hub 中继，生产形态）或 Endpoints 表（经 SOCKS5/AgentAddr 直连，本地测试与共处部署）。TLS 在两种形态下都在 TEE 内终止，隔离性相同。
+ChannelConfig 的 egress 配置：RelayURL（经 Hub 中继，生产形态与本地仿真均如此）；不设 RelayURL 时 ChannelManager 直连 req.Host（仅用于嵌入式 transport 测试与同机模拟）。无论走隧道还是直连，TLS 都在 TEE 内终止，隔离性相同。
 
 ---
 

@@ -18,7 +18,7 @@
 
 ### 术语
 
-- **TEE**：执行环境。持有 Provider 凭证、发起真实上游请求、签发执行回执。它**不理解业务语义**：不解析 JSON、不知道模型、不定价。
+- **TEE**：执行环境。**不持久化任何 Provider 凭证**；每个作业随 JobSpec 携带一份用 TEE 公钥加密的凭证信封，TEE 在飞地内按作业解密、注入请求，执行完即丢弃。它发起真实上游请求、签发执行回执，但**不理解业务语义**：不解析 JSON、不知道模型、不定价。
 - **Hub**：业务侧。调度、定价、配额、账本、回执存储都在 Hub。本文档的"调用方"通常就是 Hub。
 - **Job / JobSpec**：Hub 交给 TEE 的一次执行请求描述（第 4 章）。
 - **Receipt（回执）**：TEE 对"这次交换确实发生、字节就是这些"的签名证明（第 7 章）。
@@ -33,6 +33,9 @@
 |---|---|---|---|---|
 | `/v1/execute` | POST | 一次性执行：TEE 用 Provider 凭证发一次上游请求，流式回传字节，末尾给回执 | `application/cbor` | `text/event-stream`（chunk 帧 + `receipt`/`error` 帧） |
 | `/v1/session` | GET（WebSocket Upgrade） | 长会话（Realtime 类）：Upgrade 后双向透传字节，结束时给会话回执 | — | WebSocket：Binary 帧透传，Text 帧为控制/回执 |
+| `/v1/credential-key` | GET | **凭证平面**：发布 TEE 的收件公钥（InboxKey 公钥半），供 Provider Agent 拉取后用其加密自己的 token | — | `application/json`（`key_id` + `public_key`，base64） |
+
+**凭证平面说明**：这是 TEE 上唯一与凭证相关的端点，**只发布公钥**。TEE 不提供任何查询/写入凭证的端点——它根本没有保存凭证的地方。登录的 Agent（经 Hub 的 AgentGate）拿到此公钥后把 token 加密成信封，Hub 只中转这个密文信封并存入自己的凭证库，再随每次作业上报给 TEE；只有 TEE 手里的私钥能解开（详见 7.4）。
 
 **监听地址**：由部署方决定。本地仿真默认 `127.0.0.1:18090`（`cmd/tee -addr`），真实部署以交付的部署配置为准。
 
@@ -74,7 +77,7 @@
 | JobSpec 哈希 | `TokenHive.JobSpec.v1` |
 | 请求体哈希（BodyHash） | `TokenHive.RequestBody.v1` |
 | 执行回执签名 | `TokenHive.ExecutionReceipt.v1` |
-| Provider Policy 签名（兼容路径） | `TokenHive.ProviderPolicy.v1` |
+| Policy 哈希 | `TokenHive.Policy.v1` |
 | Policy 集合哈希（部署绑定） | `TokenHive.PolicySet.v1` |
 
 ---
@@ -82,8 +85,6 @@
 ## 3. JobSpec 字段（`jobs.Spec`）
 
 JobSpec 描述"用某个 Provider 的凭证，向某处发一个什么样的请求"。
-
-> ⚠️ **与旧设计文档的差异**：当前 JobSpec **只有键 1–14**。旧字段 `DeclaredModel`（键 15）、`TenantRef`（键 16）**在代码中已不存在**——模型名与租户引用不进 JobSpec、也不进回执（见 3.2 与第 7 章的意义说明）。
 
 | 键 | 字段 | 类型 | 约束 | 说明 |
 |---|---|---|---|---|
@@ -101,6 +102,7 @@ JobSpec 描述"用某个 Provider 的凭证，向某处发一个什么样的请�
 | 12 | `MaxResponseBytes` | uint64 | > 0 | 若作业值超过 Policy 限额，作业被**直接拒绝**（见 7.3 第 9 步），不会静默截断；允许的作业生效值即作业值 |
 | 13 | `Stream` | bool | — | 期望流式响应 |
 | 14 | `Session` | bool | — | 会话类作业（走 Upgrade）。**body 必须为空**（握手没有载荷） |
+| 15 | `Credential` | bytes | 可选（见 7.4） | **canonical CBOR 编码的凭证信封** `Envelope`（X25519 混合加密，密封到 TEE 收件公钥）。由 Provider Agent 加密、Hub 中转密文、随每个作业上报；TEE 解密其中 `Secret{Token, Header, Scheme}` 并注入请求。**不带 Credential 的作业会被拒**（`job carries no credential: provider "…"`）；若该 Provider 的上游无需鉴权，则信封内 `Header` 为空即可（见 7.4） |
 
 ### 3.1 TEE 独占的请求头（调用方不得设置）
 
@@ -145,7 +147,7 @@ TEE 的校验顺序（与 `tee.Service.Execute` 一致）。**除第 1 步外**�
 4. `Spec.MatchesBody(body)`：请求体与 BodyHash 不符则拒
 5. Policy 授权（第 7 章）
 6. 请求体大小 > `Policy.Limits.MaxBodyBytes` 则拒
-7. 凭证解析：该 Provider 有 Policy 但 TEE 未装载凭证则拒（见第 14 章）
+7. 凭证打开：解密作业携带的 `Credential` 信封（JobSpec 键 15）。缺失 / 打不开 / 密钥 ID 不匹配 / 信封绑定到别的 Provider / `Secret` 非法，均拒；见第 7.4 节与第 14 章
 8. 分配 ProviderSeq——唯一的状态变更，放最后，保证被拒作业永不留下序号空洞
 
 ### 4.2 响应（`text/event-stream`）
@@ -319,9 +321,8 @@ SignedReceipt = {
 
 ### 7.1 谁定义、如何生效
 
-- Policy 是 **Hub 预定义的白名单**，随 TEE **部署配置**加载（`policy.Set.Install / InstallAll`），**不需要 Provider 签名、也不需要定期轮换**——这是刻意的简化：Provider 只需提供 token 与报价。
+- Policy 是 **Hub 预定义的白名单**，随 TEE **部署配置**加载（`policy.Set.Install / InstallAll`）。Provider 无需参与签名或轮换。
 - 完整性由**证明**背书：TEE 启动时计算整个 Policy 集合的哈希（`policy.Set.Hash()`），并把它绑进 attestation（仿真落在证据的 `policy_set_hash` 字段；真实 SEV-SNP 中 Policy 随镜像/受保护配置一起被 measurement 覆盖）。因此**改动任何一个白名单条目都会改变这个哈希**，验证方可据此判断飞地装的是不是预期那份白名单。
-- 兼容：旧签名形式（`SignPolicy` / `VerifySignedPolicy` / `Set.Add`）仍在代码中保留，但**部署路径不使用它**。
 
 ### 7.2 Policy 字段
 
@@ -332,12 +333,11 @@ SignedReceipt = {
 | 3 | DisplayName | 可选 |
 | 4 | Hosts | 允许的上游 `host:port` 列表（≤16） |
 | 5 | Rules | 规则列表（≤64）：`{Methods, Path, AllowStream, QueryKeys, AllowAnyQuery}` |
-| 6 | Credential | 凭证注入形态 `{Header, Scheme}`，如 `{authorization, Bearer}`；**只描述形状，不含密钥** |
 | 7 | Limits | `{MaxResponseBytes, MaxBodyBytes, AllowedHeaders}` |
 | 8/9 | IssuedAt / ExpiresAt | 生效窗口 |
-| 10 | ProviderKey | **可选**（仅旧签名路径使用）；为空即部署白名单 |
-| 11 | Nonce | 可选 |
-| 12 | ~~RateCard~~ | **已移除**（键永久作废）。定价已迁出 Policy，见第 10.2 节 |
+| 11 | Nonce | 可选，让相同内容的两份 Policy 产生不同哈希 |
+
+> 键 6（旧 `Credential` 注入形态）、键 10（旧 `ProviderKey` 签名公钥）、键 12（旧 `RateCard` 定价）均已**永久作废**：凭证的形状随 token 密封进每次作业的信封（`Secret{Token, Header, Scheme}`，见第 7.4 节），定价是 Hub 侧报价表（见第 10.2 节），两者都不属于这份分布式白名单。
 
 ### 7.3 授权判定与拒绝原因
 
@@ -355,7 +355,47 @@ SignedReceipt = {
 | 8 | 流式是否被允许 | `streaming is not allowed by policy: "<M> <path>"` |
 | 9 | 限额：`min(作业, Policy)` | `job exceeds a policy limit: …` |
 
-凭证由 TEE 按 `Credential{Header, Scheme}` 注入；调用方永远拿不到、也设置不了它。
+凭证由 TEE 从作业携带的信封内解密出 `Secret{Header, Scheme, Token}` 并注入请求（见 7.4）；调用方永远拿不到、也设置不了它——`authorization` 等凭证头在 JobSpec 里出现即被拒（第 3.1 节）。
+
+---
+
+## 7.4 凭证如何到达 TEE（凭证平面与信封）
+
+凭证是**作业携带的**，TEE 不持久化：每个 JobSpec（键 15）带一份 `Envelope`（凭证信封），TEE 在飞地内用私钥解出 `Secret`，注入请求，执行完丢弃。整条链路保证 **Hub 永不接触明文**。
+
+### 7.4.1 `Secret`：凭证的形状
+
+`Secret{Token, Header, Scheme}` 三个字段覆盖所有主流 AI 服务的鉴权形态，Seller 只需填一次：
+
+| 服务 / 形态 | `Header` | `Scheme` | 落网的请求头 |
+|---|---|---|---|
+| OpenAI 及多数服务 | `authorization` | `Bearer` | `Authorization: Bearer <token>` |
+| Anthropic 等 | `x-api-key` | *空* | `x-api-key: <token>` |
+| 任意自定义 | 任意头名 | 可选前缀 | `<Header>: <Scheme> <token>`（Scheme 为空则 `Header: token`） |
+| 无需鉴权 | *空 Header* | 空 | 什么都不注入（`Token`/`Scheme` 必须也为空，否则非法） |
+
+`Secret` 在每次作业解密后先经 `Validate()`（头名合法性、保留头拒绝、token 无控制字符/首尾空白），不合规即拒、绝不落网。
+
+### 7.4.2 `Envelope`：X25519 混合加密信封
+
+`Envelope{KeyID, Ephemeral, Nonce, Ciphertext}` 是一次性密钥交换的产物（TEE 用 `tee.EncryptCredential` / Agent 用同一函数生成）：
+
+- `KeyID`：收件公钥指纹，TEE 据此拒绝发给旧收件密钥的信封（TEE 重启生成新密钥对，旧信封自然失效，Agent 下次上线自动重封）；
+- `Ephemeral` + `Nonce` + `Ciphertext`：一次性 X25519 临时公钥 + AES-GCM 随机 nonce + 密文，密钥由 `ECDH(收件私钥, 临时公钥)` 派生；
+- 密文内容是 `{Provider, Secret, IssuedAt}` 的 JSON——**Provider 被绑进密文**，Hub 无法把给 Provider A 的信封改派给 Provider B（TEE 打开后比较声明 Provider 与作业 Provider）。
+
+信封对外有两种形态：控制面上以 **JSON**（`key_id`/`ephemeral`/`nonce`/`ciphertext`，base64）在 Agent 注册时经 Hub 中转；作业面上由 Hub 用 **canonical CBOR** 编码后放进 `JobSpec.Credential`。两条形态编解码都在 `tokenhive/tee`（`EncodeCanonical` / `DecodeEnvelope` / `EncryptCredential`）。
+
+### 7.4.3 凭证生命周期（Agent 上线 → 掉线）
+
+1. **TEE 启动**时生成一对 InboxKey（私钥只在飞地内存，永不落盘；重启即轮换）；
+2. **Agent 上线**：拨 Hub 的 AgentGate，先经 Hub 的 `/v1/credential-key` 拉取当前 TEE 公钥，用 `tee.EncryptCredential` 把自己的 `Secret` 密封成 `Envelope`，随注册消息 `AgentRegister` 上报；
+3. **Hub** 只把信封（密文）存入自己的**凭证库**（`CredentialStore`，内存或文件），**不在 Hub 内存里出现明文**；
+4. **调度时**，Hub 把该 Provider 当前的信封 canonical 编码后放进每次作业的 `JobSpec.Credential`（`execute` 与会话 `/v1/session` 都如此）；
+5. **TEE 执行**时用私钥解开信封并注入请求；
+6. **Agent 掉线**：Gate 检测到控制流关闭，从凭证库**删除**该 Provider 的信封（撤销注册），之后该 Provider 无凭证可派，作业被 TEE 以 `job carries no credential` 拒绝，而不是用失效/盗用的 token 硬发。
+
+> 安全含义：Hub 全程只见密文信封；即便 Hub 被攻破，它手上也只有打不开的信封。唯一的解密能力在 TEE 私钥，而私钥从不离开飞地内存。一个被攻破的 Hub 能做的极限是"把一个 Provider 的信封随作业转发"，但信封绑定了 Provider 且只对白名单内的 host/path 生效，所以既无法改派、也无法外泄明文。
 
 ---
 
@@ -408,7 +448,9 @@ err := proof.Verify(signed, proof.VerifyOptions{
 
 ### 10.1 你的 token 被怎么用、你能审什么
 
+- **token 如何被平台使用**：你的 token 由供方侧进程（Provider Agent，见 10.3）或一次性工具用 **TEE 收件公钥加密**后随注册上报；Hub 只持有**密文信封**并在每次作业时转发给 TEE，**Hub 本体从不接触你的明文 token**。TEE 在飞地内解密后才把它注入请求（见 7.4）。
 - token 只会被注入到 **Policy 白名单内的 host/path/method**（第 7 章）；平台侧无法让 TEE 拿你的 token 去访问白名单外的接口（例如账户、账单类接口）。
+- **Agent 掉线立即撤销**：供方 Agent 与控制流断开时，Hub 从凭证库删除该 Provider 的信封，token 停止被使用（见 7.4.3）。
 - 每次使用都会产生一张**签名回执**，含：上游状态码、响应字节数、请求字节数、完成状态、时间、Policy 哈希、**单调序号 ProviderSeq**。
 - **审计**：回执按 Provider 分目录存储，可用离线验证工具检查签名与序号连续性：
 
@@ -428,10 +470,12 @@ verify -provider openai-sim   # 只看一个 Provider
 
 若你希望 TEE 经**你的网络出口**访问 AI 服务商（例如住宅 IP / 固定出口）：
 
+- **Agent 同时承载两件事**：其一是一条反向隧道让 TEE 经你的网络出口访问上游；其二是把你声明的 `token` 用 TEE 收件公钥加密、随注册上报（7.4.3）。所以**你的 token 只写在你自己的 Agent 启动参数里**，平台上只有密文信封。
 - Agent 是你机器上的进程，位于 NAT 后**不可被拨入**：它主动拨 Hub 的 AgentGate 并保持反向隧道，断开自动重连。
 - 契约：**多路复用反向隧道**。Agent 主动拨 Hub 的 AgentGate，与 Hub 之间是一条多路复用 WebSocket；Hub 在隧道上为每条流指定一个上游 `host:port`（必须落在 Agent 的 `-targets` allowlist 内），Agent 拨向该 host 并双向复制字节。Agent **不做应用层代理、不解密**——TEE 与 AI 服务商的 TLS 会话端到端加密封装穿过隧道。
 - 安全边界：Agent 永不接触 TLS 密钥，只能看到未参与会话的一段密文；可用 tap 把转发字节落盘自证"只见到密文"。
-- 启动参数要点：`-hub <AgentGate URL>`、`-key <共享密钥>`、`-provider <标识>`、`-targets <允许的 host:port>`、`-price <微单位/请求，0 表示接受平台默认>`、`-tap <落盘路径>`。
+- **认证形状尽量少配**：Agent 启动时默认按 `authorization` 头 + `Bearer` 前缀上报 token（覆盖 OpenAI 及多数服务）；若你的服务用 `x-api-key` 这类"原样 token 头"，只需传 `-auth-header x-api-key`（`-auth-scheme auto` 会自动改为"无前缀"）。需要完全自定义时再显式写 `-auth-scheme`。
+- 启动参数要点：`-hub <AgentGate URL>`、`-key <共享密钥>`、`-provider <标识>`、`-token <你的 access token>`、`-targets <允许的 host:port>`、`-auth-header <鉴权头，默认 authorization>`、`-auth-scheme <auto|Bearer|其它|空>`、`-price <微单位/请求，0 表示接受平台默认>`、`-tap <落盘路径>`。
 
 ---
 
@@ -497,7 +541,10 @@ verify -provider openai-sim   # 只看一个 Provider
 | `streaming is not allowed by policy` | 该规则不允许流式 | 否 |
 | `job exceeds a policy limit: …` | 作业 MaxResponseBytes 超过 Policy 限额 | 否 |
 | `request body exceeds the policy limit: …` | 请求体超过 Policy 的 MaxBodyBytes（在 Policy 授权之后检查） | 否 |
-| `no credential available for provider: "…"` | 该 Provider 有 Policy 但 TEE 未装载凭证 | 否 |
+| `job carries no credential: provider: "…"` | 作业未携带凭证信封（该 Provider 无在线的 Agent / 未注册） | 否 |
+| `credential envelope is bound to provider "…", not "…"` | 信封密文里绑定的 Provider 与作业不一致（改派被拒） | 否 |
+| `envelope was not encrypted for this inbox key` / `envelope failed to decrypt …` | 信封密钥 ID 或解密失败（发给旧收件密钥 / 被篡改） | 否 |
+| `invalid credential secret: …` | 解出的 `Secret` 形状非法（头名/保留头/token 控制字符等） | 否 |
 | `submitter rejected: …` | 部署方启用了 `SubmitterVerifier` 并拒绝该提交方 | 否 |
 | 会话专有：`streaming session must carry an empty body: got N bytes` | 会话作业带了非空 body | 否 |
 | 会话专有：`streaming session must carry an empty body: Spec.Session is false` | 会话端点收到未置 `Session` 的 Spec | 否 |
