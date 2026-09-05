@@ -475,7 +475,9 @@ verify -provider openai-sim   # 只看一个 Provider
 - 契约：**多路复用反向隧道**。Agent 主动拨 Hub 的 AgentGate，与 Hub 之间是一条多路复用 WebSocket；Hub 在隧道上为每条流指定一个上游 `host:port`（必须落在 Agent 的 `-targets` allowlist 内），Agent 拨向该 host 并双向复制字节。Agent **不做应用层代理、不解密**——TEE 与 AI 服务商的 TLS 会话端到端加密封装穿过隧道。
 - 安全边界：Agent 永不接触 TLS 密钥，只能看到未参与会话的一段密文；可用 tap 把转发字节落盘自证"只见到密文"。
 - **认证形状尽量少配**：Agent 启动时默认按 `authorization` 头 + `Bearer` 前缀上报 token（覆盖 OpenAI 及多数服务）；若你的服务用 `x-api-key` 这类"原样 token 头"，只需传 `-auth-header x-api-key`（`-auth-scheme auto` 会自动改为"无前缀"）。需要完全自定义时再显式写 `-auth-scheme`。
-- 启动参数要点：`-hub <AgentGate URL>`、`-key <共享密钥>`、`-provider <标识>`、`-token <你的 access token>`、`-targets <允许的 host:port>`、`-auth-header <鉴权头，默认 authorization>`、`-auth-scheme <auto|Bearer|其它|空>`、`-price <微单位/请求，0 表示接受平台默认>`、`-tap <落盘路径>`。
+- **可选声明 models 能力**：`-models <逗号分隔的模型 ID>` 声明你的上游能服务哪些模型。Hub 把它当**软能力提示**：调度只把请求派给声明了该模型的 Agent（声明列表里没有该模型的 Agent 被跳过，免得白买上游一次拒绝）；所有在线 Agent 都没声明的模型以"无 Provider 服务该模型"直接拒绝。**注册消息未携带声明（空列表）的 Agent 被 Hub 视为"服务一切"**，调度照常尝试——这只发生在内嵌 provider 包、不配置自动发现的形态；从 CLI 启动时你实际上总会声明或自动发现（见下一条），不会落入该分支。买家的模型目录（`GET /v1/models`，见第 12 节）只列出在线 Agent **声明过**的模型，未声明者不产生目录行。
+- **不填 models 时的自动发现**：不带 `-models` 启动时，Agent 从第一个 `-targets` 推断惯例端点 `https://<target>/v1/models`（可用 `-models-url` 显式覆盖），在**拨 Hub 之前**拉取一次，按 OpenAI `/v1/models` 惯例解析（`{"object":"list","data":[{"id":…}]}`，或退化为逐行模型 ID 的纯文本）。**拉取失败或列表为空 = 致命配置错误**：Agent 报错并拒绝上线，绝不会静默地以"服务一切"注册——提示信息会同时说明"没填 models"与"URL 拉取失败"两件事。上游为自签/仿真 TLS 时用 `-ca <PEM 文件>` 注入发现请求的信任根。
+- 启动参数要点：`-hub <AgentGate URL>`、`-key <共享密钥>`、`-provider <标识>`、`-token <你的 access token>`、`-targets <允许的 host:port>`、`-auth-header <鉴权头，默认 authorization>`、`-auth-scheme <auto|Bearer|其它|空>`、`-price <微单位/请求，0 表示接受平台默认>`、`-models <模型 ID 逗号列表，留空则自动发现>`、`-models-url <显式发现 URL，覆盖惯例端点>`、`-ca <发现用 CA PEM，仿真自签上游需要>`、`-tap <落盘路径>`。
 
 ---
 
@@ -501,6 +503,7 @@ verify -provider openai-sim   # 只看一个 Provider
 - Hub 是**字节中继**，不改写上游帧：`/v1/chat/completions` 追加 `data: [DONE]` 终止标记；`/v1/messages` 以 `message_stop` 结束、`/v1/responses` 以 `response.completed` 结束，**不追加 `[DONE]`**。
 - 长会话：Hub 另有用户面 WebSocket 端点 **`GET /v1/session`**（模型取自首帧 JSON）。它与 TEE 侧同路径端点（第 5 章）**不是同一个**——前者面向终端用户，后者是 Hub↔TEE 内部面。接入方务必确认打的是 TEE 的 `/v1/session`。
 - 请求体中的 `model` 字段决定走哪个 Provider（最低价优先）；身份为 `X-TokenHive-Key` 头（v1 占位，非最终鉴权方案）。
+- **模型目录**：`GET /v1/models` 列出当前**在线** Agent 声明的全部模型及其最低在线价（即调度器此刻会实际派发的价格），响应为 `{"models":[{"model","provider","price_micros"}, …]}`。可选 `?q=<子串>` 做大小写不敏感过滤：精确 ID（`?q=claude-sim-haiku`）与片段（`?q=deepseek` 命中 `deepseek-pro` 与 `deepseek-flash`）都可搜。目录完全由 Hub 内存中的在线供应算出，**不触发任何对 Agent 或上游的探测**；未配 Agent 门的 Hub 返回空目录。
 - 调度失败（无 Provider / 配额）在首字节写出前返回 JSON 错误（404/429/502），而非 SSE 错误帧。
 
 ---
