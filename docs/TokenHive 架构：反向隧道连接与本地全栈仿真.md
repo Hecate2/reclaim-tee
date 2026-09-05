@@ -98,7 +98,7 @@ ChannelConfig 的 egress 配置：RelayURL（经 Hub 中继，生产形态与本
 
 调度、计价、账务全部在 hub 包内，全部可在 ScriptedTEE 毫秒级单测中验证，不经网络。
 
-**最低在线价调度**。用户只声明 model，不声明 provider。providersForModel 产出候选：当有 Agent 在线时，只把在线 provider 列为候选（离线者不参与），按有效价（PerRequestMicros 加该 model 的加价）升序排列，同价按 provider 名破序使顺序成为供应的纯函数。在线 Agent 的自报价即其有效价（h.card 同时供调度与结算读取，报价与实收不漂移）。若无任何 Agent 在线（如仅对脚本替身的嵌入测试），则退回静态市场表以允许业务单测定价。ExecuteForModel 按序尝试，失败回退次低价；一旦某 provider 的首个字节已被透传给用户，即视为已绑定该 provider，不再中途切换（避免两份回执拼凑一个用户不可解析的响应）。
+**最低在线价调度**。用户只声明 model，不声明 provider。providersForModel 产出候选：**供应 = 此刻持有一条在线隧道的 Agent**——离线即退出候选，挂单（自报价）随之消失，绝不回落到市场默认价继续调度（一个无人持有隧道的 provider 不该收到任何新作业）。按有效价（PerRequestMicros 加该 model 的加价）升序排列，同价按 provider 名破序使顺序成为供应的纯函数。在线 Agent 的自报价即其有效价（h.card 同时供调度与结算读取，报价与实收不漂移）。唯一的例外是**不承载 Agent 注册的 Hub**（未配置 AgentSecret，如仅对脚本替身的嵌入业务测试）：它没有"在线"概念，直接用静态市场表做供应，让单测在不引入真实隧道的前提下验证定价与排序。ExecuteForModel 按序尝试，失败回退次低价；一旦某 provider 的首个字节已被透传给用户，即视为已绑定该 provider，不再中途切换（避免两份回执拼凑一个用户不可解析的响应）。
 
 **计价与佣金**。买家应付 = 卖家价 ×（1 + 佣金率）。沿用整数微单位与溢出检查（溢出报错不回绕）。账本（Ledger）记录 dispatc/verified/settled 计数、以及按 provider 的收入口径与 Hub 佣金口径；Provider 始终拿到自己费率卡上的全额，佣金单独追踪。
 
