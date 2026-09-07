@@ -60,7 +60,7 @@ User ─HTTP/SSE 或 WS─► Hub ─┬─ /v1/execute（请求模式）─► 
 
 **Hub**：持有全部需要理解业务语义的逻辑。用户面 API（/v1/chat/completions、/v1/messages、/v1/responses、/v1/session、/v1/models 模型目录）、模型到 Provider 的最低在线价调度、配额、计价与佣金、账本、回执审计、usage（token 用量）解析、重试与故障回退。Hub 还承担反向隧道的两端服务器角色（见第 4 节）：Agent 拨入的注册门（AgentGate）与 TEE 拨入的中继端点（TeeRelay）。Hub 只持有加密的凭证信封（见第 7 节，键 15），永不见明文 token、不接触 TLS 密钥。
 
-**Provider Agent（tokenhive/provider）**：纯粹的反向隧道客户端。拨向 Hub 的 AgentGate 并保持一条多路复用 WebSocket；注册上线后，对 Hub 在隧道上打开的每条中继流，拨向一个固定的允许列表（allowlist）之内的上游 host，然后双向复制字节。Agent 不读取所搬运的字节——TEE 与上游之间的 TLS 会话端到端加密，Agent 只看到自己并未参与会话的一段密文。Agent 强制执行且只强制执行一件事：allowlist，杜绝把贡献者机器变成通用代理。注册时可**可选声明**自己的上游能服务哪些模型（见第 4 节）；从 CLI 不带 `-models` 启动即视为配置了自动发现：Agent 在拨 Hub 之前向上游惯例的 `/v1/models` 端点拉取一次模型清单，**拉取失败或列表为空即报错并拒绝上线**——一个无法证明自己能服务什么的 Agent 绝不静默地以"服务一切"注册。注册消息未携带模型清单的 Agent（内嵌 provider 包、不配置自动发现的形态），Hub 视为服务任何模型。
+**Provider Agent（tokenhive/provider）**：纯粹的反向隧道客户端。拨向 Hub 的 AgentGate 并保持一条多路复用 WebSocket；注册上线后，对 Hub 在隧道上打开的每条中继流，拨向一个固定的允许列表（allowlist）之内的上游 host，然后双向复制字节。Agent 不读取所搬运的字节——TEE 与上游之间的 TLS 会话端到端加密，Agent 只看到自己并未参与会话的一段密文。隧道断开后 Agent 按指数退避重连（起点 1s、封顶 30s，连接成功后重置），每次等待带随机抖动：退避保证单个 Agent 不会以固定速率猛打一个宕掉的 Hub，抖动保证"同一时刻一起掉线"的机群不会在同一时刻一起回来形成锁步尖峰。注册时可**可选声明**自己的上游能服务哪些模型（见第 4 节）；从 CLI 不带 `-models` 启动即视为配置了自动发现：Agent 在拨 Hub 之前向上游惯例的 `/v1/models` 端点拉取一次模型清单，**拉取失败或列表为空即报错并拒绝上线**——一个无法证明自己能服务什么的 Agent 绝不静默地以"服务一切"注册。注册消息未携带模型清单的 Agent（内嵌 provider 包、不配置自动发现的形态），Hub 视为服务任何模型。
 
 **上游服务商**：只看到 Provider 的出口 IP 与其发来的请求，不知 Hub 与 TEE 的存在。
 
@@ -72,7 +72,7 @@ User ─HTTP/SSE 或 WS─► Hub ─┬─ /v1/execute（请求模式）─► 
 
 Hub 侧维护两个 WebSocket 端点，这是它作为「NAT 背后贡献者和 TEE 的汇合点」的存在方式。两端的处理逻辑在 tokenhive/hub/agenthttp.go 与 agentnet.go。
 
-**AgentGate（/v1/agent）**：Agent 拨入以在线。握手时校验 Agent 预设的共享密钥（agentKeyMatches 做常数时间比较，任何与 Hub 的 AgentSecret 不匹配的握手中断），随后把连接包成多路复用隧道，等待 Agent 的第一条控制流。控制流的开流元数据是 AgentRegister——它声明为哪个 provider 出口、可选展示名、可选的自我报价（SelfPrice）、**可选的模型清单（Models）**，以及**密封在 `Credential` 里的 token**：Agent 从 Hub 的 /v1/credential-key 拉取 TEE 收件公钥，把自己的 token 加密成凭证信封（tee.EncryptCredential）后随注册上报，Hub 只把密文信封存入凭证库、永不见明文。Models 是软能力提示：非空时该 Agent 只作为这些模型的候选；为空则该 Agent 服务任何模型。控制流保持打开期间该 Agent 视为在线；控制流一旦关闭，Agent 从调度器离线、隧道拆除，Hub 同时从凭证库撤销该 provider 的信封。Agent 未声明自价时接受 Hub 为该 provider 声明的平台默认价；若 provider 无平台默认价，该 Agent 无法注册。
+**AgentGate（/v1/agent）**：Agent 拨入以在线。握手时校验 Agent 预设的共享密钥（agentKeyMatches 做常数时间比较，任何与 Hub 的 AgentSecret 不匹配的握手中断），随后把连接包成多路复用隧道，等待 Agent 的第一条控制流。控制流的开流元数据是 AgentRegister——它声明为哪个 provider 出口、可选展示名、可选的自我报价（SelfPrice）、**可选的模型清单（Models）**，以及**密封在 `Credential` 里的 token**：Agent 从 Hub 的 /v1/credential-key 拉取 TEE 收件公钥，把自己的 token 加密成凭证信封（tee.EncryptCredential）后随注册上报，Hub 只把密文信封存入凭证库、永不见明文。每个 agent 每次拨入都要取一次收件公钥，因此 Hub **只合并在途的拉取**：同一时刻到达的调用共用一个到 TEE 的往返，结果分发给全部等待者后即丢弃，下一个调用者仍重新读 TEE。之所以不做 TTL 缓存：收件密钥在 TEE 每次重启时轮换，缓存会在重启后的整个 TTL 窗口内把已作废的公钥发给每一个重连的 agent，它们封出的信封新 TEE 根本打不开——反而把一次重启拖成更长的故障。Models 是软能力提示：非空时该 Agent 只作为这些模型的候选；为空则该 Agent 服务任何模型。控制流保持打开期间该 Agent 视为在线；控制流一旦关闭，Agent 从调度器离线、隧道拆除，Hub 同时从凭证库撤销该 provider 的信封。Agent 未声明自价时接受 Hub 为该 provider 声明的平台默认价；若 provider 无平台默认价，该 Agent 无法注册。
 
 在线注册表（agentRegistry）以 provider 为主键：同一 provider 任一时刻只有一个在线 Agent，后注册者顶掉先前者并关闭其隧道（杜绝同一 provider 的双重身份与陈旧隧道）。每个在线 Agent 连同其有效价与声明的模型清单一起登记，调度器只把新工作路由到此刻在线且（若声明了清单）清单含该模型者。
 

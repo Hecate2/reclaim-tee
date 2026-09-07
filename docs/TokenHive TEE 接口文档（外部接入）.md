@@ -471,7 +471,7 @@ verify -provider openai-sim   # 只看一个 Provider
 若你希望 TEE 经**你的网络出口**访问 AI 服务商（例如住宅 IP / 固定出口）：
 
 - **Agent 同时承载两件事**：其一是一条反向隧道让 TEE 经你的网络出口访问上游；其二是把你声明的 `token` 用 TEE 收件公钥加密、随注册上报（7.4.3）。所以**你的 token 只写在你自己的 Agent 启动参数里**，平台上只有密文信封。
-- Agent 是你机器上的进程，位于 NAT 后**不可被拨入**：它主动拨 Hub 的 AgentGate 并保持反向隧道，断开自动重连。
+- Agent 是你机器上的进程，位于 NAT 后**不可被拨入**：它主动拨 Hub 的 AgentGate 并保持反向隧道，断开自动重连。重连按指数退避（起点 1s、封顶 30s，连接成功后重置），且**每次等待都带随机抖动**——因此平台侧（Hub/TEE）重启后，整个机群是错峰回来的，不会同一瞬间一齐冲上来。
 - 契约：**多路复用反向隧道**。Agent 主动拨 Hub 的 AgentGate，与 Hub 之间是一条多路复用 WebSocket；Hub 在隧道上为每条流指定一个上游 `host:port`（必须落在 Agent 的 `-targets` allowlist 内），Agent 拨向该 host 并双向复制字节。Agent **不做应用层代理、不解密**——TEE 与 AI 服务商的 TLS 会话端到端加密封装穿过隧道。
 - 安全边界：Agent 永不接触 TLS 密钥，只能看到未参与会话的一段密文；可用 tap 把转发字节落盘自证"只见到密文"。
 - **认证形状尽量少配**：Agent 启动时默认按 `authorization` 头 + `Bearer` 前缀上报 token（覆盖 OpenAI 及多数服务）；若你的服务用 `x-api-key` 这类"原样 token 头"，只需传 `-auth-header x-api-key`（`-auth-scheme auto` 会自动改为"无前缀"）。需要完全自定义时再显式写 `-auth-scheme`。
