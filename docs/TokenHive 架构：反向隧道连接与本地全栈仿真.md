@@ -124,7 +124,7 @@ Session（键 14，omitempty）标记流式 WebSocket 型会话请求：置位�
 
 仿真的装配原则：cmd/hub serve 以 -agent-key 启动，同时挂载 AgentGate 与 TeeRelay；Provider Agent 以 -hub、-key、-provider、-targets 拨入；真实 TEE 以 -relay ws://…/v1/relay 出站。三个角色（hub、agent、tee）的 CLI 参数即反向隧道拓扑的可读表达。仿真不要求证明的正确性（simulated 适配器的既定立场：证据字段结构与真实报告一一对应，只换信任根不换代码路径），但业务代码路径与真实 TEE 完全一致。
 
-harness 场景矩阵覆盖：正常流、策略拒绝、provider 故障（401/429/truncate）、跨重启 ProviderSeq 续增、序列空洞审计、配额、真实 TEE 经反向隧道 + tap 抓包断言（Agent 只见密文、零凭证命中）、Agent 中途被杀优雅失败、epoch 轮换、超尺寸响应截断、连接驻留（N 请求恰一条上游 TCP 连接、断流后作废并重拨）、流模式会话、最低价调度与抽成、Agent 不带 -models 自动发现（经仿真 CA 拉上游 /v1/models）并登记模型目录、买家按精确/子串搜索目录。三层测试法不变：fake TEE 毫秒级业务测试、真 TEE 进程可信属性测试、接缝测试。一键运行入口为 bash tokenhive/harness/harness.sh；go test ./tokenhive/... 跑单元与跨包测试。
+harness 场景矩阵覆盖：正常流、策略拒绝、provider 故障（401/429/truncate）、跨重启 ProviderSeq 续增、序列空洞审计、配额、真实 TEE 经反向隧道 + tap 抓包断言（Agent 只见密文、零凭证命中）、Agent 中途被杀优雅失败、epoch 轮换、超尺寸响应截断、连接驻留（N 请求恰一条上游 TCP 连接、断流后作废并重拨）、流模式会话、最低价调度与抽成、Agent 不带 -models 自动发现（经仿真 CA 拉上游 /v1/models）并登记模型目录、买家按精确/子串搜索目录、Hub↔TEE mTLS（TEE 发布 RA-TLS 证书、Hub 钉住且出示客户端身份、错钉/平文均被拒）。三层测试法不变：fake TEE 毫秒级业务测试、真 TEE 进程可信属性测试、接缝测试。一键运行入口为 bash tokenhive/harness/harness.sh；go test ./tokenhive/... 跑单元与跨包测试。
 
 ---
 
@@ -138,7 +138,7 @@ Hub 的 AgentGate 以共享密钥为门，拒斥未持密者的拨入。当前 A
 
 Hub 的 TeeRelay 依赖网络边界自证（受信的 Hub↔TEE 通道）。任何能连到该端点的调用方凭 provider+host 可开一条到某在线 Agent allowlist 内主机的流；防线目前只有 Agent 的 allowlist。应把 TeeRelay 与其余 Hub↔TEE 通道放在同一 mTLS 之后（Upstream 加固项 2，与既有「生产启用 mTLS」的部署边界一致）。
 
-切换真实云 TEE 的核对清单照旧效仿：签名 Epoch 由 sevsnp 适配器提供，Hub↔TEE 启用 mTLS，attestation evidence 取回接口补齐，Channel 的 TLS 根证书换为系统根。
+切换真实云 TEE 的核对清单照旧效仿：签名 Epoch 由平台适配器提供，Hub↔TEE 启用 mTLS，attestation evidence 取回接口补齐，Channel 的 TLS 根证书换为系统根。平台适配器现状：**AWS SEV-SNP（sevsnp）** 为已验证的真实路径，编译进 `-tags sevsnp` 构建；**阿里云（alicloud）与腾讯云（tencent）** 为适配器骨架（编译进 `-tags cloud` 构建），宿主机检测（DMI 厂商 + SGX/TDX/SEV-SNP 设备节点）与 Epoch 装配已实现，但**远程证明验证未实现**——默认 fail-closed 拒绝启动，仅当显式传入 `-allow-untrusted` 才以明确标注「未受信」的软件密钥出证（仅限接线演练，收据会被各自平台的 Verifier 以 ErrAttestationNotImplemented 拒绝），Hub 侧 allowlist 若列入这两个平台，其收据一律验证失败。
 
 ---
 
