@@ -1,5 +1,5 @@
 // Package policy defines the TokenHive whitelist: the rules that bound what a
-// job may ask an AI provider to do with a shared credential.
+// job may ask an AI provider to do with a credential.
 //
 // A job spec describes what to do with a credential. It says nothing about what
 // that credential is allowed to be used for — and since the Hub authors every
@@ -11,14 +11,10 @@
 // stands between the Hub and a credential the Hub is not allowed to see, and
 // the only constraint on the Hub that survives the User trusting it.
 //
-// Who authors the policy changed with the connection-resident design: it is a
-// Hub-predefined document that ships with the TEE's deployment config, not a
-// per-provider signature the seller must rotate. The TEE loads it at startup
+// A policy is a Hub-predefined document that ships with the TEE's deployment
+// config — not a per-provider signature. The TEE loads it at startup
 // (policy.Set.Install), binds its hash into the enclave attestation
-// measurement, and refuses any job that steps outside it. The legacy signed
-// form — a provider key over the same structure — remains supported through
-// SignPolicy / VerifySignedPolicy / Set.Add as a compatibility path for
-// deployments that want an extra authorship layer.
+// measurement, and refuses any job that steps outside it.
 //
 // Policies are canonically encoded and hashed like every other TokenHive
 // structure, so a policy hash is a stable reference a receipt or an audit log
@@ -26,10 +22,7 @@
 package policy
 
 import (
-	"crypto/ecdsa"
-	"crypto/elliptic"
 	"crypto/sha256"
-	"crypto/x509"
 	"errors"
 	"fmt"
 	"net/url"
@@ -45,9 +38,9 @@ const (
 	// VersionV1 is the only policy version the runtime accepts.
 	VersionV1 = 1
 
-	// PolicySigningDomain separates provider signatures on a policy from every
-	// other signature the TokenHive stack produces.
-	PolicySigningDomain = "TokenHive.ProviderPolicy.v1"
+	// PolicyHashDomain separates policy digests from every other hash in the
+	// TokenHive stack.
+	PolicyHashDomain = "TokenHive.Policy.v1"
 
 	MaxHosts          = 16
 	MaxRules          = 64
@@ -68,35 +61,35 @@ var (
 	ErrInvalidHost        = errors.New("invalid host in policy")
 	ErrInvalidPathRule    = errors.New("invalid path rule")
 	ErrInvalidMethods     = errors.New("invalid method list in policy")
-	ErrInvalidCredential  = errors.New("invalid credential injection")
 	ErrInvalidLimits      = errors.New("invalid policy limits")
 	ErrInvalidQueryKey    = errors.New("invalid query key in policy")
 	ErrInvalidHeaderName  = errors.New("invalid header name in policy")
 	ErrInvalidNonce       = errors.New("invalid policy nonce")
 	ErrInvalidTimeRange   = errors.New("invalid policy validity window")
-	ErrInvalidSigningKey  = errors.New("invalid provider signing key")
 	ErrPolicyExpired      = errors.New("policy has expired")
 	ErrPolicyNotYetValid  = errors.New("policy is not yet valid")
 )
 
-// Policy is the signed statement of what a shared credential may be used for.
+// Policy is the whitelist that bounds what a shared credential may be used for.
 //
 // The field order is not significant — canonical CBOR sorts by integer key —
 // but the keys are part of the wire format and must never be renumbered or
 // reused once a version ships.
 type Policy struct {
-	Version     uint32     `cbor:"1,keyasint"`
-	Provider    string     `cbor:"2,keyasint"`
-	DisplayName string     `cbor:"3,keyasint,omitempty"`
-	Hosts       []string   `cbor:"4,keyasint"`
-	Rules       []Rule     `cbor:"5,keyasint"`
-	Credential  Credential `cbor:"6,keyasint"`
-	Limits      Limits     `cbor:"7,keyasint"`
-	IssuedAt    int64      `cbor:"8,keyasint"`
-	ExpiresAt   int64      `cbor:"9,keyasint"`
-	ProviderKey []byte     `cbor:"10,keyasint"`
+	Version     uint32   `cbor:"1,keyasint"`
+	Provider    string   `cbor:"2,keyasint"`
+	DisplayName string   `cbor:"3,keyasint,omitempty"`
+	Hosts       []string `cbor:"4,keyasint"`
+	Rules       []Rule   `cbor:"5,keyasint"`
 
-	// Nonce lets a provider reissue an otherwise identical policy so that
+	// Key 6 was Credential, the credential's injection shape. It is retired:
+	// the header/scheme now travels sealed inside the per-job envelope (see
+	// tee.Secret), so it has no place in a distributed whitelist.
+	Limits    Limits `cbor:"7,keyasint"`
+	IssuedAt  int64  `cbor:"8,keyasint"`
+	ExpiresAt int64  `cbor:"9,keyasint"`
+
+	// Nonce lets an operator reissue an otherwise identical policy so that
 	// rotations produce a different policy hash. Optional.
 	Nonce []byte `cbor:"11,keyasint,omitempty"`
 }
@@ -109,17 +102,6 @@ type Rule struct {
 	AllowStream   bool     `cbor:"3,keyasint,omitempty"`
 	QueryKeys     []string `cbor:"4,keyasint,omitempty"`
 	AllowAnyQuery bool     `cbor:"5,keyasint,omitempty"`
-}
-
-// Credential describes how the TEE injects the shared credential. The secret
-// itself never appears here: a policy is signed, distributed, and logged, so
-// it may only describe the shape of the header, not its value.
-type Credential struct {
-	// Header is the request header the credential is placed in.
-	Header string `cbor:"1,keyasint"`
-	// Scheme is a prefix such as "Bearer". Empty means the token is the entire
-	// header value.
-	Scheme string `cbor:"2,keyasint,omitempty"`
 }
 
 // Limits are the bounds a job must stay inside. The TEE applies the stricter
@@ -139,8 +121,9 @@ func (p Policy) EncodeCanonical() ([]byte, error) {
 }
 
 // Hash returns the policy hash: SHA-256 over the domain prefix and the
-// canonical encoding. This is what the provider signs and what external
-// systems cite when referring to a policy version.
+// canonical encoding. This is the stable reference external systems cite when
+// referring to a policy version, and the value a receipt's PolicyHash points
+// at.
 func (p Policy) Hash() ([32]byte, error) {
 	var zero [32]byte
 
@@ -150,7 +133,7 @@ func (p Policy) Hash() ([32]byte, error) {
 	}
 
 	h := sha256.New()
-	h.Write([]byte(PolicySigningDomain))
+	h.Write([]byte(PolicyHashDomain))
 	h.Write(encoded)
 
 	var out [32]byte
@@ -159,13 +142,7 @@ func (p Policy) Hash() ([32]byte, error) {
 }
 
 // Validate checks structural correctness. It does not check the validity window
-// (use ValidateAt) or the signature (use VerifySignedPolicy).
-//
-// The ProviderKey is optional at this level: TokenHive's policy is a
-// Hub-predefined whitelist loaded from TEE deployment config, so a policy need
-// not carry a provider signing key at all. When one IS present it must be a
-// usable P-256 key — that keeps the legacy signed-policy path honest without
-// forcing the deployment path to invent a key it does not use.
+// (use ValidateAt).
 func (p Policy) Validate() error {
 	if p.Version != VersionV1 {
 		return fmt.Errorf("%w: %d", ErrUnsupportedVersion, p.Version)
@@ -208,9 +185,6 @@ func (p Policy) Validate() error {
 		}
 	}
 
-	if err := p.Credential.Validate(); err != nil {
-		return err
-	}
 	if err := p.Limits.Validate(); err != nil {
 		return err
 	}
@@ -221,11 +195,6 @@ func (p Policy) Validate() error {
 	if len(p.Nonce) > 0 && (len(p.Nonce) < MinNonceLength || len(p.Nonce) > MaxNonceLength) {
 		return fmt.Errorf("%w: length %d outside [%d,%d]",
 			ErrInvalidNonce, len(p.Nonce), MinNonceLength, MaxNonceLength)
-	}
-	if len(p.ProviderKey) > 0 {
-		if err := validateSigningKey(p.ProviderKey); err != nil {
-			return err
-		}
 	}
 	return nil
 }
@@ -278,43 +247,6 @@ func (r Rule) Validate() error {
 	return nil
 }
 
-// Inject returns the header name and value that carry the credential.
-//
-// The token is validated rather than trusted: a credential that reaches the
-// header writer with a CR/LF would let a secret leak into the request as a
-// smuggled header line, and the TEE is the last component that can stop it.
-func (c Credential) Inject(token string) (string, string, error) {
-	if err := c.Validate(); err != nil {
-		return "", "", err
-	}
-	if token == "" {
-		return "", "", fmt.Errorf("%w: empty credential", ErrInvalidCredential)
-	}
-	if strings.ContainsAny(token, "\r\n\x00") {
-		return "", "", fmt.Errorf("%w: credential contains a control character", ErrInvalidCredential)
-	}
-	if strings.TrimSpace(token) != token {
-		return "", "", fmt.Errorf("%w: credential has surrounding whitespace", ErrInvalidCredential)
-	}
-	if c.Scheme == "" {
-		return c.Header, token, nil
-	}
-	return c.Header, c.Scheme + " " + token, nil
-}
-
-func (c Credential) Validate() error {
-	if !isToken(c.Header) {
-		return fmt.Errorf("%w: %q is not a valid header name", ErrInvalidCredential, c.Header)
-	}
-	if isReservedInjectionHeader(c.Header) {
-		return fmt.Errorf("%w: %q must not be injected", ErrInvalidCredential, c.Header)
-	}
-	if c.Scheme != "" && !isToken(c.Scheme) {
-		return fmt.Errorf("%w: %q is not a valid scheme", ErrInvalidCredential, c.Scheme)
-	}
-	return nil
-}
-
 func (l Limits) Validate() error {
 	if l.MaxResponseBytes == 0 {
 		return fmt.Errorf("%w: MaxResponseBytes must be greater than zero", ErrInvalidLimits)
@@ -342,50 +274,11 @@ func (l Limits) Validate() error {
 	return nil
 }
 
-// validateSigningKey requires a P-256 SPKI key up front, so that a policy
-// which could never verify a signature is rejected at load time rather than at
-// the first job.
-func validateSigningKey(publicKeyDER []byte) error {
-	if len(publicKeyDER) == 0 {
-		return fmt.Errorf("%w: empty key", ErrInvalidSigningKey)
-	}
-	parsed, err := x509.ParsePKIXPublicKey(publicKeyDER)
-	if err != nil {
-		return fmt.Errorf("%w: %v", ErrInvalidSigningKey, err)
-	}
-	publicKey, ok := parsed.(*ecdsa.PublicKey)
-	if !ok {
-		return fmt.Errorf("%w: type %T, want ECDSA", ErrInvalidSigningKey, parsed)
-	}
-	if publicKey.Curve != elliptic.P256() {
-		return fmt.Errorf("%w: curve %q, want P-256", ErrInvalidSigningKey, publicKey.Curve.Params().Name)
-	}
-	return nil
-}
-
-// reservedInjectionHeaders are headers the credential must never be injected
-// into. They either describe the framing the TEE itself controls, or they
-// change how the proxy-hop is interpreted.
-var reservedInjectionHeaders = []string{
-	"host",
-	"content-length",
-	"transfer-encoding",
-	"connection",
-	"upgrade",
-	"te",
-	"trailer",
-	"proxy-authorization",
-}
-
-func isReservedInjectionHeader(name string) bool {
-	for _, reserved := range reservedInjectionHeaders {
-		if strings.EqualFold(name, reserved) {
-			return true
-		}
-	}
-	return false
-}
-
+// validatePolicyHost checks that a host is a plain DNS name with an optional
+// numeric port, so a policy can never name a URL the TEE would parse
+// differently than its matcher. A host is the one place a credential could be
+// smuggled to an attacker-controlled endpoint, so it is checked twice: once
+// here at policy load time, and again by jobs at spec time.
 func validatePolicyHost(host string) error {
 	if host == "" || len(host) > jobs.MaxHostLength {
 		return fmt.Errorf("%w: %q", ErrInvalidHost, host)

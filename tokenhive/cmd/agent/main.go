@@ -11,7 +11,9 @@ package main
 
 import (
 	"context"
+	"crypto/x509"
 	"flag"
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
@@ -22,6 +24,7 @@ import (
 
 	"github.com/reclaimprotocol/reclaim-tee/tokenhive/hub"
 	"github.com/reclaimprotocol/reclaim-tee/tokenhive/provider"
+	"github.com/reclaimprotocol/reclaim-tee/tokenhive/tee"
 )
 
 func main() {
@@ -31,7 +34,13 @@ func main() {
 	name := flag.String("name", "", "optional human display label for this agent")
 	price := flag.Int64("price", 0, "per-request price in micro-units; 0 accepts the Hub's platform default for this provider")
 	targets := flag.String("targets", "127.0.0.1:18080", "comma-separated host:port the agent may dial (the AI provider endpoint)")
+	models := flag.String("models", "", "comma-separated model IDs this agent's upstream serves; empty auto-discovers them from the upstream's conventional /v1/models endpoint")
+	modelsURL := flag.String("models-url", "", "explicit URL to fetch the model list from; overrides the conventional discovery endpoint")
+	caFile := flag.String("ca", "", "CA file to trust when fetching the model list over TLS (the simulation's mock provider CA)")
 	tap := flag.String("tap", "", "file to mirror every relayed byte into (test/demo: proves the agent only sees ciphertext)")
+	token := flag.String("token", "", "the provider's access token (API key). Required; sealed to the TEE at registration — the Hub never sees it")
+	authScheme := flag.String("auth-scheme", "auto", "prefix before the token in the auth header: auto, a literal scheme (e.g. Bearer), or empty for a raw-token header")
+	authHeader := flag.String("auth-header", "authorization", "request header the token travels in (e.g. authorization, x-api-key)")
 	timeout := flag.Duration("connect-timeout", 10*time.Second, "bounds dialing the Hub and each upstream")
 	reconnect := flag.Duration("reconnect", time.Second, "pause between reconnect attempts after the tunnel drops")
 	flag.Parse()
@@ -42,10 +51,30 @@ func main() {
 	if *providerName == "" {
 		log.Fatal("agent requires -provider")
 	}
+	if *token == "" {
+		log.Fatal("agent requires -token (the provider's access token)")
+	}
 	allowed := make([]string, 0, 4)
 	for _, t := range strings.Split(*targets, ",") {
 		if t = strings.TrimSpace(t); t != "" {
 			allowed = append(allowed, t)
+		}
+	}
+	if len(allowed) == 0 {
+		log.Fatal("agent requires at least one -target")
+	}
+
+	// Resolve the token's presentation shape. "auto" picks the convention that
+	// matches the header the seller named, so the common cases need no config at
+	// all: OpenAI and most services want "Authorization: Bearer <token>" (the
+	// whole header is the token's home), while an x-api-key-style header carries
+	// the raw token with no prefix (Anthropic, and most key-in-header services).
+	scheme := *authScheme
+	if strings.EqualFold(scheme, "auto") {
+		if strings.EqualFold(*authHeader, "authorization") {
+			scheme = "Bearer"
+		} else {
+			scheme = ""
 		}
 	}
 
@@ -59,6 +88,11 @@ func main() {
 			Provider:    *providerName,
 			DisplayName: *name,
 		},
+		Credential: tee.Secret{
+			Token:  *token,
+			Scheme: scheme,
+			Header: *authHeader,
+		},
 	}
 	if *price > 0 {
 		cfg.Self.SelfPrice = &hub.RateCard{PerRequestMicros: uint64(*price)}
@@ -70,6 +104,29 @@ func main() {
 		}
 		cfg.Tap = f
 	}
+	if list := splitModels(*models); len(list) > 0 {
+		cfg.Self.Models = list
+		log.Printf("provider agent %s: declaring %d models explicitly", *providerName, len(list))
+	} else {
+		// No explicit model list: discover it from the upstream's conventional
+		// models endpoint before coming online. A failure here is fatal — the
+		// agent reports it and refuses to register — so a provider that meant
+		// to declare capability but cannot reach its upstream is never silently
+		// treated as "serves anything".
+		discoverURL := *modelsURL
+		if discoverURL == "" {
+			discoverURL = "https://" + allowed[0] + "/v1/models"
+			log.Printf("provider agent %s: no -models; will discover from %s", *providerName, discoverURL)
+		}
+		cfg.ModelsURL = discoverURL
+		if *caFile != "" {
+			pool, err := loadCAPool(*caFile)
+			if err != nil {
+				log.Fatalf("load CA: %v", err)
+			}
+			cfg.RootCAs = pool
+		}
+	}
 
 	agent, err := provider.NewAgent(cfg)
 	if err != nil {
@@ -79,11 +136,35 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	log.Printf("provider agent %s online via %s (allowlist: %v, price: %s)",
-		*providerName, *gate, allowed, priceLabel(*price))
+	log.Printf("provider agent %s online via %s (allowlist: %v, price: %s, auth: %s%s)",
+		*providerName, *gate, allowed, priceLabel(*price), *authHeader, schemeLabel(scheme))
 	if err := agent.Run(ctx); err != nil {
 		log.Fatalf("agent: %v", err)
 	}
+}
+
+// splitModels parses a comma-separated model list, dropping empty fields.
+func splitModels(list string) []string {
+	var out []string
+	for _, m := range strings.Split(list, ",") {
+		if m = strings.TrimSpace(m); m != "" {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// loadCAPool reads a PEM CA file into a trust pool for the discovery fetch.
+func loadCAPool(path string) (*x509.CertPool, error) {
+	pemBytes, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(pemBytes) {
+		return nil, fmt.Errorf("no certificates parsed from %s", path)
+	}
+	return pool, nil
 }
 
 func priceLabel(micros int64) string {
@@ -91,4 +172,11 @@ func priceLabel(micros int64) string {
 		return "platform default"
 	}
 	return strconv.FormatFloat(float64(micros)/1e6, 'f', -1, 64) + " units/request"
+}
+
+func schemeLabel(scheme string) string {
+	if scheme == "" {
+		return " (raw token)"
+	}
+	return " " + scheme
 }

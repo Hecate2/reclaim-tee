@@ -76,7 +76,6 @@ var (
 	ErrInvalidExpiry      = errors.New("invalid expiry")
 	ErrInvalidLimit       = errors.New("invalid response size limit")
 	ErrExpired            = errors.New("job spec has expired")
-	ErrNonceEmpty         = errors.New("nonce must not be empty")
 )
 
 // Spec is a request the Hub asks the TEE to perform with a provider credential.
@@ -106,6 +105,13 @@ type Spec struct {
 	// the Hub's business: the TEE only moves, metes, and digests bytes. The
 	// body of a session job must be empty — it has a handshake, not a payload.
 	Session bool `cbor:"14,keyasint,omitempty"`
+
+	// Credential is the opaque ciphertext envelope carrying the provider's
+	// access token for this job. It is a canonical-CBOR-encoded tee.Envelope
+	// sealed to the TEE's inbox public key by the provider's agent (or the Hub
+	// on its behalf); the Hub only ever relays it, and the TEE alone decrypts
+	// it. Empty means the job carries no credential, which the TEE refuses.
+	Credential []byte `cbor:"15,keyasint,omitempty"`
 }
 
 // SupportedMethods are the HTTP methods a job may request. HEAD is excluded:

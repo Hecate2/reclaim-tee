@@ -10,7 +10,7 @@ import (
 )
 
 // Authorization errors. Every one of them means "the job is well-formed but
-// the credential owner did not permit it". Callers can match these with
+// the provider's whitelist did not permit it". Callers can match these with
 // errors.Is to map them onto transport-level status codes, and because they are
 // distinct from the validation errors in policy.go, a caller can tell a broken
 // job apart from a forbidden one.
@@ -34,7 +34,6 @@ var (
 type Decision struct {
 	Provider         string
 	Rule             Rule
-	Credential       Credential
 	MaxResponseBytes uint64
 	MaxBodyBytes     uint64
 
@@ -124,7 +123,6 @@ func (p Policy) authorize(spec jobs.Spec) (Decision, error) {
 	return Decision{
 		Provider:         p.Provider,
 		Rule:             rule,
-		Credential:       p.Credential,
 		MaxResponseBytes: maxResponseBytes,
 		MaxBodyBytes:     p.Limits.MaxBodyBytes,
 		PolicyHash:       hash[:],

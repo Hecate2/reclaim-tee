@@ -138,11 +138,88 @@ func (f *fakeTransport) lastRequest(t *testing.T) Request {
 	return requests[len(requests)-1]
 }
 
-// testSpec builds a spec for the policy the helpers install by default.
-func testSpec(t *testing.T, body []byte) jobs.Spec {
+// newInbox builds a fresh credential inbox key for the test service.
+func newInbox(t *testing.T) *InboxKey {
+	t.Helper()
+	inbox, err := GenerateInboxKey()
+	if err != nil {
+		t.Fatalf("generate inbox key: %v", err)
+	}
+	return inbox
+}
+
+// testEnv is a fully wired service plus the pieces tests need to poke at.
+type testEnv struct {
+	service   *Service
+	transport *fakeTransport
+	inbox     *InboxKey
+	secret    Secret
+	policies  *policy.Set
+	epoch     *testEpoch
+}
+
+type envOption func(*Config)
+
+// newTestEnv assembles a service that authorises POST /v1/chat/completions on
+// api.openai.com and streams two chunks back. Like the real TEE it stores no
+// credential: it holds an inbox key, and each spec brings the provider's token
+// sealed to it (see spec).
+func newTestEnv(t *testing.T, opts ...envOption) *testEnv {
 	t.Helper()
 
-	return jobs.Spec{
+	policies := policy.NewSet()
+	if err := policies.Install(defaultPolicy(), baseTime); err != nil {
+		t.Fatalf("install policy: %v", err)
+	}
+
+	inbox := newInbox(t)
+
+	transport := &fakeTransport{
+		statusCode: 200,
+		chunks:     [][]byte{[]byte("event: a\n\n"), []byte("event: b\n\n")},
+		failAfter:  -1,
+	}
+
+	epoch := newTestEpoch(t)
+
+	cfg := Config{
+		Policies:  policies,
+		Transport: transport,
+		Signer:    proof.NewSigner(epoch),
+		Clock:     func() time.Time { return baseTime },
+		Seq:       NewMemorySeqStore(),
+		InboxKey:  inbox,
+	}
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+
+	service, err := NewService(cfg)
+	if err != nil {
+		t.Fatalf("new service: %v", err)
+	}
+
+	return &testEnv{
+		service:   service,
+		transport: transport,
+		inbox:     inbox,
+		secret:    Secret{Token: "sk-test-credential", Header: "authorization", Scheme: "Bearer"},
+		policies:  policies,
+		epoch:     epoch,
+	}
+}
+
+// setSecret swaps the credential the next spec carries. Sealing happens at spec
+// build time, so call it before spec and rebuild the spec afterwards.
+func (e *testEnv) setSecret(s Secret) { e.secret = s }
+
+// spec builds a spec for the policy the helpers install by default, carrying
+// the test credential sealed to the inbox — the same envelope a provider agent
+// registers and the Hub attaches to a job.
+func (e *testEnv) spec(t *testing.T, body []byte) jobs.Spec {
+	t.Helper()
+
+	spec := jobs.Spec{
 		Version:          jobs.VersionV1,
 		JobID:            randomBytes(t, jobs.JobIDLength),
 		Provider:         "openai",
@@ -156,78 +233,39 @@ func testSpec(t *testing.T, body []byte) jobs.Spec {
 		MaxResponseBytes: 1 << 20,
 		Stream:           true,
 	}
+	if e.secret.Header != "" {
+		spec.Credential = e.sealed(t)
+	}
+	return spec
 }
 
-// testEnv is a fully wired service plus the pieces tests need to poke at.
-type testEnv struct {
-	service     *Service
-	transport   *fakeTransport
-	credentials *StaticCredentials
-	policies    *policy.Set
-	epoch       *testEpoch
-}
-
-type envOption func(*Config)
-
-// newTestEnv assembles a service that authorises POST /v1/chat/completions on
-// api.openai.com, holds one credential, and streams two chunks back.
-func newTestEnv(t *testing.T, opts ...envOption) *testEnv {
+// sealed returns the canonical-CBOR envelope now registered for the test
+// credential, as it would appear inside jobs.Spec.Credential.
+func (e *testEnv) sealed(t *testing.T) []byte {
 	t.Helper()
-
-	providerKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	env, err := EncryptCredential(e.inbox.Public(), "openai", e.secret)
 	if err != nil {
-		t.Fatalf("generate provider key: %v", err)
+		t.Fatalf("seal credential: %v", err)
 	}
-
-	signedPolicy, err := policy.SignPolicy(defaultPolicy(), providerKey)
+	enc, err := env.EncodeCanonical()
 	if err != nil {
-		t.Fatalf("sign policy: %v", err)
+		t.Fatalf("encode credential: %v", err)
 	}
+	return enc
+}
 
-	policies := policy.NewSet()
-	if err := policies.Add(signedPolicy, baseTime); err != nil {
-		t.Fatalf("install policy: %v", err)
-	}
-
-	credentials := NewStaticCredentials()
-	credentials.Set("openai", "sk-test-credential")
-
-	transport := &fakeTransport{
-		statusCode: 200,
-		chunks:     [][]byte{[]byte("event: a\n\n"), []byte("event: b\n\n")},
-		failAfter:  -1,
-	}
-
-	epoch := newTestEpoch(t)
-
-	cfg := Config{
-		Policies:    policies,
-		Credentials: credentials,
-		Transport:   transport,
-		Signer:      proof.NewSigner(epoch),
-		Clock:       func() time.Time { return baseTime },
-		Seq:         NewMemorySeqStore(),
-	}
-	for _, opt := range opts {
-		opt(&cfg)
-	}
-
-	service, err := NewService(cfg)
-	if err != nil {
-		t.Fatalf("new service: %v", err)
-	}
-
-	return &testEnv{
-		service:     service,
-		transport:   transport,
-		credentials: credentials,
-		policies:    policies,
-		epoch:       epoch,
-	}
+// specNoCredential builds a spec that will be refused for carrying no sealed
+// credential — the job a provider gets when the Hub failed to attach one.
+func (e *testEnv) specNoCredential(t *testing.T, body []byte) jobs.Spec {
+	spec := e.spec(t, body)
+	spec.Credential = nil
+	return spec
 }
 
 // defaultPolicy is the baseline every test starts from: one streaming chat
-// completions rule with a bearer credential.
+// completions rule. The credential's injection shape is no longer part of the
+// policy — it travels with the token and lives in the TEE's credential store
+// (see Secret) — so the policy is purely the whitelist.
 func defaultPolicy() policy.Policy {
 	return policy.Policy{
 		Version:     policy.VersionV1,
@@ -239,7 +277,6 @@ func defaultPolicy() policy.Policy {
 			Path:        "/v1/chat/completions",
 			AllowStream: true,
 		}},
-		Credential: policy.Credential{Header: "authorization", Scheme: "Bearer"},
 		Limits: policy.Limits{
 			MaxResponseBytes: 1 << 20,
 			MaxBodyBytes:     1 << 16,
@@ -250,25 +287,18 @@ func defaultPolicy() policy.Policy {
 	}
 }
 
-// replacePolicy swaps in a modified policy under the same provider key.
+// replacePolicy swaps in a modified policy. It is used to exercise a policy
+// whose decision differs from the default.
 func replacePolicy(t *testing.T, env *testEnv, mutate func(*policy.Policy)) {
 	t.Helper()
 
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatalf("generate key: %v", err)
-	}
 	next := defaultPolicy()
 	mutate(&next)
-	// Keep the issuance time moving forward or Set.Add will reject the update
-	// as a rollback.
+	// Keep the issuance time moving forward or Set.Install will reject the
+	// update as a rollback.
 	next.IssuedAt = baseTime.Unix()
 
-	signed, err := policy.SignPolicy(next, key)
-	if err != nil {
-		t.Fatalf("sign policy: %v", err)
-	}
-	if err := env.policies.Add(signed, baseTime); err != nil {
+	if err := env.policies.Install(next, baseTime); err != nil {
 		t.Fatalf("install policy: %v", err)
 	}
 }
@@ -307,7 +337,7 @@ func verifyReceipt(t *testing.T, signed proof.SignedReceipt, spec jobs.Spec) {
 func TestExecuteHappyPath(t *testing.T) {
 	env := newTestEnv(t)
 	body := []byte(`{"model":"gpt-4o"}`)
-	spec := testSpec(t, body)
+	spec := env.spec(t, body)
 
 	var received [][]byte
 	result, err := env.service.Execute(context.Background(), Job{Spec: spec, Body: body}, func(chunk []byte) error {
@@ -352,12 +382,13 @@ func TestExecuteHappyPath(t *testing.T) {
 	}
 }
 
-// TestExecuteInjectsCredential asserts the secret reaches the wire exactly as
-// the policy describes, and that the caller's own headers survive alongside it.
+// TestExecuteInjectsCredential asserts the registered secret reaches the wire
+// exactly as its header/scheme describe, and that the caller's own headers
+// survive alongside it.
 func TestExecuteInjectsCredential(t *testing.T) {
 	env := newTestEnv(t)
 	body := []byte(`{"model":"gpt-4o"}`)
-	spec := testSpec(t, body)
+	spec := env.spec(t, body)
 
 	if _, err := env.service.Execute(context.Background(), Job{Spec: spec, Body: body}, nil); err != nil {
 		t.Fatalf("execute: %v", err)
@@ -384,7 +415,7 @@ func TestExecuteInjectsCredential(t *testing.T) {
 func TestCredentialIsAbsentFromTheReceipt(t *testing.T) {
 	env := newTestEnv(t)
 	body := []byte(`{"model":"gpt-4o"}`)
-	spec := testSpec(t, body)
+	spec := env.spec(t, body)
 
 	result, err := env.service.Execute(context.Background(), Job{Spec: spec, Body: body}, nil)
 	if err != nil {
@@ -406,7 +437,7 @@ func TestCredentialIsAbsentFromTheReceipt(t *testing.T) {
 // separately.
 func TestExecuteRejectsBodyMismatch(t *testing.T) {
 	env := newTestEnv(t)
-	spec := testSpec(t, []byte(`{"model":"gpt-4o"}`))
+	spec := env.spec(t, []byte(`{"model":"gpt-4o"}`))
 
 	result, err := env.service.Execute(context.Background(), Job{Spec: spec, Body: []byte(`{"model":"evil"}`)}, nil)
 	if !errors.Is(err, ErrBodyMismatch) {
@@ -426,7 +457,7 @@ func TestExecuteRejectsBodyMismatch(t *testing.T) {
 func TestExecuteRejectsPolicyViolation(t *testing.T) {
 	env := newTestEnv(t)
 	body := []byte(`{"model":"gpt-4o"}`)
-	spec := testSpec(t, body)
+	spec := env.spec(t, body)
 	spec.Path = "/v1/account/billing"
 
 	result, err := env.service.Execute(context.Background(), Job{Spec: spec, Body: body}, nil)
@@ -451,7 +482,7 @@ func TestExecuteSignsAFailedExchange(t *testing.T) {
 	env.transport.err = errors.New("connection refused")
 
 	body := []byte(`{"model":"gpt-4o"}`)
-	spec := testSpec(t, body)
+	spec := env.spec(t, body)
 
 	result, err := env.service.Execute(context.Background(), Job{Spec: spec, Body: body}, nil)
 	if err != nil {
@@ -485,7 +516,7 @@ func TestExecuteSignsATruncatedStream(t *testing.T) {
 	env.transport.err = errors.New("connection reset")
 
 	body := []byte(`{"model":"gpt-4o"}`)
-	spec := testSpec(t, body)
+	spec := env.spec(t, body)
 
 	var received [][]byte
 	result, err := env.service.Execute(context.Background(), Job{Spec: spec, Body: body}, func(chunk []byte) error {
@@ -532,7 +563,7 @@ func TestExecuteEnforcesTheResponseCap(t *testing.T) {
 	}
 
 	body := []byte(`{"model":"gpt-4o"}`)
-	spec := testSpec(t, body)
+	spec := env.spec(t, body)
 	spec.MaxResponseBytes = 8
 
 	var relayed int
@@ -571,7 +602,7 @@ func TestExecuteMarksTruncationWhenTheConsumerStops(t *testing.T) {
 	env.transport.chunks = [][]byte{[]byte("aaaa"), []byte("bbbb"), []byte("cccc")}
 
 	body := []byte(`{"model":"gpt-4o"}`)
-	spec := testSpec(t, body)
+	spec := env.spec(t, body)
 
 	stop := errors.New("consumer gone")
 	var seen int
@@ -610,13 +641,17 @@ func TestExecuteMarksTruncationWhenTheConsumerStops(t *testing.T) {
 // this check. Overwriting silently would turn the guard into a no-op.
 func TestExecuteRefusesCredentialClash(t *testing.T) {
 	env := newTestEnv(t)
+	// The registered secret occupies x-api-key (a raw-key provider like
+	// Anthropic), which the whitelist also lets callers set. A job that sets it
+	// itself must be refused: silently overwriting would turn the guard into a
+	// no-op and let a caller forge the provider's identity.
+	env.setSecret(Secret{Token: "sk-test-credential", Header: "x-api-key"})
 	replacePolicy(t, env, func(p *policy.Policy) {
-		p.Credential = policy.Credential{Header: "x-api-key"}
 		p.Limits.AllowedHeaders = []string{"content-type", "x-api-key"}
 	})
 
 	body := []byte(`{"model":"gpt-4o"}`)
-	spec := testSpec(t, body)
+	spec := env.spec(t, body)
 	spec.Headers = map[string]string{
 		"content-type": "application/json",
 		"x-api-key":    "caller-supplied",
@@ -634,50 +669,60 @@ func TestExecuteRefusesCredentialClash(t *testing.T) {
 	}
 }
 
-// TestCredentialHeaderUsesThePolicyScheme checks the "Scheme" half of the
-// credential description: some providers want "Bearer <token>", others want the
-// raw token.
-func TestCredentialHeaderUsesThePolicyScheme(t *testing.T) {
-	env := newTestEnv(t)
-	replacePolicy(t, env, func(p *policy.Policy) {
-		p.Credential = policy.Credential{Header: "x-api-key"}
+// TestCredentialHeaderScheme covers the two shapes a registered secret may
+// declare: a prefixed "Bearer <token>" on the authorization header, and a raw
+// token that is the whole header value (e.g. Anthropic's x-api-key). The shape
+// is part of the secret the agent registered, not of the policy.
+func TestCredentialHeaderScheme(t *testing.T) {
+	t.Run("bearer on authorization", func(t *testing.T) {
+		env := newTestEnv(t)
+		body := []byte(`{"model":"gpt-4o"}`)
+		spec := env.spec(t, body)
+		if _, err := env.service.Execute(context.Background(), Job{Spec: spec, Body: body}, nil); err != nil {
+			t.Fatalf("execute: %v", err)
+		}
+		if got := env.transport.lastRequest(t).Headers["authorization"]; got != "Bearer sk-test-credential" {
+			t.Fatalf("authorization = %q", got)
+		}
 	})
 
-	body := []byte(`{"model":"gpt-4o"}`)
-	spec := testSpec(t, body)
+	t.Run("raw key on x-api-key", func(t *testing.T) {
+		env := newTestEnv(t)
+		env.setSecret(Secret{Token: "sk-test-credential", Header: "x-api-key"})
 
-	if _, err := env.service.Execute(context.Background(), Job{Spec: spec, Body: body}, nil); err != nil {
-		t.Fatalf("execute: %v", err)
-	}
-	// No scheme configured, so the secret is the whole header value.
-	if got := env.transport.lastRequest(t).Headers["x-api-key"]; got != "sk-test-credential" {
-		t.Fatalf("x-api-key = %q, want the bare secret", got)
-	}
+		body := []byte(`{"model":"gpt-4o"}`)
+		spec := env.spec(t, body)
+		if _, err := env.service.Execute(context.Background(), Job{Spec: spec, Body: body}, nil); err != nil {
+			t.Fatalf("execute: %v", err)
+		}
+		// No scheme in the registered secret, so the token is the whole header.
+		if got := env.transport.lastRequest(t).Headers["x-api-key"]; got != "sk-test-credential" {
+			t.Fatalf("x-api-key = %q, want the bare secret", got)
+		}
+	})
 }
 
-// TestExecuteRejectsAnUnsafeCredential guards against a secret carrying CRLF
-// being spliced into the header block, which would let whoever controls the
-// token append headers of their own.
-//
-// The validation itself lives in policy.Credential.Inject; this asserts the
-// execution path routes through it rather than writing the secret into the
-// header map itself.
-func TestExecuteRejectsAnUnsafeCredential(t *testing.T) {
+// TestExecuteRejectsAnUnsafeSecret guards against a registered token carrying
+// CRLF being spliced into the header block, which would let whoever controls
+// the token append headers of their own. Secrets are validated at registration
+// (Secret.Validate); this asserts the execution path still refuses one that
+// bypassed registration (a test store seeded directly).
+func TestExecuteRejectsAnUnsafeSecret(t *testing.T) {
 	env := newTestEnv(t)
-	env.credentials.Set("openai", "sk-good\r\nX-Injected: yes")
+	env.setSecret(Secret{Token: "sk-good\r\nX-Injected: yes", Header: "authorization", Scheme: "Bearer"})
 
 	body := []byte(`{"model":"gpt-4o"}`)
-	spec := testSpec(t, body)
+	spec := env.spec(t, body)
 
 	result, err := env.service.Execute(context.Background(), Job{Spec: spec, Body: body}, nil)
-	if !errors.Is(err, policy.ErrInvalidCredential) {
-		t.Fatalf("error = %v, want %v", err, policy.ErrInvalidCredential)
+	if !errors.Is(err, ErrInvalidSecret) {
+		t.Fatalf("error = %v, want %v", err, ErrInvalidSecret)
 	}
 	if result != nil {
-		t.Fatal("job with an unsafe credential produced a receipt")
+		t.Fatal("job with an unsafe secret produced a receipt")
 	}
 	if len(env.transport.sent()) != 0 {
-		t.Fatal("unsafe credential reached the wire")
+		t.Fatal("unsafe secret reached the wire")
 	}
 }
 
@@ -686,14 +731,13 @@ func TestExecuteRejectsAnUnsafeCredential(t *testing.T) {
 // job must not go out unauthenticated.
 func TestExecuteWithoutCredential(t *testing.T) {
 	env := newTestEnv(t)
-	env.credentials.Remove("openai")
 
 	body := []byte(`{"model":"gpt-4o"}`)
-	spec := testSpec(t, body)
+	spec := env.specNoCredential(t, body)
 
 	result, err := env.service.Execute(context.Background(), Job{Spec: spec, Body: body}, nil)
-	if !errors.Is(err, ErrCredentialUnavailable) {
-		t.Fatalf("error = %v, want %v", err, ErrCredentialUnavailable)
+	if !errors.Is(err, ErrNoCredential) {
+		t.Fatalf("error = %v, want %v", err, ErrNoCredential)
 	}
 	if result != nil {
 		t.Fatal("credential-less job produced a receipt")
@@ -703,12 +747,57 @@ func TestExecuteWithoutCredential(t *testing.T) {
 	}
 }
 
+// TestSecretValidateAndRender pins the registration-time shape checks: what
+// may enter the store (Secret.Validate) and what lands on the wire (Render).
+func TestSecretValidateAndRender(t *testing.T) {
+	// No header + no token means no authentication, which is valid.
+	if err := (Secret{}).Validate(); err != nil {
+		t.Fatalf("empty secret should mean no auth: %v", err)
+	}
+
+	// A declared header must carry a token; token and scheme need a header.
+	for _, bad := range []Secret{
+		{Header: "authorization"},
+		{Token: "sk-x"},
+		{Scheme: "Bearer"},
+		{Token: "sk-x", Scheme: "Bearer"},
+	} {
+		if err := bad.Validate(); !errors.Is(err, ErrInvalidSecret) {
+			t.Errorf("secret %+v: error = %v, want %v", bad, err, ErrInvalidSecret)
+		}
+	}
+
+	// Header names that would tamper with framing are refused.
+	for _, name := range []string{"", "host", "content-length", "x api key", "x\r\nevil"} {
+		if err := (Secret{Token: "sk-x", Header: name}).Validate(); !errors.Is(err, ErrInvalidSecret) {
+			t.Errorf("header %q: error = %v", name, err)
+		}
+	}
+
+	// Tokens must not carry control characters or surrounding whitespace.
+	for _, token := range []string{"", "sk-\r\nx-evil: 1", "sk-\n", "sk-\x00", " sk-x "} {
+		if err := (Secret{Token: token, Header: "authorization"}).Validate(); !errors.Is(err, ErrInvalidSecret) {
+			t.Errorf("token %q: error = %v", token, err)
+		}
+	}
+
+	// Render turns the validated shape into wire headers.
+	s := Secret{Token: "sk-x", Header: "authorization", Scheme: "Bearer"}
+	if name, value, err := s.Render(); err != nil || name != "authorization" || value != "Bearer sk-x" {
+		t.Fatalf("render = (%q, %q, %v)", name, value, err)
+	}
+	raw := Secret{Token: "secret", Header: "x-api-key"}
+	if name, value, err := raw.Render(); err != nil || name != "x-api-key" || value != "secret" {
+		t.Fatalf("raw render = (%q, %q, %v)", name, value, err)
+	}
+}
+
 // TestExecuteRejectsExpiredJob pins the freshness check to the injected clock
 // rather than wall time.
 func TestExecuteRejectsExpiredJob(t *testing.T) {
 	env := newTestEnv(t)
 	body := []byte(`{"model":"gpt-4o"}`)
-	spec := testSpec(t, body)
+	spec := env.spec(t, body)
 	spec.ExpiresAt = baseTime.Add(-time.Minute).Unix()
 
 	result, err := env.service.Execute(context.Background(), Job{Spec: spec, Body: body}, nil)
@@ -732,7 +821,7 @@ func TestExecuteRejectsOversizedBody(t *testing.T) {
 	})
 
 	body := []byte(`{"model":"gpt-4o","messages":[]}`)
-	spec := testSpec(t, body)
+	spec := env.spec(t, body)
 
 	result, err := env.service.Execute(context.Background(), Job{Spec: spec, Body: body}, nil)
 	if !errors.Is(err, ErrBodyTooLarge) {
@@ -757,7 +846,7 @@ func TestExecuteRejectsJobOverPolicyCap(t *testing.T) {
 	})
 
 	body := []byte(`{"model":"gpt-4o"}`)
-	spec := testSpec(t, body)
+	spec := env.spec(t, body)
 	// testSpec defaults to 1 MiB, well past the 10 byte policy cap.
 
 	result, err := env.service.Execute(context.Background(), Job{Spec: spec, Body: body}, nil)
@@ -778,11 +867,11 @@ func TestExecuteRejectsJobOverPolicyCap(t *testing.T) {
 func TestServiceRequiresConfiguration(t *testing.T) {
 	complete := func() Config {
 		return Config{
-			Policies:    policy.NewSet(),
-			Credentials: NewStaticCredentials(),
-			Transport:   &fakeTransport{failAfter: -1},
-			Signer:      proof.NewSigner(newTestEpoch(t)),
-			Seq:         NewMemorySeqStore(),
+			Policies:  policy.NewSet(),
+			Transport: &fakeTransport{failAfter: -1},
+			Signer:    proof.NewSigner(newTestEpoch(t)),
+			Seq:       NewMemorySeqStore(),
+			InboxKey:  newInbox(t),
 		}
 	}
 
@@ -792,7 +881,7 @@ func TestServiceRequiresConfiguration(t *testing.T) {
 		edit func(*Config)
 	}{
 		{"no policy set", ErrNoPolicySet, func(c *Config) { c.Policies = nil }},
-		{"no credentials", ErrNoCredentials, func(c *Config) { c.Credentials = nil }},
+		{"no inbox key", ErrNoInboxKey, func(c *Config) { c.InboxKey = nil }},
 		{"no transport", ErrNoTransport, func(c *Config) { c.Transport = nil }},
 		{"no signer", ErrNoSigner, func(c *Config) { c.Signer = nil }},
 		{"no seq store", ErrNoSeqStore, func(c *Config) { c.Seq = nil }},
@@ -817,10 +906,10 @@ func TestServiceRequiresConfiguration(t *testing.T) {
 // signed statement that is not true.
 func TestServiceWithoutTransportIsUnconstructible(t *testing.T) {
 	_, err := NewService(Config{
-		Policies:    policy.NewSet(),
-		Credentials: NewStaticCredentials(),
-		Signer:      proof.NewSigner(newTestEpoch(t)),
-		Seq:         NewMemorySeqStore(),
+		Policies: policy.NewSet(),
+		Signer:   proof.NewSigner(newTestEpoch(t)),
+		Seq:      NewMemorySeqStore(),
+		InboxKey: newInbox(t),
 	})
 	if !errors.Is(err, ErrNoTransport) {
 		t.Fatalf("error = %v, want %v", err, ErrNoTransport)
@@ -834,7 +923,7 @@ func TestSubmitterVerifierGatesJobs(t *testing.T) {
 
 	t.Run("absent means allow", func(t *testing.T) {
 		env := newTestEnv(t)
-		spec := testSpec(t, body)
+		spec := env.spec(t, body)
 		if _, err := env.service.Execute(context.Background(), Job{Spec: spec, Body: body}, nil); err != nil {
 			t.Fatalf("execute with no verifier: %v", err)
 		}
@@ -850,7 +939,7 @@ func TestSubmitterVerifierGatesJobs(t *testing.T) {
 			}
 		})
 
-		spec := testSpec(t, body)
+		spec := env.spec(t, body)
 		result, err := env.service.Execute(context.Background(), Job{Spec: spec, Body: body}, nil)
 		if !errors.Is(err, rejection) {
 			t.Fatalf("error = %v, want the verifier's rejection", err)
@@ -879,7 +968,7 @@ func TestSubmitterVerifierGatesJobs(t *testing.T) {
 			}
 		})
 
-		spec := testSpec(t, body)
+		spec := env.spec(t, body)
 		spec.ExpiresAt = baseTime.Add(-time.Hour).Unix()
 		if _, err := env.service.Execute(context.Background(), Job{Spec: spec, Body: body}, nil); err == nil {
 			t.Fatal("expired job from a rejected submitter was executed")
@@ -910,7 +999,7 @@ func TestReceiptBindsThePolicyRevision(t *testing.T) {
 	}
 
 	body := []byte(`{"model":"gpt-4o"}`)
-	spec := testSpec(t, body)
+	spec := env.spec(t, body)
 	result, err := env.service.Execute(context.Background(), Job{Spec: spec, Body: body}, nil)
 	if err != nil {
 		t.Fatalf("execute: %v", err)
@@ -933,7 +1022,7 @@ func TestExecuteConcurrent(t *testing.T) {
 			defer wg.Done()
 			for j := 0; j < 32; j++ {
 				body := []byte(fmt.Sprintf(`{"model":"gpt-4o","n":%d}`, j))
-				spec := testSpec(t, body)
+				spec := env.spec(t, body)
 				// The clock is shared, so the spec must be rebuilt each time
 				// to keep its job ID unique.
 				result, err := env.service.Execute(context.Background(), Job{Spec: spec, Body: body}, nil)

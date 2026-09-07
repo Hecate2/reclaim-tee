@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync"
 
+	"github.com/reclaimprotocol/reclaim-tee/tokenhive/tee"
 	"github.com/reclaimprotocol/reclaim-tee/tokenhive/tunnel"
 )
 
@@ -38,6 +39,25 @@ var (
 // audiences.
 const AgentKeyHeader = "X-TokenHive-Agent-Key"
 
+// deliverCredential stores an agent-registered envelope in the Hub's
+// credential store. The Hub holds only ciphertext — an envelope sealed to the
+// TEE's inbox key — which it later attaches to every job it dispatches to this
+// provider, so the token never exists in Hub memory.
+func (h *Hub) deliverCredential(reg AgentRegister) error {
+	if reg.Credential == nil {
+		return errors.New("agent dial-in: registration carries no credential")
+	}
+	return h.credentialStore.Put(reg.Provider, *reg.Credential)
+}
+
+// revokeCredential drops a provider's envelope from the store because its
+// agent went offline. Best effort: an agent that disappears mid-request may
+// already have been replaced, and a dropped envelope only costs the next
+// registration.
+func (h *Hub) revokeCredential(provider string) {
+	_ = h.credentialStore.Delete(provider)
+}
+
 // agentKeyMatches compares a presented key to the Hub's shared secret in
 // constant time. The key arrives over the network, so mismatches must not leak
 // where they differ (cf. the agent's credential check, which follows the same
@@ -55,10 +75,11 @@ func agentKeyMatches(presented, secret []byte) bool {
 }
 
 // AgentRegister is the open metadata of the control stream an agent opens
-// immediately after its dial-in authenticates. It announces who the agent is and
-// what it wants to charge. The stream carrying it is the agent's only live
-// handle on the Hub: while it stays open the agent is online, and when it closes
-// the Hub drops the tunnel from the scheduler.
+// immediately after its dial-in authenticates. It announces who the agent is,
+// what it wants to charge, and — sealed inside Credential — the provider's
+// access token. The stream carrying it is the agent's only live handle on the
+// Hub: while it stays open the agent is online, and when it closes the Hub
+// drops the tunnel from the scheduler and revokes the credential with the TEE.
 type AgentRegister struct {
 	// Provider names whom this agent egresses for. It must match a provider the
 	// Hub has a rate for, or the tunnel is refused.
@@ -68,6 +89,19 @@ type AgentRegister struct {
 	// SelfPrice, when set, is the agent's own rate card. A nil SelfPrice means
 	// the agent accepts the Hub's platform default for its provider.
 	SelfPrice *RateCard `json:"self_price,omitempty"`
+	// Models is the set of model IDs the agent's upstream can serve, a soft
+	// capability hint. Non-empty declares capability: the agent is only a
+	// candidate for those models (sending it a job it cannot serve would just
+	// buy an upstream refusal). Empty means undeclared — the agent serves any
+	// model, so it stays a candidate for everything. A model no online agent
+	// can serve is refused outright rather than fired at every provider.
+	Models []string `json:"models,omitempty"`
+	// Credential is the provider's token sealed to the TEE's inbox public key
+	// (tee.EncryptCredential). The Hub only ever holds this ciphertext: it
+	// stores the envelope in its credential store and attaches it to every job
+	// it dispatches to this provider, and the plaintext never passes through
+	// Hub memory.
+	Credential *tee.Envelope `json:"credential,omitempty"`
 }
 
 // UpstreamOpen is the open metadata on a relay stream the Hub opens toward an
@@ -86,13 +120,29 @@ type RelayOpen struct {
 	Host     string `json:"host"`
 }
 
-// agentConn is one online agent: its live multiplexed tunnel plus the price the
-// Hub quotes for it, which is the agent's own card when it declared one and the
-// platform default otherwise.
+// agentConn is one online agent: its live multiplexed tunnel, the price the
+// Hub quotes for it (the agent's own card when it declared one, the platform
+// default otherwise), and the models it declared it can serve.
 type agentConn struct {
 	provider string
 	price    RateCard
+	models   []string
 	mux      *tunnel.Multiplexer
+}
+
+// serves reports whether the agent declares the model. An undeclared list
+// means the agent serves anything (no capability information was reported), so
+// serves is true for every model.
+func (a *agentConn) serves(model string) bool {
+	if len(a.models) == 0 {
+		return true
+	}
+	for _, m := range a.models {
+		if m == model {
+			return true
+		}
+	}
+	return false
 }
 
 // agentRegistry tracks which agents are online right now. It is the Hub's view
@@ -140,13 +190,17 @@ func (r *agentRegistry) register(a *agentConn) {
 	}
 }
 
-// deregister removes an agent by provider. It no-ops if the tunnel is no longer
-// the current one, so an agent racing its own replacement cannot unregister its
-// successor.
-func (r *agentRegistry) deregister(provider string, mux *tunnel.Multiplexer) {
+// deregister removes an agent by provider. It returns whether this tunnel was
+// the current one — i.e. whether it actually went offline. It no-ops (false)
+// if the tunnel is no longer the current one, so an agent racing its own
+// replacement cannot unregister its successor; that also means its credential
+// must not be revoked, because the successor's registration stands.
+func (r *agentRegistry) deregister(provider string, mux *tunnel.Multiplexer) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if cur, ok := r.online[provider]; ok && cur.mux == mux {
 		delete(r.online, provider)
+		return true
 	}
+	return false
 }
