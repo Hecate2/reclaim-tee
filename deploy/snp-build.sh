@@ -69,9 +69,18 @@ build_loader() {
 }
 
 # build_bundle compiles tee_<role> + stages mpcl circuits + CA certs into the
-# deterministic app bundle (its sha256 is the cross-cloud snp-app: digest).
+# deterministic app bundle (its sha256 is the cross-cloud snp-app: digest);
+# or, when SNP_EXTERNAL_BUNDLE is set, adopts an already-built app bundle
+# verbatim (used by tokenhive/cloudtest/snp/pack.sh whose app is its own loader
+# probe, not a tee_k/tee_t binary).
 build_bundle() {
     local role="$1"
+    if [[ -n "${SNP_EXTERNAL_BUNDLE:-}" ]]; then
+        cp "${SNP_EXTERNAL_BUNDLE}" "${BUNDLE_HOST}"
+        echo "[build] adopting external app bundle -- external-bundle=${SNP_EXTERNAL_BUNDLE}"
+        echo "[build] app bundle: $(du -h "${BUNDLE_HOST}" | cut -f1)  sha256: $(sha256sum "${BUNDLE_HOST}" | cut -d' ' -f1)"
+        return
+    fi
     local dst="${IMG_DIR}/mkosi.extra/usr/local/bin/snp-tee${role}"
     echo "[build] compiling tee_${role}..."
     mkdir -p "$(dirname "${dst}")"
