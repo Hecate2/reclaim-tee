@@ -92,6 +92,8 @@ Relay（transport/relay.go）是 ChannelManager 的拨号器：持有与 Hub Tee
 
 ChannelConfig 的 egress 配置：RelayURL（经 Hub 中继，生产形态与本地仿真均如此）；不设 RelayURL 时 ChannelManager 直连 req.Host（仅用于嵌入式 transport 测试与同机模拟）。无论走隧道还是直连，TLS 都在 TEE 内终止，隔离性相同。
 
+**连接池与时间语义**。池以 (provider, host) 为键：空闲连接在 IdleTimeout 窗口（默认 5 分钟）内驻留复用，后台回收器按窗口一半的周期清扫过期连接（不依赖新请求驱动）；每键并发上限默认 32，超限的获取排队等空位（尊重 ctx 取消）。ALPN 锁 HTTP/1.1，一条连接同一时刻只承载一个在途请求；半开连接整体作废、绝不回池复用，零字节写入的失败重拨一次（未上线的字节不重复花费）。流式会话（OpenSession）不池化，由打开者独占使用后关闭。每条流的读写 deadline（SetDeadline/SetReadDeadline/SetWriteDeadline）以关闭该流强制执行、不影响兄弟流，代号计数器保证「清零 deadline」能作废已在途的旧回调，边界处完成的交换不会拿到一条随即被关的连接；会话握手期受 ctx deadline 约束，建立后解除，改由会话自身空闲看门狗管辖。
+
 ---
 
 ## 6. 业务规则：最低在线价调度与账务
@@ -102,7 +104,7 @@ ChannelConfig 的 egress 配置：RelayURL（经 Hub 中继，生产形态与本
 
 **声明的模型 = 软能力过滤**。Agent 注册时可声明 Models；声明过的 Agent 只作为清单内模型的候选（发一个它上游没有的模型只会白买一次拒绝），未声明的 Agent 服务任何模型。当某模型不在任何在线 Agent 的清单里时，请求以"无 Provider 服务该模型"拒绝，而不是朝每个 provider 各打一枪。买家的**模型目录 `GET /v1/models`** 就建立在这份声明之上：列出所有在线 Agent 声明过的模型，每行带调度器此刻实际会派发的最低在线价与对应 provider；目录完全由 Hub 内存中的在线注册表算出，**不向任何 Agent/上游发起探测**（买家的浏览动作不产生任何询价流量）。可选 `?q=` 子串查询在目录上做大小写不敏感的包含匹配，供买家按精确 ID 或名称片段（"deepseek" 命中 "deepseek-pro"/"deepseek-flash"）检索。
 
-**计价与佣金**。买家应付 = 卖家价 ×（1 + 佣金率）。沿用整数微单位与溢出检查（溢出报错不回绕）。账本（Ledger）记录 dispatc/verified/settled 计数、以及按 provider 的收入口径与 Hub 佣金口径；Provider 始终拿到自己费率卡上的全额，佣金单独追踪。
+**计价与佣金**。买家应付 = 卖家价 ×（1 + 佣金率）。沿用整数微单位与溢出检查（溢出报错不回绕）。账本（Ledger）记录 dispatched/verified/settled 计数、以及按 provider 的收入口径与 Hub 佣金口径；Provider 始终拿到自己费率卡上的全额，佣金单独追踪。计费按**实际转发字节**而非 cap 或回执总量：TEE 整块拒绝越过 MaxResponseBytes 的 chunk，回执的 ResponseBytes 含从未转发的溢出量，转发流由回执 StreamHash 绑定，故用 Hub 转发流长度计价（首个 chunk 即超限时计零）。截断只挣流量费（无固定费与加价），完整 2xx 才挣固定费，4xx/5xx/失败按零。回执先落库后入账：store 失败即零费用，买家重试不二次付费；调度把计价为正的尝试视为最终（付费截断后不再回退，避免一题两付）。会话上行比对只拒「回执声称多于 Hub 计数」的方向，收尾尾巴不整场作废；Hub 自行截断的会话按「断流 0 计价」。全部 Agent 离线时报 503（ErrNoProvidersOnline）而非 404。
 
 **配额与回执**。配额在派发前检查，被拒请求不消耗 ProviderSeq——否则节流会在 provider 序列上穿孔，与 Hub 隐藏执行不可区分。回执在一切结算前验签与字节比对（MatchesStream 对先在足，流式摘要与 Hub 实际转发字节必须一致），对不上的回执一律不结算。
 
@@ -138,7 +140,7 @@ Hub 的 AgentGate 以共享密钥为门，拒斥未持密者的拨入。当前 A
 
 Hub 的 TeeRelay 依赖网络边界自证（受信的 Hub↔TEE 通道）。任何能连到该端点的调用方凭 provider+host 可开一条到某在线 Agent allowlist 内主机的流；防线目前只有 Agent 的 allowlist。应把 TeeRelay 与其余 Hub↔TEE 通道放在同一 mTLS 之后（Upstream 加固项 2，与既有「生产启用 mTLS」的部署边界一致）。
 
-切换真实云 TEE 的核对清单照旧效仿：签名 Epoch 由平台适配器提供，Hub↔TEE 启用 mTLS，attestation evidence 取回接口补齐，Channel 的 TLS 根证书换为系统根。平台适配器现状：**AWS SEV-SNP（sevsnp）** 为已验证的真实路径，编译进 `-tags sevsnp` 构建；**阿里云（alicloud）与腾讯云（tencent）** 为适配器骨架（编译进 `-tags cloud` 构建），宿主机检测（DMI 厂商 + SGX/TDX/SEV-SNP 设备节点）与 Epoch 装配已实现，但**远程证明验证未实现**——默认 fail-closed 拒绝启动，仅当显式传入 `-allow-untrusted` 才以明确标注「未受信」的软件密钥出证（仅限接线演练，收据会被各自平台的 Verifier 以 ErrAttestationNotImplemented 拒绝），Hub 侧 allowlist 若列入这两个平台，其收据一律验证失败。
+切换真实云 TEE 的核对清单照旧效仿：签名 Epoch 由平台适配器提供，Hub↔TEE 启用 mTLS，attestation evidence 取回接口补齐，Channel 的 TLS 根证书换为系统根。平台适配器现状：**AWS SEV-SNP（sevsnp）** 是唯一真实路径，编译进 `-tags sevsnp` 构建，也是云上部署的唯一支持平台；本地仿真（simulated）默认编译进所有构建；**阿里云（alicloud）与腾讯云（tencent）为预留骨架**——平台标识与 fail-closed 验证器（收据一律以 `ErrAttestationNotImplemented` 拒绝）已就绪，待远程证明验证实现后即可启用。
 
 ---
 

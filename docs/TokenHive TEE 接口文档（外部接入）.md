@@ -287,7 +287,7 @@ SignedReceipt = {
 
 | 键 | 字段 | 说明 |
 |---|---|---|
-| 1 | Platform | `simulated`（本地仿真）、`aws-sev-snp`（AWS SEV-SNP 机密虚拟机）、`alicloud`（阿里云机密计算，骨架）、`tencent`（腾讯云机密计算，骨架） |
+| 1 | Platform | `simulated`（本地仿真）、`aws-sev-snp`（AWS SEV-SNP 机密虚拟机）；`alicloud`（阿里云）、`tencent`（腾讯云）为预留骨架，未来可能支持 |
 | 2 | AttestationType | 证明格式标签；仿真为 `sim-software` |
 | 3 | ApplicationID | 飞地镜像标识；仿真为 `tokenhive-sim@v1` |
 | 4 | KeyID | 公钥指纹（32 字节） |
@@ -417,7 +417,7 @@ err := proof.Verify(signed, proof.VerifyOptions{
 > **它不验证证据本身**。把"某个飞地签了"升级为"我信任的飞地签了"，是验证方自己的信任根要做的事：
 > - 仿真：`simulated.CheckEvidence(id)` 校验证据格式/非 debug/measurement；`simulated.CheckEvidenceForDeployment(id, policySetHash)` 额外校验部署白名单绑定。
 > - 生产（`aws-sev-snp`）：由部署方提供的 RA-TLS 信任根与镜像 measurement 对照（含 `policy_set_hash` 所对应的部署配置）。
-> - 阿里云 / 腾讯云（`alicloud` / `tencent`）：**骨架状态**——适配器与宿主机检测已就绪，但远程证明验证未实现；`Verifier.CheckEvidence` 一律返回 `ErrAttestationNotImplemented`，列入 allowlist 的这两个平台其收据**全部验证失败**（fail-closed），直至证明路径实现。
+> - 阿里云 / 腾讯云（`alicloud` / `tencent`）：**预留骨架**——验证器已接线但远程证明验证未实现，`Verifier.CheckEvidence` 一律返回 `ErrAttestationNotImplemented`，列入 allowlist 的这两个平台其收据**全部验证失败**（fail-closed），直至证明路径实现后启用。
 
 **最小验证清单**（缺一项都可能被伪造或漏审）：
 
@@ -456,8 +456,8 @@ err := proof.Verify(signed, proof.VerifyOptions{
 - **审计**：回执按 Provider 分目录存储，可用离线验证工具检查签名与序号连续性：
 
 ```bash
-verify                        # 校验全部 Provider 的回执 + 报告序号缺口
-verify -provider openai-sim   # 只看一个 Provider
+hub -audit                    # 校验全部 Provider 的回执 + 报告序号缺口
+hub -audit -provider openai-sim   # 只看一个 Provider
 ```
 
 输出示例：`[openai-sim] GAP: N receipts but missing seq [2] (provider was used at least 3 times)`——**序号出现缺口即说明有执行没有交付回执**，这是平台无法抵赖的信号。
