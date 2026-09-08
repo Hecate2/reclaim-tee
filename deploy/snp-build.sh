@@ -112,15 +112,16 @@ build_raw() {
     # Identity-only (verify) builds skip systemd-repart -> no --privileged, no /dev.
     local priv="--privileged -v /dev:/dev" idonly=""
     [[ "${SNP_BUILD_ONLY:-0}" == 1 ]] && { priv=""; idonly="-e SNP_IDENTITY_ONLY=1"; }
-    ( _np; ${DOCKER} build --build-arg KERNEL_PKG="$(kernel_for "$cloud")" \
+    ( _np; ${DOCKER} build --platform=linux/amd64 --build-arg KERNEL_PKG="$(kernel_for "$cloud")" \
         --build-arg CA_IMAGE="${SNP_BASE_CA_IMAGE}" --build-arg APT_SNAPSHOT="${SNP_APT_SNAPSHOT}" \
+        --build-arg APT_MIRROR="${SNP_APT_MIRROR:-snapshot}" \
         --build-arg UBUNTU_DIGEST="${SNP_UBUNTU_DIGEST}" \
         --build-arg SYSTEMD_BOOT_VER="${SNP_SYSTEMD_BOOT_VER}" --build-arg SYSTEMD_UKIFY_VER="${SNP_SYSTEMD_UKIFY_VER}" \
         --build-arg SYSTEMD_VER="${SNP_SYSTEMD_VER}" --build-arg ZSTD_VER="${SNP_ZSTD_VER}" \
         --build-arg CPIO_VER="${SNP_CPIO_VER}" --build-arg BINUTILS_VER="${SNP_BINUTILS_VER}" \
         --build-arg http_proxy= --build-arg https_proxy= --build-arg HTTP_PROXY= --build-arg HTTPS_PROXY= --build-arg no_proxy= \
         -t "${img}" "${IMG_DIR}"
-      ${DOCKER} run --rm ${priv} \
+      ${DOCKER} run --rm --platform=linux/amd64 ${priv} \
         -e http_proxy= -e https_proxy= -e HTTP_PROXY= -e HTTPS_PROXY= \
         -e APP_BIN=/work/app-bundle.tar -e MODULES="$(modules_for "$cloud")" -e SNP_CMDLINE="${SNP_CMDLINE:-}" \
         -e SNP_SECUREBOOT_KEY=/secure-boot/R.key -e SNP_SECUREBOOT_CERT=/secure-boot/R.crt.pem \
@@ -173,6 +174,15 @@ b[off:off+size]=desc+b'\x00'*(size-len(desc))
 open(p,'wb').write(b)
 PY
     echo "[image] uploading s3://${bucket}/${key}..."
+    # Idempotently ensure the VM-import staging bucket. cp does not create it.
+    # Creating an already-owned bucket is a benign BucketAlreadyOwnedByYou, so we
+    # retry on that; any other failure (e.g. missing s3:CreateBucket) surfaces
+    # loudly here instead of becoming a confusing NoSuchBucket on cp below.
+    if ! aws s3 mb "s3://${bucket}" --region "${region}" 2>/tmp/snp-mb.err; then
+        grep -q "BucketAlreadyOwnedByYou" /tmp/snp-mb.err \
+            || { echo "[image] cannot ensure bucket s3://${bucket}:" >&2; cat /tmp/snp-mb.err >&2; rm -f /tmp/snp-mb.err; exit 1; }
+    fi
+    rm -f /tmp/snp-mb.err
     aws s3 cp "${vmdk}" "s3://${bucket}/${key}" --no-progress; rm -rf "${tmp}"
     local task; task="$(aws --region "${region}" ec2 import-snapshot --description "${image}" \
         --disk-container "Format=VMDK,UserBucket={S3Bucket=${bucket},S3Key=${key}}" --query 'ImportTaskId' --output text)"
@@ -250,10 +260,15 @@ fi
 # Check the selected app source, not only the deployment worktree. This rejects
 # an old SEV2-only commit or a verifier pinned to a different R before the image
 # is signed. Certificate reissuance remains safe because the SPKI file is stable.
-cmp -s "${SECURE_BOOT_DIR}/R.pub.pem" "${REPO_ROOT}/shared/secure_boot_release_pub.pem" || {
-    echo "[build] selected app source does not contain the deployed Secure Boot R public key" >&2
-    exit 1
-}
+# Skipped when the app is adopted verbatim from an external bundle (the cloudtest
+# SNP probe): the app byte blob is already fixed, its source commit's R is moot,
+# and only the base loader/UKI (signed below with this R) carries the boot chain.
+if [[ -z "${SNP_EXTERNAL_BUNDLE:-}" ]]; then
+  cmp -s "${SECURE_BOOT_DIR}/R.pub.pem" "${REPO_ROOT}/shared/secure_boot_release_pub.pem" || {
+      echo "[build] selected app source does not contain the deployed Secure Boot R public key" >&2
+      exit 1
+  }
+fi
 
 # The app digest is VCS-stamped (tracks the commit), so a dirty tree yields a
 # vcs.modified artifact, not the clean-commit value. Refuse unless overridden.
