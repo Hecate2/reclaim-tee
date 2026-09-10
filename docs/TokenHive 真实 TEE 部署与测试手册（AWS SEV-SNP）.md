@@ -101,6 +101,154 @@ AWS 的 SEV-SNP 支持区域目前只有两个：eu-west-1（爱尔兰）与 us-
 
 **VMImportServiceRole**：创建并给 `vmimport` 服务角色附加策略所需的 IAM 动作，资源限定在 `arn:aws:iam::*:role/vmimport`，只允许操作这一个角色名。
 
+下面是这七个语句合并后的完整策略 JSON，也就是 `tokenhive/cloudtest/snp/iam/aws-snp-policy.json` 的原文。按原样保存为 `aws-snp-policy.json` 并附加到执行身份即可：
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "Identity",
+      "Effect": "Allow",
+      "Action": ["sts:GetCallerIdentity", "ec2:DescribeRegions"],
+      "Resource": "*"
+    },
+    {
+      "Sid": "VMImportBucket",
+      "Effect": "Allow",
+      "Action": [
+        "s3:CreateBucket",
+        "s3:ListBucket",
+        "s3:GetBucketLocation",
+        "s3:PutObject",
+        "s3:GetObject",
+        "s3:DeleteObject"
+      ],
+      "Resource": ["arn:aws:s3:::snp-vmimport-*", "arn:aws:s3:::snp-vmimport-*/*"]
+    },
+    {
+      "Sid": "VMImport",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:ImportSnapshot",
+        "ec2:DescribeImportSnapshotTasks",
+        "ec2:RegisterImage",
+        "ec2:DeregisterImage",
+        "ec2:DescribeImages"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "ReadAllEC2",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:DescribeInstances",
+        "ec2:DescribeVpcs",
+        "ec2:DescribeSubnets",
+        "ec2:DescribeInternetGateways",
+        "ec2:DescribeSecurityGroups",
+        "ec2:DescribeRouteTables",
+        "ec2:DescribeAvailabilityZones",
+        "ec2:DescribeKeyPairs",
+        "ec2:DescribeSnapshots",
+        "ec2:DescribeTags"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "IdempotentInfra",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:CreateVpc",
+        "ec2:DeleteVpc",
+        "ec2:CreateSubnet",
+        "ec2:DeleteSubnet",
+        "ec2:ModifySubnetAttribute",
+        "ec2:CreateInternetGateway",
+        "ec2:DeleteInternetGateway",
+        "ec2:AttachInternetGateway",
+        "ec2:DetachInternetGateway",
+        "ec2:CreateRoute",
+        "ec2:DeleteRoute",
+        "ec2:CreateRouteTable",
+        "ec2:DeleteRouteTable",
+        "ec2:AssociateRouteTable",
+        "ec2:DisassociateRouteTable",
+        "ec2:CreateSecurityGroup",
+        "ec2:DeleteSecurityGroup",
+        "ec2:AuthorizeSecurityGroupIngress",
+        "ec2:CreateKeyPair",
+        "ec2:DeleteKeyPair"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "Instances",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:RunInstances",
+        "ec2:StartInstances",
+        "ec2:StopInstances",
+        "ec2:RebootInstances",
+        "ec2:TerminateInstances",
+        "ec2:GetConsoleOutput",
+        "ec2:CreateTags",
+        "ec2:DeleteTags",
+        "ec2:DescribeInstanceAttribute"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "VMImportServiceRole",
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreateRole",
+        "iam:GetRole",
+        "iam:PutRolePolicy",
+        "iam:AttachRolePolicy",
+        "iam:PassRole"
+      ],
+      "Resource": "arn:aws:iam::*:role/vmimport"
+    }
+  ]
+}
+```
+
+#### 这个身份怎么在 AWS 上落地
+
+执行身份可以是 IAM 用户，也可以是 IAM 角色。推荐用**用户 + JSON 内联策略**，路径最短且不依赖额外角色。操作在 AWS 控制台完成：
+
+1. 打开 IAM 控制台 → 左侧「用户」→「创建用户」，填写用户名（例如 `chenxinghao`），访问类型勾选「编程访问」（供 AWS CLI 使用）。
+2. 在「设置权限」页选择「直接附加策略」→ 右下角「创建策略」→ 切到「JSON」页签，粘贴上面这份策略 →「下一步」命名（例如 `TokenHive-SNP-Test`）→「创建策略」。
+3. 回到用户创建向导，在搜索框输入 `TokenHive-SNP-Test` 选中它 →「创建用户」。
+4. 创建完成后回到该用户详情页 →「安全凭证」标签，生成访问密钥 `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`，填入 `cloudtest/.env`。
+
+如果你的执行身份已是某个角色（例如 CI 用的角色），同等做法：角色详情 →「权限」→「添加权限」→「创建内联策略」粘贴同样 JSON。
+
+用 AWS CLI 也可以完全等价（脚本化交付更利于团队复制）。先确认已配置好一个有 IAM 权限的凭证，然后仅在受控区间执行：
+
+```bash
+# 1) 创建执行用户 + 附加内联策略（access-key 打印后请立刻保存）
+aws iam create-user --user-name chenxinghao
+aws iam put-user-policy --user-name chenxinghao --policy-name TokenHive-SNP-Test \
+  --policy-document file://aws-snp-policy.json
+aws iam create-access-key --user-name chenxinghao
+
+# 2) 创建 vmimport 服务角色并附加其权限（见 3.3）
+aws iam create-role --role-name vmimport \
+  --assume-role-policy-document file://vmimport-trust-policy.json
+aws iam put-role-policy --role-name vmimport --policy-name vmimport \
+  --policy-document file://vmimport-role-policy.json
+```
+
+`aws-snp-policy.json`、`vmimport-trust-policy.json`、`vmimport-role-policy.json` 三份文件在仓库中的位置：
+
+```text
+tokenhive/cloudtest/snp/iam/aws-snp-policy.json        # 执行身份最小策略
+tokenhive/cloudtest/snp/iam/vmimport-trust-policy.json # vmimport 角色的信任策略
+tokenhive/cloudtest/snp/iam/vmimport-role-policy.json   # vmimport 角色的权限策略
+```
+
 ### 3.3 vmimport 服务角色
 
 VM Import 是 AWS 的托管服务，它需要以一个名为 `vmimport` 的 IAM 角色身份去读取 S3 桶并写入 EC2 快照。该角色创建一次即可，仓库 `tokenhive/cloudtest/snp/iam/` 下提供了两份现成的 JSON：
@@ -118,6 +266,10 @@ aws iam create-role --role-name vmimport \
 aws iam put-role-policy --role-name vmimport --policy-name vmimport \
   --policy-document file://vmimport-role-policy.json
 ```
+
+这个角色在控制台的操作路径：IAM 控制台 →「角色」→「创建角色」→ 受信任实体类型选「AWS 服务」，用例选「EC2」下的「VM Import」（若不显示，选择「其他 AWS 服务」并粘贴 `vmimport-trust-policy.json`）→「下一步」→「添加权限」里选择「创建内联策略」粘贴 `vmimport-role-policy.json` → 角色名填 `vmimport` →「创建角色」。角色名必须是 `vmimport`，因为 VM Import 服务会以此固定名称去 AssumeRole，且构建脚本把 `arn:aws:iam::*:role/vmimport` 之外的任何角色都拒绝在授权范围内。
+
+验证角色是否就绪：执行 `aws sts assume-role --role-arn arn:aws:iam::<账号ID>:role/vmimport --role-session-name probe`，返回临时凭证即说明 VM Import 后续能成功承担该角色。
 
 ### 3.4 实测踩过的权限坑
 
