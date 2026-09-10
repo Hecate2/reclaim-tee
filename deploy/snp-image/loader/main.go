@@ -16,6 +16,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/sha512"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
@@ -330,6 +331,27 @@ func fetchMetadataEnv(out io.Writer) []string {
 	body := fetchGCETeeEnv()
 	if body == "" {
 		body = fetchAWSUserData()
+	}
+	return parseMetadataEnv(out, body)
+}
+
+// parseMetadataEnv turns a KEY=VAL metadata payload into the env vars the app
+// must see. Kept separate from the fetch so the base64 unfolding is unit-tested.
+func parseMetadataEnv(out io.Writer, body string) []string {
+	// Metadata services differ in how they ship user-data back: AWS IMDS returns
+	// the raw (already base64-decoded) text, but some providers hand back the
+	// whole payload as ONE base64-encoded line (which the empirical AWS runs
+	// here reproduced: the loader saw the base64 blob as a single env var). When
+	// the body has no newline but is valid base64 that decodes to KEY=VAL text,
+	// unfold it so the split below sees real newlines.
+	if body != "" && !strings.Contains(body, "\n") {
+		if dec, err := base64.StdEncoding.DecodeString(strings.TrimSpace(body)); err == nil {
+			s := string(dec)
+			if strings.Contains(s, "=") {
+				body = s
+				fmt.Fprintln(out, "[loader] base64-decoded instance metadata env")
+			}
+		}
 	}
 	if body == "" {
 		fmt.Fprintln(out, "[loader] no instance metadata env found")
