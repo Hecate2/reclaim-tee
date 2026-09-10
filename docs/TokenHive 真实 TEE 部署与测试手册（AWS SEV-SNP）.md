@@ -417,17 +417,23 @@ mockprovider 也改用固定身份：`-ca/-cert/-key` 三个 flag 让它加载�
 
 **tee 实例启动后自动关机**：根因是 AWS 把 EC2 user-data 以**一整段 base64** 返回给 loader，loader 原先按多行 `KEY=VAL` 切分，只能注入一个环境变量，`TEE_PLATFORM=sevsnp` 从未生效，tee 落入模拟模式、找不到 `.sim/ca.pem` 后退出，loader 随即 powerOff 关机。修复在 loader 的 `parseMetadataEnv`：当 user-data 无换行且是合法的 base64 并解码出 `KEY=VAL` 文本时，先展开再切分；该行为有单元测试锁定（`deploy/snp-image/loader/main_test.go`）。
 
+**单机 AMI 启动后自动关机（本轮新根因）**：单机 bundle（`./app` 为 supervisor）在 `pack.sh build` 的 `TOKENHIVE_BUILD_SINGLE=1` 分支中，若当时 `.certs/` 尚未生成 mock AI provider 的 TLS 固定件（缺少 `mp-ca/mp-cert/mp-key.pem`）或未通过 `SNP_MP_CA/SNP_MP_CERT/SNP_MP_KEY` 注入，打包进 bundle 的 `./mtls/mp-ca.pem` 就会缺失。tee 在 attestation 成功（控制台已打印 `policy set hash bound into attestation evidence`，证明 broker 的度量链一切正常）之后，加载上游 TLS CA 时因读不到 `./mtls/mp-ca.pem` 而 `log.Fatalf("upstream TLS config")` 退出，从未启动 `:18091` 的 TOFU 自举端点；supervisor 等待 RA-TLS 证书满 4 分钟超时后返回错误，loader 随即 powerOff 关机。诊断特征为控制台出现 `[tee] upstream TLS config: read CA /run/bundle/mtls/mp-ca.pem: no such file or directory` 与 `[loader] FATAL: TEE app exited`；mockprovider 同样加载这份身份，缺失时也会先于它退出。修复是先在 `.certs/` 生成齐全（`gencerts` 输出 `mp-ca/cert/key`）后再执行 `crosshost.sh build-single`，让 supervisor bundle 确实带上三个 `mp-*` 文件。
+
+**hub 拒绝 tee 证明（app hash 不匹配）**：`up` 会把"当前本地 bundle 的摘要"记进 `crosshost.json` 的 `tee.app_hash` 并作为 hub 的 `-expected-app`。若之后本地又重新打包（摘要变化）而 AMI 未重建，或 AMI 内的 bundle 来自另一次构建，`-expected-app` 就与实例里 loader 实际度量的摘要不一致，hub 报 `verify receipt: attestation does not match the signing key`。对齐方法：从机密实例控制台的 `[loader] app_sha256 = <hash>` 读实际摘要，把 `-expected-app snp-app:<hash>` 调成该值并刷新 `crosshost.json`。
+
 **删除永远按双 tag**：`down` 通过 `delete.py` 只匹配同时携带 `tokenhive-TEE: true` 与 `user: <配置值>` 的实例，绝不读取 hosts.json/crosshost.json，绝不触碰其他用户的机器。先 `down --dry-run` 预演是安全习惯。
 
 **单机控制台日志看起来"重复"**：这是设计使然，不是缺陷。loader 会把同一 `./app` 启动两次——一次作根权限的 attestation broker（走 `execTee`，转成 `svc/tee`，直接写控制台），一次作普通权限的应用（`supervise()` 里再拉起一个 `svc/tee` 负责 mTLS 服务，经统一前缀写到控制台）。于是控制台会看到 broker 的 tee 日志与 supervisor 调度的 tee 日志，两者的启动/attestation 行形态相似，观感上像重复输出。broker 路径不能静默，否则会丢失硬件证明的关键证据，因此保留两块输出并靠 `[tee]` 前缀等人造边界区分，是刻意取舍。
 
 ### 9.7 真实 TEE 运行业务的实测状态
 
-本轮（构建单机/双机 AMI 并试运行）实测结论如下，如实记录：
+本轮实测（构建单机/双机 AMI 并真实跑通业务，全部在 AWS eu-west-1 的 SEV-SNP 机密实例上完成）已全部通过：
 
-- **构建**：两条命令都能无错输出确定性 bundle 并注册 AMI，`snp-tokenhive` 与 `snp-tokenhive-single` 的 bundle 摘要分别被记录为 `snp-app:` 值，供后续 `-expected-app` 固定。构建过程本身验证通过。
-- **实例引导**：`up` 能正确按双 tag 幂等拉起普通主机与机密 tee，普通主机公网 IP 能注入 `TEE_RELAY`，安全组跨主机端口放行正常；单机 `up --single` 也能拉起单台机密实例。这部分验证通过。
-- **端到端业务请求**：**尚未通过**。本轮两次重建出的机密实例（一次单机、一次双机）都在引导早期自动关机，且 EC2 控制台读出为 0 字节。由于本次业务代码改动（mockprovider 固定身份、hub 平台参数、supervisor 证书分发）完全不触碰 loader 与镜像组装逻辑，这一现象指向引导/镜像改进前的既有问题，而非业务代码回归；但与上一个已修复的 base64 注入问题不同。端到端真实 SEV-SNP 业务闭环的 `deploy/drive/verify` 需要在镜像引导层排查后再跑通，暂列为待办。本手册第 9.4/9.5 的命令序列即为重新试运行的步骤。
+- **构建**：`build` 与 `build-single` 都能无错产出确定性 bundle 并注册 `snp-tokenhive` 与 `snp-tokenhive-single` 两个 AMI，其 bundle 摘要分别记录为 `snp-app:` 值供 hub 的 `-expected-app` 固定。构建本身验证通过。
+- **双机端到端业务闭环通过**：按 9.4 的 `up → fetch → deploy → drive → verify` 完整执行。`drive` 的两次真实 chat 请求均返回 HTTP 200，`hub.log` 显示 `status=200 ... provider="openai-sim" ... err=<nil>`（且正常计费 `charged=1.00`），证明 hub 在 `-allowed-platforms aws-sev-snp -expected-app` 约束下**完整验证通过了 tee 的 SEV-SNP attestation 证据**（含 Secure Boot tag 的事件日志验证），并走通了 `hub→tee mTLS→relay→agent→mockprovider` 全链路。tee 控制台同时出现 `Memory Encryption Features active: AMD SEV SEV-ES SEV-SNP`、`SEV: SNP running at VMPL0` 与 `extended PCR 8 with app_sha256`，请求面与上游面均真实建立。
+- **单机端到端业务闭环通过**：按 9.5 的 `up --single` 启动后，supervisor 在单台机密实例内以 loopback 依次拉起 mockprovider、tee、hub、agent，并完成与双机相同的 `:18091` TOFU 自举固定 tee 证书。监测机密实例控制台出现 supervisor 自检结果 `[single] self-test: HTTP 200`，证明一次真实 chat 请求在实例内部走通 `hub→tee→agent→mockprovider`；实例保持运行不再自动关机（supervisor 进入 `waitAll` 持续守护）。脏凭证留下的诊断实例已用独立 `user` tag 安全终止。
+
+单机与双机两条真实 SEV-SNP 业务闭环至此都得到验证。9.4 / 9.5 的命令序列即为现行运行方式。
 
 ---
 

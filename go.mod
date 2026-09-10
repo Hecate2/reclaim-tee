@@ -21,6 +21,7 @@ require (
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.1
 	github.com/fxamacker/cbor/v2 v2.9.3
 	github.com/golang-jwt/jwt/v5 v5.3.1
+	github.com/google/go-eventlog v0.0.3-0.20260617163629-883cc5652c69
 	github.com/google/go-sev-guest v0.15.0
 	github.com/google/go-tpm v0.9.8
 	github.com/google/go-tpm-tools v0.4.9
@@ -72,7 +73,6 @@ require (
 	github.com/go-logr/logr v1.4.4 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/google/go-configfs-tsm v0.3.3 // indirect
-	github.com/google/go-eventlog v0.0.3-0.20260617163629-883cc5652c69 // indirect
 	github.com/google/go-tdx-guest v0.3.2-0.20250814004405-ffb0869e6f4d // indirect
 	github.com/google/logger v1.1.2 // indirect
 	github.com/google/pprof v0.0.0-20260802141513-ef3492d7dac3 // indirect
