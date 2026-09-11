@@ -545,13 +545,15 @@ else
   echo "      !! FAIL: prepaid refusals wrong (nobody=$code_nobody low=$code_low, want 402/402)"
 fi
 
-echo "    assertion: the balance file on disk reflects the settled charges:"
+echo "    assertion: the balance file on disk reflects the settled charges and the seller/platform split:"
 if python3 - "$SIM/accounts-t15.json" <<'PY'
 import json, sys
 doc = json.load(open(sys.argv[1]))
 tenants = doc["tenants"]
 rich = tenants.get("tenant-t15")
 low = tenants.get("tenant-t15-low")
+sellers = doc.get("sellers", {})
+platform = doc.get("platform", 0)
 want = 5000000 - 3 * 330000
 ok = True
 if rich != want:
@@ -560,8 +562,16 @@ if low != 500000:
     print(f"      !! tenant-t15-low balance = {low}, want 500000 (refusal must not move money)"); ok = False
 if "tenant-nobody" in tenants:
     print("      !! a refused unfunded tenant must not appear in the balance file"); ok = False
+# Every settled job moves the buyer's bill (0.33) onto cheap-sim's payable (0.30)
+# and the Hub's commission (0.03); 0.30 + 0.03 == 0.33 is the conserved split.
+if sellers.get("cheap-sim") != 3 * 300000:
+    print(f"      !! cheap-sim seller balance = {sellers.get('cheap-sim')}, want {3 * 300000}"); ok = False
+if platform != 3 * 30000:
+    print(f"      !! platform balance = {platform}, want {3 * 30000}"); ok = False
+if "openai-sim" in sellers:
+    print("      !! openai-sim never served a request but has a seller payable"); ok = False
 if ok:
-    print(f"      OK: tenant-t15 balance on disk = {rich} micros after three settled jobs")
+    print(f"      OK: tenant-t15 balance {rich}, cheap-sim payable {sellers.get('cheap-sim')}, platform {platform} on disk after three settled jobs")
 sys.exit(0 if ok else 1)
 PY
 then :; else echo "      !! FAIL: balance file wrong (see above)"; fi
@@ -582,17 +592,26 @@ TEE_D_PID=$!
 wait_for_port 127.0.0.1 "$TEE_D"
 wait_for_cheapest "$HUB_API_PORT" cheap-sim
 
-echo "    assertion: balance survived the restart on disk (no re-seed, no memory):"
+echo "    assertion: balance, seller payables and commission survived the restart on disk (no re-seed, no memory):"
 if python3 - "$SIM/accounts-t15.json" <<'PY'
 import json, sys
-rich = json.load(open(sys.argv[1]))["tenants"].get("tenant-t15")
+doc = json.load(open(sys.argv[1]))
+rich = doc["tenants"].get("tenant-t15")
+sellers = doc.get("sellers", {})
+platform = doc.get("platform", 0)
 want = 5000000 - 3 * 330000
+ok = True
 if rich != want:
-    print(f"      !! tenant-t15 balance after restart = {rich}, want {want} (re-seeding would show 5000000)"); sys.exit(1)
-print("      OK: the balance the fresh process loaded is the settled one from disk")
-sys.exit(0)
+    print(f"      !! tenant-t15 balance after restart = {rich}, want {want} (re-seeding would show 5000000)"); ok = False
+if sellers.get("cheap-sim") != 3 * 300000:
+    print(f"      !! cheap-sim seller balance after restart = {sellers.get('cheap-sim')}, want {3 * 300000} (a restart must not forget what the Hub owes)"); ok = False
+if platform != 3 * 30000:
+    print(f"      !! platform balance after restart = {platform}, want {3 * 30000}"); ok = False
+if ok:
+    print("      OK: the buyer balance, seller payable and commission the fresh process loaded are the settled ones from disk")
+sys.exit(0 if ok else 1)
 PY
-then :; else echo "      !! FAIL: balance did not survive the restart"; fi
+then :; else echo "      !! FAIL: balances did not survive the restart"; fi
 
 echo "    one more request from the funded tenant over the restarted hub:"
 curl -s --noproxy '*' -X POST "http://127.0.0.1:$HUB_API_PORT/v1/chat/completions" \
@@ -601,12 +620,20 @@ curl -s --noproxy '*' -X POST "http://127.0.0.1:$HUB_API_PORT/v1/chat/completion
   > "$SIM/user-api-4.out" 2>&1
 if python3 - "$SIM/accounts-t15.json" <<'PY'
 import json, sys
-rich = json.load(open(sys.argv[1]))["tenants"].get("tenant-t15")
-want = 5000000 - 4 * 330000
-if rich != want:
-    print(f"      !! tenant-t15 balance after the fourth job = {rich}, want {want}"); sys.exit(1)
-print("      OK: fourth job charged against the reloaded balance")
-sys.exit(0)
+doc = json.load(open(sys.argv[1]))
+rich = doc["tenants"].get("tenant-t15")
+sellers = doc.get("sellers", {})
+platform = doc.get("platform", 0)
+ok = True
+if rich != 5000000 - 4 * 330000:
+    print(f"      !! tenant-t15 balance after the fourth job = {rich}, want {5000000 - 4 * 330000}"); ok = False
+if sellers.get("cheap-sim") != 4 * 300000:
+    print(f"      !! cheap-sim seller balance after the fourth job = {sellers.get('cheap-sim')}, want {4 * 300000}"); ok = False
+if platform != 4 * 30000:
+    print(f"      !! platform balance after the fourth job = {platform}, want {4 * 30000}"); ok = False
+if ok:
+    print("      OK: fourth job charged against the reloaded balance and credited seller + platform")
+sys.exit(0 if ok else 1)
 PY
 then :; else echo "      !! FAIL: post-restart charge wrong"; fi
 cheap_receipts=$(ls "$SIM/receipts/cheap-sim"/*.cbor 2>/dev/null | wc -l | tr -d ' ')

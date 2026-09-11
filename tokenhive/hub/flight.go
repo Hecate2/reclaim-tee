@@ -182,11 +182,14 @@ type jobSpend struct {
 	flightActive bool
 }
 
-// settle converts the job's hold into the buyer's charge (or, when the hold
-// was already released, bills the buyer directly). Persistence failures are
-// accounted fail-closed inside Accounts; the delivery already happened, so
-// there is nothing the caller could roll back.
-func (s *jobSpend) settle(price uint64) {
+// settle converts the job's hold into the buyer's charge and credits the
+// seller and the platform with the same split (or, when the hold was already
+// released, bills the buyer directly). All three movements are one persisted
+// state inside Accounts, so a crash can never debit the buyer without paying
+// the seller. Persistence failures are accounted fail-closed inside Accounts;
+// the delivery already happened, so there is nothing the caller could roll
+// back.
+func (s *jobSpend) settle(provider string, buyer, seller, commission uint64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -195,10 +198,10 @@ func (s *jobSpend) settle(price uint64) {
 	}
 	if s.holdActive {
 		s.holdActive = false
-		_ = s.accounts.Settle(s.tenant, s.hold, price)
+		_ = s.accounts.Settle(s.tenant, s.hold, buyer, provider, seller, commission)
 		return
 	}
-	_ = s.accounts.Charge(s.tenant, price)
+	_ = s.accounts.Charge(s.tenant, buyer, provider, seller, commission)
 }
 
 // release gives back the in-flight slot and any hold not yet settled. It is

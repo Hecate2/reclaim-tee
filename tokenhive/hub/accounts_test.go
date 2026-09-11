@@ -76,14 +76,14 @@ func TestSettleConvertsHoldToCharge(t *testing.T) {
 	if err := acc.Hold("alice", testHold); err != nil {
 		t.Fatalf("hold: %v", err)
 	}
-	if err := acc.Settle("alice", testHold, testBill); err != nil {
+	if err := acc.Settle("alice", testHold, testBill, testProvider, testBill, 0); err != nil {
 		t.Fatalf("settle: %v", err)
 	}
 	// balance 3M - 1M = 2M, nothing held: a new job must admit again.
 	if got := acc.Available("alice"); got != 2*testBill {
 		t.Fatalf("available after settle = %d, want %d", got, 2*testBill)
 	}
-	if err := acc.Settle("alice", testHold, testHold+1); err == nil {
+	if err := acc.Settle("alice", testHold, testHold+1, testProvider, testHold+1, 0); err == nil {
 		t.Fatalf("a price above the hold is a Hub bug and must be refused")
 	}
 	if got := acc.Available("alice"); got != 2*testBill {
@@ -98,13 +98,13 @@ func TestChargeBillsAfterRelease(t *testing.T) {
 		t.Fatalf("hold: %v", err)
 	}
 	acc.ReleaseHold("alice", testHold)
-	if err := acc.Charge("alice", testBill); err != nil {
+	if err := acc.Charge("alice", testBill, testProvider, testBill, 0); err != nil {
 		t.Fatalf("charge after release: %v", err)
 	}
 	if got := acc.Available("alice"); got != testHold-testBill {
 		t.Fatalf("available after charge = %d, want %d", got, testHold-testBill)
 	}
-	if err := acc.Charge("alice", testHold); err == nil {
+	if err := acc.Charge("alice", testHold, testProvider, testHold, 0); err == nil {
 		t.Fatalf("a charge beyond the balance is a bug and must be refused, not booked negative")
 	}
 }
@@ -118,7 +118,7 @@ func TestAccountsPersistAcrossReopen(t *testing.T) {
 	if err := acc.Hold("alice", testHold); err != nil {
 		t.Fatalf("hold: %v", err)
 	}
-	if err := acc.Settle("alice", testHold, testBill); err != nil {
+	if err := acc.Settle("alice", testHold, testBill, testProvider, testBill, 0); err != nil {
 		t.Fatalf("settle: %v", err)
 	}
 	if err := acc.Hold("alice", testHold); err != nil {
@@ -145,7 +145,7 @@ func TestBrokenAccountsRefuseNewHolds(t *testing.T) {
 	if err := acc.Hold("alice", testHold); err != nil {
 		t.Fatalf("hold: %v", err)
 	}
-	if err := acc.Settle("alice", testHold, testBill); err == nil {
+	if err := acc.Settle("alice", testHold, testBill, testProvider, testBill, 0); err == nil {
 		t.Fatalf("a settle that cannot persist must fail")
 	}
 	if err := acc.Hold("alice", testHold); !errors.Is(err, ErrAccountsBroken) {
@@ -206,6 +206,171 @@ func TestPrepaidBalanceGatesDispatch(t *testing.T) {
 	if got := acc.Available("rich"); got != testHold-testBill {
 		t.Fatalf("a refused job must not move money: available = %d", got)
 	}
+	// The seller side is credited by the same settlement that bills the buyer:
+	// three settled jobs, three times the provider's price.
+	if got := acc.SellerBalance(testProvider); got != 3*testBill {
+		t.Fatalf("seller balance across three settled jobs = %d, want %d", got, 3*testBill)
+	}
+	if got := acc.PlatformBalance(); got != 0 {
+		t.Fatalf("platform balance with no commission configured = %d, want 0", got)
+	}
+}
+
+// --- seller and platform money ---------------------------------------------
+
+// testProviderFee is the seller's share of a testBill job; the rest is the
+// Hub's commission. It is deliberately not a round half so a mix-up between
+// the two accounts shows up as an exact-number failure.
+const testProviderFee = 800_000
+
+func TestSettleCreditsSellerAndPlatform(t *testing.T) {
+	acc, path := openTestAccounts(t, map[string]uint64{"alice": 3 * testBill})
+
+	commission := uint64(testBill - testProviderFee)
+	if err := acc.Hold("alice", testHold); err != nil {
+		t.Fatalf("hold: %v", err)
+	}
+	if err := acc.Settle("alice", testHold, testBill, testProvider, testProviderFee, commission); err != nil {
+		t.Fatalf("settle: %v", err)
+	}
+	if got := acc.SellerBalance(testProvider); got != testProviderFee {
+		t.Fatalf("seller balance = %d, want %d", got, testProviderFee)
+	}
+	if got := acc.PlatformBalance(); got != commission {
+		t.Fatalf("platform balance = %d, want %d", got, commission)
+	}
+
+	// The money must be on disk, not just in memory: reopening is what turns
+	// "we recorded it" into "we still owe it" after a restart.
+	again, _, err := OpenAccounts(path, nil)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	if got := again.SellerBalance(testProvider); got != testProviderFee {
+		t.Fatalf("seller balance after reopen = %d, want %d", got, testProviderFee)
+	}
+	if got := again.PlatformBalance(); got != commission {
+		t.Fatalf("platform balance after reopen = %d, want %d", got, commission)
+	}
+
+	// The reopen established a fresh conservation baseline; a further
+	// settlement has to clear it as well.
+	if err := again.Hold("alice", testHold); err != nil {
+		t.Fatalf("hold after reopen: %v", err)
+	}
+	if err := again.Settle("alice", testHold, testBill, testProvider, testProviderFee, commission); err != nil {
+		t.Fatalf("settle after reopen: %v", err)
+	}
+	if got := again.SellerBalance(testProvider); got != 2*testProviderFee {
+		t.Fatalf("seller balance after a second settlement = %d, want %d", got, 2*testProviderFee)
+	}
+}
+
+func TestChargeCreditsSellerAndPlatform(t *testing.T) {
+	acc, _ := openTestAccounts(t, map[string]uint64{"alice": testHold})
+
+	if err := acc.Hold("alice", testHold); err != nil {
+		t.Fatalf("hold: %v", err)
+	}
+	acc.ReleaseHold("alice", testHold)
+	if err := acc.Charge("alice", testBill, testProvider, testProviderFee, testBill-testProviderFee); err != nil {
+		t.Fatalf("charge after release: %v", err)
+	}
+	if got := acc.SellerBalance(testProvider); got != testProviderFee {
+		t.Fatalf("seller balance = %d, want %d", got, testProviderFee)
+	}
+	if got := acc.PlatformBalance(); got != testBill-testProviderFee {
+		t.Fatalf("platform balance = %d, want %d", got, testBill-testProviderFee)
+	}
+}
+
+func TestSettleRejectsASplitThatDoesNotAddUp(t *testing.T) {
+	acc, _ := openTestAccounts(t, map[string]uint64{"alice": 3 * testBill})
+
+	if err := acc.Hold("alice", testHold); err != nil {
+		t.Fatalf("hold: %v", err)
+	}
+	// seller + commission > buyer: booking this would create money out of
+	// nothing, so the whole settlement must be refused.
+	if err := acc.Settle("alice", testHold, testBill, testProvider, testBill, 1); err == nil {
+		t.Fatalf("a split that does not add up must be refused")
+	}
+	if got := acc.SellerBalance(testProvider); got != 0 {
+		t.Fatalf("seller balance after a refused split = %d, want 0", got)
+	}
+	if got := acc.PlatformBalance(); got != 0 {
+		t.Fatalf("platform balance after a refused split = %d, want 0", got)
+	}
+	// The hold is still active (nothing settled), so 3M seeded minus the 2M
+	// hold leaves exactly one job's worth available.
+	if got := acc.Available("alice"); got != testBill {
+		t.Fatalf("available after a refused split = %d, want %d", got, testBill)
+	}
+	if err := acc.Hold("alice", testHold); !errors.Is(err, ErrAccountsBroken) {
+		t.Fatalf("hold after a refused split err = %v, want ErrAccountsBroken", err)
+	}
+}
+
+func TestSettleRejectsAnEmptyProvider(t *testing.T) {
+	acc, _ := openTestAccounts(t, map[string]uint64{"alice": 3 * testBill})
+
+	if err := acc.Hold("alice", testHold); err != nil {
+		t.Fatalf("hold: %v", err)
+	}
+	if err := acc.Settle("alice", testHold, testBill, "", testBill, 0); err == nil {
+		t.Fatalf("a settlement with no provider to credit must be refused")
+	}
+}
+
+func TestSellerPayablesAccumulatePerProvider(t *testing.T) {
+	// Four jobs' worth: each admission needs a full hold available, so the
+	// starting balance has to outlast the charges themselves.
+	acc, _ := openTestAccounts(t, map[string]uint64{"alice": 4 * testBill})
+
+	for i := 0; i < 2; i++ {
+		if err := acc.Hold("alice", testHold); err != nil {
+			t.Fatalf("hold %d: %v", i, err)
+		}
+		if err := acc.Settle("alice", testHold, testBill, "cheap", testBill, 0); err != nil {
+			t.Fatalf("settle %d: %v", i, err)
+		}
+	}
+	if err := acc.Hold("alice", testHold); err != nil {
+		t.Fatalf("hold: %v", err)
+	}
+	if err := acc.Settle("alice", testHold, testBill, "dear", testBill, 0); err != nil {
+		t.Fatalf("settle: %v", err)
+	}
+	if got := acc.SellerBalance("cheap"); got != 2*testBill {
+		t.Fatalf("cheap seller balance = %d, want %d", got, 2*testBill)
+	}
+	if got := acc.SellerBalance("dear"); got != testBill {
+		t.Fatalf("dear seller balance = %d, want %d", got, testBill)
+	}
+	if got := acc.SellerBalance("unknown"); got != 0 {
+		t.Fatalf("an unknown provider has no payable, got %d", got)
+	}
+}
+
+func TestSettleRefusesANonConservingLedger(t *testing.T) {
+	acc, _ := openTestAccounts(t, map[string]uint64{"alice": 3 * testBill})
+	if err := acc.Hold("alice", testHold); err != nil {
+		t.Fatalf("hold: %v", err)
+	}
+
+	// Simulate a write path that credited a seller without a matching buyer
+	// charge: the next settlement must notice that the ledger total moved and
+	// fail closed rather than keep booking over books that no longer add up.
+	acc.mu.Lock()
+	acc.sellers[testProvider] = 1
+	acc.mu.Unlock()
+
+	if err := acc.Settle("alice", testHold, testBill, testProvider, testBill, 0); err == nil {
+		t.Fatalf("a settlement over a non-conserving ledger must be refused")
+	}
+	if err := acc.Hold("alice", testHold); !errors.Is(err, ErrAccountsBroken) {
+		t.Fatalf("hold after a conservation failure err = %v, want ErrAccountsBroken", err)
+	}
 }
 
 func TestJobSpendSettleAndReleaseAreOnce(t *testing.T) {
@@ -221,7 +386,7 @@ func TestJobSpendSettleAndReleaseAreOnce(t *testing.T) {
 	}
 	// The normal request shape: settle, then the deferred release. The hold
 	// is consumed once, the slot returns, the balance drops once.
-	spend.settle(testBill)
+	spend.settle(testProvider, testBill, testBill, 0)
 	spend.release()
 	spend.release()
 	if got := acc.Available("alice"); got != 3*testHold-testBill {
@@ -238,7 +403,7 @@ func TestJobSpendSettleAndReleaseAreOnce(t *testing.T) {
 	if got := acc.Available("alice"); got != 3*testHold-testBill {
 		t.Fatalf("release must return the hold in full: available = %d", got)
 	}
-	spend2.settle(testBill)
+	spend2.settle(testProvider, testBill, testBill, 0)
 	if got := acc.Available("alice"); got != 3*testHold-2*testBill {
 		t.Fatalf("charge after release must bill: available = %d, want %d", got, 3*testHold-2*testBill)
 	}

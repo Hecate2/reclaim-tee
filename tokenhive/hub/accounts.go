@@ -30,10 +30,24 @@ var ErrAccountsNeedCeiling = errors.New("accounts enabled without MaxJobMicros: 
 // must go somewhere), which is exactly the gap the refusal bounds.
 var ErrAccountsBroken = errors.New("balance persistence failed; refusing new jobs until restart")
 
-// Accounts is the Hub's prepaid-balance ledger: one balance per tenant, with
-// the balance file on disk as the only authoritative record.
+// accountsFile is the on-disk shape of the balance ledger.
 //
-// Debt is impossible by construction. Every job takes a hold of exactly
+// All three roles live in one document so that a settlement writes the buyer's
+// charge, the seller's credit and the Hub's commission in a single atomic
+// rewrite. There is no ordering in which a buyer can be debited while the
+// matching seller/platform credit is lost: a crash loses the whole settlement
+// (detectable, because the receipt is already stored) or none of it.
+type accountsFile struct {
+	Tenants  map[string]uint64 `json:"tenants"`
+	Sellers  map[string]uint64 `json:"sellers,omitempty"`
+	Platform uint64            `json:"platform,omitempty"`
+}
+
+// Accounts is the Hub's durable balance ledger. It keeps every role the money
+// system has: one prepaid balance per buyer (tenant), the amount owed to each
+// seller (provider), and the Hub's own accumulated commission.
+//
+// Buyer debt is impossible by construction. Every job takes a hold of exactly
 // MaxJobMicros before dispatch (available = balance - held must cover it), a
 // settled buyer bill is capped at MaxJobMicros (ErrJobPriceExceeded), and
 // settle converts the hold into the charge, so balance >= held*hold always
@@ -41,22 +55,39 @@ var ErrAccountsBroken = errors.New("balance persistence failed; refusing new job
 // money — or less money than one hold — is refused before a provider is ever
 // asked to spend a credential.
 //
+// Seller and platform money moves only as the mirror image of a buyer charge:
+// the split is validated to add up (seller + commission == buyer) before any
+// balance changes, so a settlement can neither create nor destroy money.
+//
 // Persistence shape: a single JSON file rewritten atomically (temporary file,
-// fsync, rename, fsync of the directory) on every balance mutation. Holds and
+// fsync, rename, fsync of the directory) on every settled mutation. Holds and
 // releases are deliberately not persisted: a hold exists only while its job
 // runs, jobs do not survive a process restart, and replaying stale holds
-// would freeze money for jobs that no longer exist. The file therefore reads
-// back as exactly the settled state, and the only crash window is a charge
-// whose file write never landed — the receipt is already in the provider's
-// store, so the gap is detectable there, the same direction as every other
-// "executed but unbilled" path.
+// would freeze money for jobs that no longer exist. Seller payables and the
+// platform balance are settled state, so they ride along with the buyer charge
+// that created them. The file therefore reads back as exactly the settled
+// state, and the only crash window is a settlement whose file write never
+// landed — the receipt is already in the provider's store, so the gap is
+// detectable there, the same direction as every other "executed but unbilled"
+// path.
 type Accounts struct {
 	path string
 
-	mu      sync.Mutex
-	balance map[string]uint64
-	held    map[string]uint64
-	broken  bool
+	mu       sync.Mutex
+	balance  map[string]uint64 // buyer prepaid balances, by tenant
+	held     map[string]uint64 // buyer holds (memory only: a hold dies with its job)
+	sellers  map[string]uint64 // seller payables, by provider
+	platform uint64            // the Hub's cumulative commission
+
+	// total is the ledger's conserved quantity: every buyer balance, every
+	// seller payable and the platform balance. It moves only when external
+	// money enters (the first-boot seed today, a real deposit later), because a
+	// settlement is a pure transfer between accounts. Re-derived on load and
+	// re-checked after each settlement, it is what turns "a write path forgot
+	// one side" from silent money creation into a refused, fail-closed job.
+	total uint64
+
+	broken bool
 }
 
 // OpenAccounts loads the balance file at path, creating it with the given
@@ -70,6 +101,7 @@ func OpenAccounts(path string, seeds map[string]uint64) (*Accounts, bool, error)
 		path:    path,
 		balance: make(map[string]uint64),
 		held:    make(map[string]uint64),
+		sellers: make(map[string]uint64),
 	}
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -82,6 +114,11 @@ func OpenAccounts(path string, seeds map[string]uint64) (*Accounts, bool, error)
 			}
 			a.balance[tenant] = micros
 		}
+		total, err := a.ledgerTotalLocked()
+		if err != nil {
+			return nil, false, err
+		}
+		a.total = total
 		if err := a.persistLocked(); err != nil {
 			return nil, false, err
 		}
@@ -90,15 +127,22 @@ func OpenAccounts(path string, seeds map[string]uint64) (*Accounts, bool, error)
 	if err != nil {
 		return nil, false, err
 	}
-	var doc struct {
-		Tenants map[string]uint64 `json:"tenants"`
-	}
+	var doc accountsFile
 	if err := json.Unmarshal(data, &doc); err != nil {
 		return nil, false, fmt.Errorf("parse balance file %s: %w", path, err)
 	}
 	if doc.Tenants != nil {
 		a.balance = doc.Tenants
 	}
+	if doc.Sellers != nil {
+		a.sellers = doc.Sellers
+	}
+	a.platform = doc.Platform
+	total, err := a.ledgerTotalLocked()
+	if err != nil {
+		return nil, false, fmt.Errorf("balance file %s: %w", path, err)
+	}
+	a.total = total
 	return a, false, nil
 }
 
@@ -121,29 +165,48 @@ func (a *Accounts) Hold(tenant string, amount uint64) error {
 	return nil
 }
 
-// Settle converts an active hold into the buyer's actual charge: the hold
-// leaves the held pool and the price leaves the balance, persisted before the
-// in-memory state moves so the disk is always at least as old as memory and
-// never the reverse. price above hold is a Hub bug (the per-job ceiling is
-// what sized the hold) and is refused rather than booked.
-func (a *Accounts) Settle(tenant string, hold, price uint64) error {
+// Settle converts an active hold into the buyer's actual charge and credits the
+// seller and the platform in the same atomic rewrite: the hold leaves the held
+// pool, the buyer bill leaves the buyer balance, and the seller's price plus
+// the Hub's commission land on their accounts. The three movements are one
+// persisted state, so no crash can debit a buyer without paying the seller.
+//
+// price above hold is a Hub bug (the per-job ceiling is what sized the hold)
+// and is refused rather than booked, as is a split that does not add up
+// (seller + commission != buyer) — a settlement must be exactly zero-sum.
+func (a *Accounts) Settle(tenant string, hold, buyer uint64, provider string, seller, commission uint64) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	if price > hold {
+	if err := validSplit(provider, buyer, seller, commission); err != nil {
 		a.broken = true
-		return fmt.Errorf("settle for tenant %q: price %d exceeds hold %d", tenant, price, hold)
+		return err
+	}
+	if buyer > hold {
+		a.broken = true
+		return fmt.Errorf("settle for tenant %q: buyer %d exceeds hold %d", tenant, buyer, hold)
 	}
 	if a.held[tenant] < hold {
 		a.broken = true
 		return fmt.Errorf("settle for tenant %q: held %d does not cover hold %d", tenant, a.held[tenant], hold)
 	}
-	if a.balance[tenant] < price {
+	if a.balance[tenant] < buyer {
 		a.broken = true
-		return fmt.Errorf("settle for tenant %q: balance %d cannot cover price %d", tenant, a.balance[tenant], price)
+		return fmt.Errorf("settle for tenant %q: balance %d cannot cover buyer %d", tenant, a.balance[tenant], buyer)
+	}
+	sellerBalance, platform, err := addCredits(a.sellers[provider], seller, a.platform, commission)
+	if err != nil {
+		a.broken = true
+		return fmt.Errorf("settle for provider %q: %w", provider, err)
 	}
 	a.held[tenant] -= hold
-	a.balance[tenant] -= price
+	a.balance[tenant] -= buyer
+	a.sellers[provider] = sellerBalance
+	a.platform = platform
+	if err := a.checkConservationLocked(); err != nil {
+		a.broken = true
+		return err
+	}
 	if err := a.persistLocked(); err != nil {
 		a.broken = true
 		return err
@@ -154,18 +217,34 @@ func (a *Accounts) Settle(tenant string, hold, price uint64) error {
 // Charge bills a buyer whose hold is already gone — the one ordering a
 // watchdog-closed session can produce: the connection close releases the hold
 // before the truncated receipt is priced, and the charge is still due. The
-// debt-safety argument is unchanged (the hold backed this job at admission
-// and every competing hold backs its own), and a balance that cannot cover
-// the price is a bug, refused and marked broken rather than booked negative.
-func (a *Accounts) Charge(tenant string, price uint64) error {
+// seller and platform are credited exactly as in Settle. The debt-safety
+// argument is unchanged (the hold backed this job at admission and every
+// competing hold backs its own), and a balance that cannot cover the price is
+// a bug, refused and marked broken rather than booked negative.
+func (a *Accounts) Charge(tenant string, buyer uint64, provider string, seller, commission uint64) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	if a.balance[tenant] < price {
+	if err := validSplit(provider, buyer, seller, commission); err != nil {
 		a.broken = true
-		return fmt.Errorf("charge for tenant %q: balance %d cannot cover price %d", tenant, a.balance[tenant], price)
+		return err
 	}
-	a.balance[tenant] -= price
+	if a.balance[tenant] < buyer {
+		a.broken = true
+		return fmt.Errorf("charge for tenant %q: balance %d cannot cover buyer %d", tenant, a.balance[tenant], buyer)
+	}
+	sellerBalance, platform, err := addCredits(a.sellers[provider], seller, a.platform, commission)
+	if err != nil {
+		a.broken = true
+		return fmt.Errorf("charge for provider %q: %w", provider, err)
+	}
+	a.balance[tenant] -= buyer
+	a.sellers[provider] = sellerBalance
+	a.platform = platform
+	if err := a.checkConservationLocked(); err != nil {
+		a.broken = true
+		return err
+	}
 	if err := a.persistLocked(); err != nil {
 		a.broken = true
 		return err
@@ -201,14 +280,111 @@ func (a *Accounts) Available(tenant string) uint64 {
 	return balance - held
 }
 
+// SellerBalance reports what the Hub owes one provider: every settled charge
+// that provider earned, accumulated since the file was created.
+func (a *Accounts) SellerBalance(provider string) uint64 {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	return a.sellers[provider]
+}
+
+// PlatformBalance reports the Hub's own cumulative commission.
+func (a *Accounts) PlatformBalance() uint64 {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	return a.platform
+}
+
+// validSplit checks that a settlement is exactly zero-sum across the three
+// roles and that there is a provider to credit. A mismatch is a Hub bug (the
+// buyer bill is built as charged + commission), so it must refuse the whole
+// settlement rather than move money that does not reconcile.
+func validSplit(provider string, buyer, seller, commission uint64) error {
+	if provider == "" {
+		return errors.New("settlement with an empty provider: the seller credit would have no account")
+	}
+	total, ok := addChecked(seller, commission)
+	if !ok {
+		return fmt.Errorf("settlement split overflows: seller %d + commission %d", seller, commission)
+	}
+	if total != buyer {
+		return fmt.Errorf("settlement split does not add up: seller %d + commission %d != buyer %d", seller, commission, buyer)
+	}
+	return nil
+}
+
+// ledgerTotalLocked adds up every account. Holds are deliberately excluded:
+// they are a reclassification of an existing buyer balance, not new money.
+func (a *Accounts) ledgerTotalLocked() (uint64, error) {
+	var total uint64
+	add := func(v uint64) error {
+		next, ok := addChecked(total, v)
+		if !ok {
+			return fmt.Errorf("ledger total overflows at %d + %d", total, v)
+		}
+		total = next
+		return nil
+	}
+	for _, v := range a.balance {
+		if err := add(v); err != nil {
+			return 0, err
+		}
+	}
+	for _, v := range a.sellers {
+		if err := add(v); err != nil {
+			return 0, err
+		}
+	}
+	if err := add(a.platform); err != nil {
+		return 0, err
+	}
+	return total, nil
+}
+
+// checkConservationLocked re-derives the ledger total and compares it with the
+// invariant established at load. A settlement only moves money between the
+// three roles, so a changed total means a mutation credited or dropped a side
+// — the one class of bug that silently creates or destroys money. The pass is
+// the same order as the atomic rewrite that follows it (which serializes and
+// fsyncs these very maps), so it costs nothing next to the write it guards.
+func (a *Accounts) checkConservationLocked() error {
+	total, err := a.ledgerTotalLocked()
+	if err != nil {
+		return err
+	}
+	if total != a.total {
+		return fmt.Errorf("ledger does not conserve: total %d, want %d (a settlement moved money without its counterpart)", total, a.total)
+	}
+	return nil
+}
+
+// addCredits applies the seller and platform sides of a settlement with
+// overflow checks, returning the new values without mutating anything so a
+// failure leaves the ledger untouched.
+func addCredits(sellerHave, seller, platformHave, commission uint64) (uint64, uint64, error) {
+	sellerBalance, ok := addChecked(sellerHave, seller)
+	if !ok {
+		return 0, 0, fmt.Errorf("seller balance %d + %d overflows", sellerHave, seller)
+	}
+	platform, ok := addChecked(platformHave, commission)
+	if !ok {
+		return 0, 0, fmt.Errorf("platform balance %d + %d overflows", platformHave, commission)
+	}
+	return sellerBalance, platform, nil
+}
+
 // persistLocked rewrites the balance file atomically: write a temporary file
 // beside it, fsync it, rename over the target, fsync the directory so the
 // rename itself is durable. A crash mid-write leaves either the old file or
 // the new one, never a partial one.
 func (a *Accounts) persistLocked() error {
-	doc := struct {
-		Tenants map[string]uint64 `json:"tenants"`
-	}{Tenants: a.balance}
+	doc := accountsFile{
+		Tenants:  a.balance,
+		Sellers:  a.sellers,
+		Platform: a.platform,
+	}
 	data, err := json.MarshalIndent(doc, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encode balance file %s: %w", a.path, err)

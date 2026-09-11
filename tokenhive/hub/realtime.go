@@ -361,7 +361,7 @@ func (h *Hub) runRealtime(ctx context.Context, tenant, model, provider string,
 	}
 	h.ledger.NoteSettled(spec.Provider, charged)
 	h.ledger.NoteCommission(spec.Provider, commission)
-	spend.settle(buyer)
+	spend.settle(spec.Provider, buyer, charged, commission)
 	return outcome, relErr
 }
 
