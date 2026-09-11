@@ -226,7 +226,8 @@ HUB_WS="ws://127.0.0.1:18085"   # user-facing Hub (scenarios 15-17)
 # real TEE directly, so the envelope agent A deposits here is never opened.
 echo "==> starting reverse-tunnel Hub on :$RT_HUB_PORT (agent gate /v1/agent, tee relay /v1/relay)"
 "$BIN/hub" -serve "127.0.0.1:$RT_HUB_PORT" -host "127.0.0.1:$MP_PORT" \
-  -tee "http://127.0.0.1:$TEE_PORT" -agent-keys "$AGENT_KEYS" -relay-key "$RELAY_SECRET" > "$SIM/hub-rt.log" 2>&1 &
+  -tee "http://127.0.0.1:$TEE_PORT" -agent-keys "$AGENT_KEYS" -relay-key "$RELAY_SECRET" \
+  -accounts "$SIM/accounts-rt.json" -max-job-micros 1000000 > "$SIM/hub-rt.log" 2>&1 &
 RT_HUB_PID=$!
 wait_for_port 127.0.0.1 "$RT_HUB_PORT"
 
@@ -459,10 +460,12 @@ HUB_API_PORT=18085
 TEE_D=18098
 section "15. lowest-price scheduling + commission: user API picks cheap-sim"
 
-echo "    starting the user-facing Hub on :$HUB_API_PORT (10% commission, agent-key gate)"
+echo "    starting the user-facing Hub on :$HUB_API_PORT (10% commission, agent-key gate, prepaid balances)"
 "$BIN/hub" -serve "127.0.0.1:$HUB_API_PORT" -host "127.0.0.1:$MP_PORT" \
   -tee "http://127.0.0.1:$TEE_D" -commission 1000 -agent-keys "$AGENT_KEYS" \
   -relay-key "$RELAY_SECRET" \
+  -accounts "$SIM/accounts-t15.json" -max-job-micros 1000000 \
+  -tenant-deposits "tenant-t15=5000000,tenant-t15-low=500000" \
   > "$SIM/hub-serve.log" 2>&1 &
 HUB_API_PID=$!
 wait_for_port 127.0.0.1 "$HUB_API_PORT"
@@ -526,6 +529,93 @@ else
   echo "      !! FAIL: expected 3 receipts under cheap-sim, got $cheap_receipts"
 fi
 
+# --- prepaid balances: no money, no service; the balance lives on disk -----
+echo "    assertion: prepaid gate - a tenant with no balance gets 402, before dispatch:"
+code_nobody=$(curl -s --noproxy '*' -o "$SIM/user-api-nobody.out" -w '%{http_code}' \
+  -X POST "http://127.0.0.1:$HUB_API_PORT/v1/chat/completions" \
+  -H 'Content-Type: application/json' -H 'X-TokenHive-Key: tenant-nobody' \
+  -d '{"model":"sim-mock-0.5b","messages":[{"role":"user","content":"hi"}],"stream":true}')
+code_low=$(curl -s --noproxy '*' -o "$SIM/user-api-low.out" -w '%{http_code}' \
+  -X POST "http://127.0.0.1:$HUB_API_PORT/v1/chat/completions" \
+  -H 'Content-Type: application/json' -H 'X-TokenHive-Key: tenant-t15-low' \
+  -d '{"model":"sim-mock-0.5b","messages":[{"role":"user","content":"hi"}],"stream":true}')
+if [ "$code_nobody" = "402" ] && [ "$code_low" = "402" ]; then
+  echo "      OK: unfunded tenant and tenant below one hold both get HTTP 402"
+else
+  echo "      !! FAIL: prepaid refusals wrong (nobody=$code_nobody low=$code_low, want 402/402)"
+fi
+
+echo "    assertion: the balance file on disk reflects the settled charges:"
+if python3 - "$SIM/accounts-t15.json" <<'PY'
+import json, sys
+doc = json.load(open(sys.argv[1]))
+tenants = doc["tenants"]
+rich = tenants.get("tenant-t15")
+low = tenants.get("tenant-t15-low")
+want = 5000000 - 3 * 330000
+ok = True
+if rich != want:
+    print(f"      !! tenant-t15 balance = {rich}, want {want} (3 settled jobs of buyer 0.33)"); ok = False
+if low != 500000:
+    print(f"      !! tenant-t15-low balance = {low}, want 500000 (refusal must not move money)"); ok = False
+if "tenant-nobody" in tenants:
+    print("      !! a refused unfunded tenant must not appear in the balance file"); ok = False
+if ok:
+    print(f"      OK: tenant-t15 balance on disk = {rich} micros after three settled jobs")
+sys.exit(0 if ok else 1)
+PY
+then :; else echo "      !! FAIL: balance file wrong (see above)"; fi
+
+echo "    restarting the hub on the same balance file (seeds must not re-apply):"
+kill "$TEE_D_PID" "$HUB_API_PID" 2>/dev/null; wait "$TEE_D_PID" "$HUB_API_PID" 2>/dev/null
+"$BIN/hub" -serve "127.0.0.1:$HUB_API_PORT" -host "127.0.0.1:$MP_PORT" \
+  -tee "http://127.0.0.1:$TEE_D" -commission 1000 -agent-keys "$AGENT_KEYS" \
+  -relay-key "$RELAY_SECRET" \
+  -accounts "$SIM/accounts-t15.json" -max-job-micros 1000000 \
+  -tenant-deposits "tenant-t15=5000000,tenant-t15-low=500000" \
+  > "$SIM/hub-serve.log" 2>&1 &
+HUB_API_PID=$!
+wait_for_port 127.0.0.1 "$HUB_API_PORT"
+"$BIN/tee" -addr "127.0.0.1:$TEE_D" -relay "$HUB_WS/v1/relay" -relay-key "$RELAY_SECRET" \
+  -seq "$SIM/seqstore-t15.json" > "$SIM/teeD.log" 2>&1 &
+TEE_D_PID=$!
+wait_for_port 127.0.0.1 "$TEE_D"
+wait_for_cheapest "$HUB_API_PORT" cheap-sim
+
+echo "    assertion: balance survived the restart on disk (no re-seed, no memory):"
+if python3 - "$SIM/accounts-t15.json" <<'PY'
+import json, sys
+rich = json.load(open(sys.argv[1]))["tenants"].get("tenant-t15")
+want = 5000000 - 3 * 330000
+if rich != want:
+    print(f"      !! tenant-t15 balance after restart = {rich}, want {want} (re-seeding would show 5000000)"); sys.exit(1)
+print("      OK: the balance the fresh process loaded is the settled one from disk")
+sys.exit(0)
+PY
+then :; else echo "      !! FAIL: balance did not survive the restart"; fi
+
+echo "    one more request from the funded tenant over the restarted hub:"
+curl -s --noproxy '*' -X POST "http://127.0.0.1:$HUB_API_PORT/v1/chat/completions" \
+  -H 'Content-Type: application/json' -H 'X-TokenHive-Key: tenant-t15' \
+  -d '{"model":"sim-mock-0.5b","messages":[{"role":"user","content":"hi"}],"stream":true}' \
+  > "$SIM/user-api-4.out" 2>&1
+if python3 - "$SIM/accounts-t15.json" <<'PY'
+import json, sys
+rich = json.load(open(sys.argv[1]))["tenants"].get("tenant-t15")
+want = 5000000 - 4 * 330000
+if rich != want:
+    print(f"      !! tenant-t15 balance after the fourth job = {rich}, want {want}"); sys.exit(1)
+print("      OK: fourth job charged against the reloaded balance")
+sys.exit(0)
+PY
+then :; else echo "      !! FAIL: post-restart charge wrong"; fi
+cheap_receipts=$(ls "$SIM/receipts/cheap-sim"/*.cbor 2>/dev/null | wc -l | tr -d ' ')
+if [ "$cheap_receipts" -eq 4 ]; then
+  echo "      OK: 4 receipts under cheap-sim after the restart"
+else
+  echo "      !! FAIL: expected 4 receipts under cheap-sim after the restart, got $cheap_receipts"
+fi
+
 kill "$TEE_D_PID" "$HUB_API_PID" 2>/dev/null; wait "$TEE_D_PID" "$HUB_API_PID" 2>/dev/null
 
 # =====================================================================
@@ -548,6 +638,8 @@ rm -rf "$SIM/receipts"
 "$BIN/hub" -serve "127.0.0.1:$HUB_API_PORT" -host "127.0.0.1:$MP_PORT" \
   -tee "http://127.0.0.1:$TEE_D" -agent-keys "$AGENT_KEYS" \
   -relay-key "$RELAY_SECRET" \
+  -accounts "$SIM/accounts-t16.json" -max-job-micros 1000000 \
+  -tenant-deposits "tenant-t16=5000000" \
   > "$SIM/hub-serve16.log" 2>&1 &
 HUB_API16_PID=$!
 wait_for_port 127.0.0.1 "$HUB_API_PORT"
@@ -689,7 +781,9 @@ rm -rf "$SIM/receipts"
 "$BIN/hub" -serve "127.0.0.1:$HUB_API_PORT" -host "127.0.0.1:$MP_PORT" \
   -tee "http://127.0.0.1:$TEE_G" -commission 1000 \
   -session-timeout 30s -session-max 1048576 -session-idle 5s \
-  -agent-keys "$AGENT_KEYS" -relay-key "$RELAY_SECRET" > "$SIM/hub-serve17.log" 2>&1 &
+  -agent-keys "$AGENT_KEYS" -relay-key "$RELAY_SECRET" \
+  -accounts "$SIM/accounts-t17.json" -max-job-micros 1000000 \
+  -tenant-deposits "tenant-t17=5000000" > "$SIM/hub-serve17.log" 2>&1 &
 HUB_API17_PID=$!
 wait_for_port 127.0.0.1 "$HUB_API_PORT"
 
