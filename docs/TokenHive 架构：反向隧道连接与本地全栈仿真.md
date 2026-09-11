@@ -72,7 +72,7 @@ User ─HTTP/SSE 或 WS─► Hub ─┬─ /v1/execute（请求模式）─► 
 
 Hub 侧维护两个 WebSocket 端点，这是它作为「NAT 背后贡献者和 TEE 的汇合点」的存在方式。两端的处理逻辑在 tokenhive/hub/agenthttp.go 与 agentnet.go。
 
-**AgentGate（/v1/agent）**：Agent 拨入以在线。握手时校验 Agent 预设的共享密钥（agentKeyMatches 做常数时间比较，任何与 Hub 的 AgentSecret 不匹配的握手中断），随后把连接包成多路复用隧道，等待 Agent 的第一条控制流。控制流的开流元数据是 AgentRegister——它声明为哪个 provider 出口、可选展示名、可选的自我报价（SelfPrice）、**可选的模型清单（Models）**，以及**密封在 `Credential` 里的 token**：Agent 从 Hub 的 /v1/credential-key 拉取 TEE 收件公钥，把自己的 token 加密成凭证信封（tee.EncryptCredential）后随注册上报，Hub 只把密文信封存入凭证库、永不见明文。每个 agent 每次拨入都要取一次收件公钥，因此 Hub **只合并在途的拉取**：同一时刻到达的调用共用一个到 TEE 的往返，结果分发给全部等待者后即丢弃，下一个调用者仍重新读 TEE。之所以不做 TTL 缓存：收件密钥在 TEE 每次重启时轮换，缓存会在重启后的整个 TTL 窗口内把已作废的公钥发给每一个重连的 agent，它们封出的信封新 TEE 根本打不开——反而把一次重启拖成更长的故障。Models 是软能力提示：非空时该 Agent 只作为这些模型的候选；为空则该 Agent 服务任何模型。控制流保持打开期间该 Agent 视为在线；控制流一旦关闭，Agent 从调度器离线、隧道拆除，Hub 同时从凭证库撤销该 provider 的信封。Agent 未声明自价时接受 Hub 为该 provider 声明的平台默认价；若 provider 无平台默认价，该 Agent 无法注册。
+**AgentGate（/v1/agent）**：Agent 拨入以在线。握手时校验 Agent 预设的共享密钥（agentKeyMatches 做常数时间比较，任何与该 provider 在 Hub 密钥表（-agent-keys）中的密钥不匹配的握手中断），随后把连接包成多路复用隧道，等待 Agent 的第一条控制流。控制流的开流元数据是 AgentRegister——它声明为哪个 provider 出口、可选展示名、可选的自我报价（SelfPrice）、**可选的模型清单（Models）**，以及**密封在 `Credential` 里的 token**：Agent 从 Hub 的 /v1/credential-key 拉取 TEE 收件公钥，把自己的 token 加密成凭证信封（tee.EncryptCredential）后随注册上报，Hub 只把密文信封存入凭证库、永不见明文。每个 agent 每次拨入都要取一次收件公钥，因此 Hub **只合并在途的拉取**：同一时刻到达的调用共用一个到 TEE 的往返，结果分发给全部等待者后即丢弃，下一个调用者仍重新读 TEE。之所以不做 TTL 缓存：收件密钥在 TEE 每次重启时轮换，缓存会在重启后的整个 TTL 窗口内把已作废的公钥发给每一个重连的 agent，它们封出的信封新 TEE 根本打不开——反而把一次重启拖成更长的故障。Models 是软能力提示：非空时该 Agent 只作为这些模型的候选；为空则该 Agent 服务任何模型。控制流保持打开期间该 Agent 视为在线；控制流一旦关闭，Agent 从调度器离线、隧道拆除，Hub 同时从凭证库撤销该 provider 的信封。Agent 未声明自价时接受 Hub 为该 provider 声明的平台默认价；若 provider 无平台默认价，该 Agent 无法注册。
 
 在线注册表（agentRegistry）以 provider 为主键：同一 provider 任一时刻只有一个在线 Agent，后注册者顶掉先前者并关闭其隧道（杜绝同一 provider 的双重身份与陈旧隧道）。每个在线 Agent 连同其有效价与声明的模型清单一起登记，调度器只把新工作路由到此刻在线且（若声明了清单）清单含该模型者。
 
@@ -100,7 +100,7 @@ ChannelConfig 的 egress 配置：RelayURL（经 Hub 中继，生产形态与本
 
 调度、计价、账务全部在 hub 包内，全部可在 ScriptedTEE 毫秒级单测中验证，不经网络。
 
-**最低在线价调度**。用户只声明 model，不声明 provider。providersForModel 产出候选：**供应 = 此刻持有一条在线隧道的 Agent**——离线即退出候选，挂单（自报价）随之消失，绝不回落到市场默认价继续调度（一个无人持有隧道的 provider 不该收到任何新作业）。按有效价（PerRequestMicros 加该 model 的加价）升序排列，同价按 provider 名破序使顺序成为供应的纯函数。在线 Agent 的自报价即其有效价（h.card 同时供调度与结算读取，报价与实收不漂移）。唯一的例外是**不承载 Agent 注册的 Hub**（未配置 AgentSecret，如仅对脚本替身的嵌入业务测试）：它没有"在线"概念，直接用静态市场表做供应，让单测在不引入真实隧道的前提下验证定价与排序。ExecuteForModel 按序尝试，失败回退次低价；一旦某 provider 的首个字节已被透传给用户，即视为已绑定该 provider，不再中途切换（避免两份回执拼凑一个用户不可解析的响应）。
+**最低在线价调度**。用户只声明 model，不声明 provider。providersForModel 产出候选：**供应 = 此刻持有一条在线隧道的 Agent**——离线即退出候选，挂单（自报价）随之消失，绝不回落到市场默认价继续调度（一个无人持有隧道的 provider 不该收到任何新作业）。按有效价（PerRequestMicros 加该 model 的加价）升序排列，同价按 provider 名破序使顺序成为供应的纯函数。在线 Agent 的自报价即其有效价（h.card 同时供调度与结算读取，报价与实收不漂移）。唯一的例外是**不承载 Agent 注册的 Hub**（未配置 -agent-keys，如仅对脚本替身的嵌入业务测试）：它没有"在线"概念，直接用静态市场表做供应，让单测在不引入真实隧道的前提下验证定价与排序。ExecuteForModel 按序尝试，失败回退次低价；一旦某 provider 的首个字节已被透传给用户，即视为已绑定该 provider，不再中途切换（避免两份回执拼凑一个用户不可解析的响应）。
 
 **声明的模型 = 软能力过滤**。Agent 注册时可声明 Models；声明过的 Agent 只作为清单内模型的候选（发一个它上游没有的模型只会白买一次拒绝），未声明的 Agent 服务任何模型。当某模型不在任何在线 Agent 的清单里时，请求以"无 Provider 服务该模型"拒绝，而不是朝每个 provider 各打一枪。买家的**模型目录 `GET /v1/models`** 就建立在这份声明之上：列出所有在线 Agent 声明过的模型，每行带调度器此刻实际会派发的最低在线价与对应 provider；目录完全由 Hub 内存中的在线注册表算出，**不向任何 Agent/上游发起探测**（买家的浏览动作不产生任何询价流量）。可选 `?q=` 子串查询在目录上做大小写不敏感的包含匹配，供买家按精确 ID 或名称片段（"deepseek" 命中 "deepseek-pro"/"deepseek-flash"）检索。
 
@@ -124,7 +124,7 @@ Session（键 14，omitempty）标记流式 WebSocket 型会话请求：置位�
 
 仿真的目标是一条命令拉起完整链路在本机（Apple silicon）验证全部结构性设计，无需任何真实模型。组件与端口沿用：mockprovider（TLS，自建测试 CA）18080、其平文 /stats 18081（探测不扰动所报告的值）；faketee 18090；TEE 进程若干（18095、18096、18097、18098、18099、18091 等）；cmd/hub serve 默认 18085（同时挂载用户 API、/v1/agent 门、/v1/relay 中继）。状态统一落 .sim 目录（可用环境变量重定向）。
 
-仿真的装配原则：cmd/hub serve 以 -agent-key 启动，同时挂载 AgentGate 与 TeeRelay；Provider Agent 以 -hub、-key、-provider、-targets 拨入；真实 TEE 以 -relay ws://…/v1/relay 出站。三个角色（hub、agent、tee）的 CLI 参数即反向隧道拓扑的可读表达。仿真不要求证明的正确性（simulated 适配器的既定立场：证据字段结构与真实报告一一对应，只换信任根不换代码路径），但业务代码路径与真实 TEE 完全一致。
+仿真的装配原则：cmd/hub serve 以 -agent-keys（per-provider 密钥表）与 -relay-key 启动，同时挂载 AgentGate 与 TeeRelay；Provider Agent 以 -hub、-key（本 provider 的密钥）、-provider、-targets 拨入；真实 TEE 以 -relay ws://…/v1/relay -relay-key 出站。三个角色（hub、agent、tee）的 CLI 参数即反向隧道拓扑的可读表达。仿真不要求证明的正确性（simulated 适配器的既定立场：证据字段结构与真实报告一一对应，只换信任根不换代码路径），但业务代码路径与真实 TEE 完全一致。
 
 harness 场景矩阵覆盖：正常流、策略拒绝、provider 故障（401/429/truncate）、跨重启 ProviderSeq 续增、序列空洞审计、配额、真实 TEE 经反向隧道 + tap 抓包断言（Agent 只见密文、零凭证命中）、Agent 中途被杀优雅失败、epoch 轮换、超尺寸响应截断、连接驻留（N 请求恰一条上游 TCP 连接、断流后作废并重拨）、流模式会话、最低价调度与抽成、Agent 不带 -models 自动发现（经仿真 CA 拉上游 /v1/models）并登记模型目录、买家按精确/子串搜索目录、Hub↔TEE mTLS（TEE 发布 RA-TLS 证书、Hub 钉住且出示客户端身份、错钉/平文均被拒）。三层测试法不变：fake TEE 毫秒级业务测试、真 TEE 进程可信属性测试、接缝测试。一键运行入口为 bash tokenhive/harness/harness.sh；go test ./tokenhive/... 跑单元与跨包测试。
 
@@ -136,7 +136,7 @@ harness 场景矩阵覆盖：正常流、策略拒绝、provider 故障（401/42
 
 TEE 持有的凭证与 TLS 密钥不出 TEE；Agent 只看到密文，LaaS 无从越权读取注入头；JobSpec 无账务字段，TEE 无从泄露 model/tenant；回执的流式摘要 + body_hash 绑定 + ProviderSeq 单调性构成 provider 事后核对凭证未被越权使用的四段证据链（出口一致性、Policy 白名单绑定 attestation、回执签名与字节摘要、凭证用途自证）。
 
-Hub 的 AgentGate 以共享密钥为门，拒斥未持密者的拨入。当前 AgentSecret 是单一全局密钥，注册不绑定 per-provider 身份——任何持此密钥者可冒名注册任意 provider（顶掉该 provider 在线隧道并可能截获其流量）。这与注释声明的「共享密钥是唯一身份凭证」一致，但对贡献者开放前应改为 per-provider 密钥或 Hub 端固定 provider↔key 映射（Upstream 加固项 1）。
+Hub 的 AgentGate 以共享密钥为门，拒斥未持密者的拨入。Gate 现在按 per-provider 密钥表（-agent-keys）校验：每个 provider 只能用自己的密钥拨入，注册因此绑定到该 provider，任何卖家都无法冒名注册他人（顶掉其在线隧道并截获流量）；此前单一全局 AgentSecret 的提权面已被消除。同时 Hub 要求 TEE 以 -relay-key 认证中继拨入，中继不再是开放出口代理。
 
 Hub 的 TeeRelay 依赖网络边界自证（受信的 Hub↔TEE 通道）。任何能连到该端点的调用方凭 provider+host 可开一条到某在线 Agent allowlist 内主机的流；防线目前只有 Agent 的 allowlist。应把 TeeRelay 与其余 Hub↔TEE 通道放在同一 mTLS 之后（Upstream 加固项 2，与既有「生产启用 mTLS」的部署边界一致）。
 
