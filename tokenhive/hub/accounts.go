@@ -461,14 +461,20 @@ func (a *Accounts) Settle(orderID, provider string, buyer, seller, commission ui
 				return a.latch(fmt.Errorf("settle for order %s: tenant %q held %d does not cover hold %d",
 					orderID, order.tenant, buyerAcct.held, order.hold))
 			}
-		} else if buyerAcct.balance < bill {
+		} else if buyerAcct.balance-buyerAcct.held < bill {
 			// This order's hold was released before it was priced, so the
 			// money it reserved may already have been reserved and spent by
 			// another job. That is the known "delivered but unbillable" race,
 			// and it is a refusal rather than a broken ledger: nothing about
 			// the books is inconsistent, the tenant is simply out of money.
-			return refuse(fmt.Errorf("%w: tenant %q balance %d cannot cover buyer %d for the released order %s",
-				ErrInsufficientFunds, order.tenant, buyerAcct.balance, buyer, orderID))
+			//
+			// The check is against the available balance (balance - held),
+			// not the balance itself: the charge leaves held untouched, and a
+			// bill the balance could cover but the available could not would
+			// push held above balance, tripping the accounts CHECK and
+			// latching a ledger that is not actually broken.
+			return refuse(fmt.Errorf("%w: tenant %q has %d available, cannot cover buyer %d for the released order %s",
+				ErrInsufficientFunds, order.tenant, buyerAcct.balance-buyerAcct.held, buyer, orderID))
 		}
 
 		sellerAcct, _, err := getAccount(tx, roleSeller, provider)

@@ -284,6 +284,44 @@ func TestSettleAfterReleaseChargesDirectly(t *testing.T) {
 	}
 }
 
+// TestSettleAfterReleaseRefusesWhenOtherHoldsLeaveNoAvailable is the regression
+// for the charged path's check: a released order's charge leaves the tenant's
+// other holds untouched, so it must be gated on available (balance - held), not
+// on balance. A bill the balance could cover but the available could not used
+// to trip the accounts CHECK and latch the ledger broken; it must refuse the
+// charge and keep the ledger healthy.
+func TestSettleAfterReleaseRefusesWhenOtherHoldsLeaveNoAvailable(t *testing.T) {
+	acc, _ := openTestAccounts(t, map[string]uint64{"alice": 1000})
+
+	if err := acc.Hold(oid("closed"), "alice", 300); err != nil {
+		t.Fatalf("hold the session the watchdog will close: %v", err)
+	}
+	if err := acc.Release(oid("closed")); err != nil {
+		t.Fatalf("release the closed session: %v", err)
+	}
+	for _, id := range []string{"run1", "run2", "run3"} {
+		if err := acc.Hold(oid(id), "alice", 300); err != nil {
+			t.Fatalf("hold %s: %v", id, err)
+		}
+	}
+	// balance 1000, held 900, available 100: a 200 charge on the released
+	// order fits the balance but not the available.
+	if err := acc.Settle(oid("closed"), testProvider, 200, 200, 0); !errors.Is(err, ErrInsufficientFunds) {
+		t.Fatalf("charge on the released order err = %v, want ErrInsufficientFunds (not a broken ledger)", err)
+	}
+	if got := available(t, acc, "alice"); got != 100 {
+		t.Fatalf("a refused charge moved money: available = %d, want 100", got)
+	}
+	// A refusal is not a latch: the ledger keeps taking new holds.
+	if err := acc.Hold(oid("run4"), "alice", 100); err != nil {
+		t.Fatalf("a refused charge latched the ledger: hold after refusal: %v", err)
+	}
+	if err := acc.Release(oid("run4")); err != nil {
+		t.Fatalf("release run4: %v", err)
+	}
+	mustReconcile(t, acc)
+}
+
 func TestReleaseIsIdempotent(t *testing.T) {
 	acc, _ := openTestAccounts(t, map[string]uint64{"alice": testHold})
 	if err := acc.Hold(oid("job"), "alice", testHold); err != nil {
