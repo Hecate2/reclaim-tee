@@ -230,9 +230,11 @@ func (a *Accounts) isEmpty() (bool, error) {
 }
 
 // refusal marks an error as a request the ledger turned down: the books are
-// untouched and the ledger stays healthy, so the Hub keeps serving. The
-// transaction is rolled back either way; the difference is what it says about
-// the ledger's ability to keep booking charges.
+// untouched and the ledger stays healthy, so the Hub keeps serving. It is the
+// opposite of latch, and it applies whether the request was refused before a
+// transaction was opened or inside one (where the deferred rollback undoes the
+// work). What the two shapes share is the answer they give about the ledger's
+// ability to keep booking charges.
 type refusal struct{ err error }
 
 func (r refusal) Error() string { return r.err.Error() }
@@ -659,48 +661,6 @@ func (a *Accounts) Reconcile() (ReconcileReport, error) {
 			a.path, report.Booked, report.Recorded, report.Funded)
 	}
 	return report, nil
-}
-
-// seed writes the first-boot balances. It runs only on an empty ledger, and it
-// records them as funding, so the conserved quantity starts from what was
-// actually put in rather than from nothing.
-func (a *Accounts) seed(seeds map[string]uint64) error {
-	if len(seeds) == 0 {
-		return nil
-	}
-	// Validate everything before booking anything: a typo must not leave a
-	// tenant partially funded.
-	for tenant, amount := range seeds {
-		if tenant == "" {
-			return errors.New("accounts seed with empty tenant name")
-		}
-		if amount == 0 {
-			return fmt.Errorf("accounts seed for tenant %q is zero, which would fund nothing", tenant)
-		}
-	}
-	return a.write(func(tx *sql.Tx) error {
-		now := nowMicros()
-		for tenant, amount := range seeds {
-			micros, err := toMicros(amount)
-			if err != nil {
-				return err
-			}
-			if _, err := tx.Exec(`INSERT INTO accounts (role, name, balance, held) VALUES (?, ?, ?, 0)
-				ON CONFLICT (role, name) DO UPDATE SET balance = balance + excluded.balance`,
-				roleBuyer, tenant, micros); err != nil {
-				return fmt.Errorf("seed tenant %q: %w", tenant, err)
-			}
-			// One statement, so the conservation CHECK never sees the two
-			// sides of the identity disagree.
-			if _, err := tx.Exec(`UPDATE ledger_state SET booked = booked + ?, funded = funded + ? WHERE id = 1`, micros, micros); err != nil {
-				return fmt.Errorf("seed tenant %q: %w", tenant, err)
-			}
-			if err := insertJournal(tx, journalEntry{kind: kindSeed, tx: tenant, tenant: tenant, funded: micros, at: now}); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
 }
 
 // releaseOrphans releases every hold left frozen by a previous process. A hold
