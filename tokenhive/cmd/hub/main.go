@@ -14,9 +14,12 @@
 //	-drop N       withhold the receipt carrying ProviderSeq N from the store
 //	              (simulates a Hub that hides a record from the provider)
 //	-quota N      cap a tenant at N requests per -window (0 = unlimited)
-//	-accounts PATH  prepaid balance file (JSON); required in serve mode
+//	-accounts PATH  ledger database (SQLite); buyer, seller and platform
+//	              balances; required in serve mode
+//	-ledger-sync  full|normal|off  how hard a committed charge is made
+//	              (default full = fsync; off is simulation only)
 //	-tenant-deposits T=M  seed tenant T's balance at M micro-units, applied
-//	              only when the accounts file is created by this start
+//	              only when the ledger is created by this start
 //	-tenant-inflight N   cap a tenant at N concurrent jobs (0 = unlimited)
 package main
 
@@ -77,8 +80,9 @@ func main() {
 	agentKeys := flag.String("agent-keys", "", "per-provider agent keys as provider=key[,provider=key]; binds each tunnel to exactly one provider (required in serve mode)")
 	relayKey := flag.String("relay-key", "", "key the TEE must present to dial /v1/relay (empty = unauthenticated relay)")
 	tenantKeys := flag.String("tenant-keys", "", "user api keys as key=tenant[,key=tenant]; the key is verified and resolves to its tenant (empty = open mode: the presented key is the tenant)")
-	accountsPath := flag.String("accounts", "", "prepaid balance file (JSON); every job holds its per-job ceiling against the tenant's balance and the file is rewritten (fsync + rename) on every settled charge; required in serve mode")
-	tenantDeposits := flag.String("tenant-deposits", "", "seed balances in micro-units as tenant=micros[,tenant=micros]; applied only when -accounts does not exist yet, so a restart never re-funds a drained tenant (top up by editing the file while the hub is stopped)")
+	accountsPath := flag.String("accounts", "", "ledger database file (SQLite): buyer prepaid balances, seller payables and the Hub's commission; every job holds its per-job ceiling against the buyer's balance and the charge is committed in one transaction; required in serve mode")
+	tenantDeposits := flag.String("tenant-deposits", "", "seed buyer balances in micro-units as tenant=micros[,tenant=micros]; applied only when the ledger is empty (first creation), so a restart never re-funds a drained tenant")
+	ledgerSync := flag.String("ledger-sync", string(hub.SyncFull), "how hard a committed charge is made: full (fsync every commit), normal (survives a process crash) or off (simulation only, refused in serve mode)")
 	tenantInflight := flag.Int("tenant-inflight", defaultTenantInflight, "how many jobs one tenant may run at once; keeps one buyer from occupying every connection a shared provider has (0 = unlimited)")
 	credential := flag.String("credential", "", "provider access token to register with the TEE before the request loop (simulation one-shot mode: the CLI holds the seller's token and delivers it sealed to -tee, as a dialing agent would through a resident Hub)")
 	audit := flag.Bool("audit", false, "audit the receipt store for gaps and verify signatures")
@@ -121,13 +125,17 @@ func main() {
 	}
 	var accounts *hub.Accounts
 	if *accountsPath != "" {
-		acc, fresh, err := hub.OpenAccounts(*accountsPath, deposits)
+		acc, fresh, err := hub.OpenAccounts(*accountsPath, deposits, hub.WithSync(hub.SyncMode(*ledgerSync)))
 		if err != nil {
 			log.Fatalf("accounts: %v", err)
 		}
+		defer func() { _ = acc.Close() }()
 		accounts = acc
 		if !fresh && len(deposits) > 0 {
-			log.Printf("accounts file %s already exists; -tenant-deposits ignored (balances are on disk)", *accountsPath)
+			log.Printf("ledger %s already has history; -tenant-deposits ignored (balances are on disk)", *accountsPath)
+		}
+		if *ledgerSync != string(hub.SyncFull) {
+			log.Printf("ledger %s runs with synchronous=%s: committed charges may not survive a power cut", *accountsPath, *ledgerSync)
 		}
 	}
 
@@ -176,11 +184,12 @@ func main() {
 
 	// Resident user-facing mode: one OpenAI-compatible HTTP endpoint that routes
 	// by model through the lowest-price scheduler. Serving refuses to start
-	// without the agent gate (per-provider keys), the TEE relay key, and the
-	// prepaid balance file with a per-job ceiling: a Hub exposed to the network
-	// with any of those missing either lets unauthenticated traffic through or
-	// serves buyers with no money for free.
-	if err := requireServeKeys(*serveAddr, *agentKeys, *relayKey, accounts, *maxJob); err != nil {
+	// without the agent gate (per-provider keys), the TEE relay key, the ledger
+	// with a per-job ceiling, and a durability setting real money may run on: a
+	// Hub exposed to the network with any of those missing either lets
+	// unauthenticated traffic through, serves buyers with no money for free, or
+	// loses charges it already told a buyer and a seller were booked.
+	if err := requireServeKeys(*serveAddr, *agentKeys, *relayKey, accounts, *maxJob, hub.SyncMode(*ledgerSync)); err != nil {
 		log.Fatal(err)
 	}
 	if *serveAddr != "" {
@@ -223,7 +232,7 @@ func main() {
 // without billing a buyer with an empty balance is served for free — the
 // exact failure prepaid mode exists to close. In CLI one-shot mode (no
 // -serve) nothing is exposed, so none of this is required.
-func requireServeKeys(serveAddr, agentKeys, relayKey string, accounts *hub.Accounts, maxJob uint64) error {
+func requireServeKeys(serveAddr, agentKeys, relayKey string, accounts *hub.Accounts, maxJob uint64, sync hub.SyncMode) error {
 	if serveAddr == "" {
 		return nil
 	}
@@ -234,10 +243,13 @@ func requireServeKeys(serveAddr, agentKeys, relayKey string, accounts *hub.Accou
 		return errors.New("serve mode requires -relay-key (TEE relay authentication)")
 	}
 	if accounts == nil {
-		return errors.New("serve mode requires -accounts (prepaid balance file): without it a tenant with no money is served anyway")
+		return errors.New("serve mode requires -accounts (the SQLite ledger): without it a tenant with no money is served anyway")
 	}
 	if maxJob == 0 {
 		return errors.New("serve mode requires -max-job-micros > 0: the prepaid hold is sized by the per-job ceiling")
+	}
+	if sync == hub.SyncOff {
+		return errors.New("serve mode refuses -ledger-sync off: a committed charge must reach the disk before it is served")
 	}
 	return nil
 }

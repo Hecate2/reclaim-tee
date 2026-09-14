@@ -1,10 +1,31 @@
 package hub
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"sync"
+
+	"github.com/reclaimprotocol/reclaim-tee/tokenhive/jobs"
 )
+
+// newJobID mints the identifier of one job: the value the TEE signs into the
+// receipt, and — through orderIDFor — the transaction id of the charge the job
+// may become.
+func newJobID() ([]byte, error) {
+	jobID := make([]byte, jobs.JobIDLength)
+	if _, err := rand.Read(jobID); err != nil {
+		return nil, fmt.Errorf("mint job id: %w", err)
+	}
+	return jobID, nil
+}
+
+// orderIDFor is the ledger's name for one job: the hex of the job id the Hub
+// minted before dispatch. It is what the buyer's charge, the seller's payable
+// and the provider's receipt all name, so quoting it answers "was this job
+// billed?" — and booking it twice is refused.
+func orderIDFor(jobID []byte) string { return hex.EncodeToString(jobID) }
 
 // ErrTooManyInflight means the tenant already has as many jobs running as the
 // Hub will run for it at the same time.
@@ -136,12 +157,22 @@ func (f *flightLimiter) active(tenant string) int {
 // hold is taken before the quota for the same reason the cumulative spend
 // cap it replaced was checked first: a tenant with no money is going to be refused either
 // way, and it must not also burn a rate-limit slot.
-func (h *Hub) beginJob(tenant string) (*jobSpend, error) {
+//
+// jobID names the job, and with it the ledger order the admission opens: the
+// hold and the charge that may follow are both keyed by it, so the money path
+// is idempotent by construction (see Accounts.Hold).
+func (h *Hub) beginJob(tenant string, jobID []byte) (*jobSpend, error) {
 	if !h.flight.acquire(tenant) {
 		return nil, fmt.Errorf("%w: tenant %q", ErrTooManyInflight, tenant)
 	}
+	orderID := ""
 	if h.accounts != nil {
-		if err := h.accounts.Hold(tenant, h.maxJob); err != nil {
+		if len(jobID) != jobs.JobIDLength {
+			h.flight.release(tenant)
+			return nil, fmt.Errorf("job id of %d bytes cannot name a ledger order (want %d)", len(jobID), jobs.JobIDLength)
+		}
+		orderID = orderIDFor(jobID)
+		if err := h.accounts.Hold(orderID, tenant, h.maxJob); err != nil {
 			h.flight.release(tenant)
 			return nil, err
 		}
@@ -149,7 +180,10 @@ func (h *Hub) beginJob(tenant string) (*jobSpend, error) {
 	if err := h.admitTenant(tenant); err != nil {
 		h.flight.release(tenant)
 		if h.accounts != nil {
-			h.accounts.ReleaseHold(tenant, h.maxJob)
+			// The job never ran, so its reservation goes back. A release that
+			// cannot be booked leaves the hold on disk, where the next start
+			// sweeps it up; either way the tenant is not out of pocket.
+			_ = h.accounts.Release(orderID)
 		}
 		return nil, err
 	}
@@ -157,6 +191,7 @@ func (h *Hub) beginJob(tenant string) (*jobSpend, error) {
 		accounts:     h.accounts,
 		flight:       h.flight,
 		tenant:       tenant,
+		orderID:      orderID,
 		hold:         h.maxJob,
 		holdActive:   h.accounts != nil,
 		flightActive: true,
@@ -175,6 +210,7 @@ type jobSpend struct {
 	accounts *Accounts
 	flight   *flightLimiter
 	tenant   string
+	orderID  string
 	hold     uint64
 
 	mu           sync.Mutex
@@ -182,26 +218,28 @@ type jobSpend struct {
 	flightActive bool
 }
 
-// settle converts the job's hold into the buyer's charge and credits the
-// seller and the platform with the same split (or, when the hold was already
-// released, bills the buyer directly). All three movements are one persisted
-// state inside Accounts, so a crash can never debit the buyer without paying
-// the seller. Persistence failures are accounted fail-closed inside Accounts;
-// the delivery already happened, so there is nothing the caller could roll
-// back.
-func (s *jobSpend) settle(provider string, buyer, seller, commission uint64) {
+// settle books the job's charge: the ledger converts the order's hold into the
+// buyer's bill and credits the seller and the platform with the same split
+// (or, when the hold was already released, bills the buyer directly — the
+// order's own state decides). All of it is one transaction, so a crash can
+// never debit the buyer without paying the seller. The returned error is the
+// ledger's: replaying a charge the order already booked is a no-op (nil),
+// contradicting what it booked is ErrOrderConflict, and a ledger that cannot
+// commit is ErrAccountsBroken. The delivery already happened, so the caller's
+// only move is to report it; the charge itself is not lost, because the order
+// id makes retrying it safe.
+func (s *jobSpend) settle(provider string, buyer, seller, commission uint64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if s.accounts == nil {
-		return
+		return nil
 	}
-	if s.holdActive {
-		s.holdActive = false
-		_ = s.accounts.Settle(s.tenant, s.hold, buyer, provider, seller, commission)
-		return
-	}
-	_ = s.accounts.Charge(s.tenant, buyer, provider, seller, commission)
+	// The hold is consumed by whichever comes first, settle or release, and
+	// the ledger's order state is the record of which. Dropping the flag here
+	// is what keeps release from calling into the ledger after a settle.
+	s.holdActive = false
+	return s.accounts.Settle(s.orderID, provider, buyer, seller, commission)
 }
 
 // release gives back the in-flight slot and any hold not yet settled. It is
@@ -217,7 +255,11 @@ func (s *jobSpend) release() {
 	}
 	if s.accounts != nil && s.holdActive {
 		s.holdActive = false
-		s.accounts.ReleaseHold(s.tenant, s.hold)
+		// Called from a defer and from Close, so it cannot report. The ledger
+		// is where the hold lives: one that cannot be released here is
+		// released by the next start, and until then it only keeps the tenant
+		// from spending the same money twice.
+		_ = s.accounts.Release(s.orderID)
 	}
 }
 

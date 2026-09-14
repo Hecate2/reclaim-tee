@@ -404,7 +404,7 @@ func modelsHandler(h *hub.Hub) http.HandlerFunc {
 // exhaustion and an exceeded in-flight share are both 429 (the request was
 // fine, the tenant is already asking for as much as it may), an exhausted
 // prepaid balance is a 402 (refusing on price is not the same complaint as
-// refusing on rate), and a balance file that stopped persisting is a 503
+// refusing on rate), and a ledger that stopped committing is a 503
 // (the Hub is fail-closed on its own bookkeeping, not the caller's fault);
 // anything else is a 502 upstream failure.
 func apiErrorStatus(err error) int {

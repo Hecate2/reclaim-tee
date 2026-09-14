@@ -97,8 +97,9 @@ type Config struct {
 	// stop a credential being drained should not be on unless asked for.
 	Quota *Quota
 
-	// Accounts holds each tenant's prepaid balance, backed by the balance
-	// file the caller opened (see OpenAccounts). Nil disables billing
+	// Accounts is the durable money ledger the caller opened (see
+	// OpenAccounts): each buyer's prepaid balance, each seller's payable and
+	// the Hub's own commission, in one SQLite database. Nil disables billing
 	// entirely — the deliberate opt-out for one-shot CLI use, the same shape
 	// as a nil Quota. A Hub exposed to buyers must not pass nil: without
 	// accounts a buyer with no money is served for free. Enabling accounts
@@ -436,7 +437,7 @@ type Outcome struct {
 // never kept (a retry is a fresh purchase, not a double charge).
 func (h *Hub) Execute(ctx context.Context, tenant, model string, spec jobs.Spec, body []byte,
 	onChunk func([]byte) error, onStart ...func(tee.Response)) (Outcome, error) {
-	spend, err := h.beginJob(tenant)
+	spend, err := h.beginJob(tenant, spec.JobID)
 	if err != nil {
 		return Outcome{}, err
 	}
@@ -534,13 +535,15 @@ func (h *Hub) Execute(ctx context.Context, tenant, model string, spec jobs.Spec,
 		// stored, so the provider can prove the gap. The normal path stores
 		// before settling; this path skips the store deliberately, not because
 		// it failed.
-		if !h.claimSettlement(res.Receipt.Receipt.JobID) {
+		if !h.claimSettlement(spec.JobID) {
 			return Outcome{Receipt: res.Receipt, Chunks: res.Chunks, StatusCode: res.Status, Charged: charged, Commission: commission, Buyer: buyer},
-				fmt.Errorf("%w: job %x", ErrDuplicateSettlement, res.Receipt.Receipt.JobID)
+				fmt.Errorf("%w: job %x", ErrDuplicateSettlement, spec.JobID)
+		}
+		if err := spend.settle(spec.Provider, buyer, charged, commission); err != nil {
+			return Outcome{Receipt: res.Receipt, Chunks: res.Chunks, StatusCode: res.Status, Charged: charged, Commission: commission, Buyer: buyer}, err
 		}
 		h.ledger.NoteSettled(spec.Provider, charged)
 		h.ledger.NoteCommission(spec.Provider, commission)
-		spend.settle(spec.Provider, buyer, charged, commission)
 		return Outcome{Receipt: res.Receipt, Chunks: res.Chunks, StatusCode: res.Status, Charged: charged, Commission: commission, Buyer: buyer}, nil
 	}
 	if err := h.store.Put(spec.Provider, res.Receipt); err != nil {
@@ -552,16 +555,19 @@ func (h *Hub) Execute(ctx context.Context, tenant, model string, spec jobs.Spec,
 			fmt.Errorf("store receipt: %w", err)
 	}
 	// Store first, then settle: the provider's audit record is durable before
-	// money books. The balance file is persisted before the in-memory balance
-	// moves, and a failed persist marks accounting broken (refusing new jobs)
-	// rather than silently unwriting a charge whose service was delivered.
-	if !h.claimSettlement(res.Receipt.Receipt.JobID) {
+	// money books. The settlement is one transaction, and a ledger that cannot
+	// commit marks itself broken (refusing new jobs) rather than pretend the
+	// charge landed: the service was delivered either way, and the order id is
+	// what makes retrying the charge safe.
+	if !h.claimSettlement(spec.JobID) {
 		return Outcome{Receipt: res.Receipt, Chunks: res.Chunks, StatusCode: res.Status, Charged: charged, Commission: commission, Buyer: buyer, Stored: true},
-			fmt.Errorf("%w: job %x", ErrDuplicateSettlement, res.Receipt.Receipt.JobID)
+			fmt.Errorf("%w: job %x", ErrDuplicateSettlement, spec.JobID)
+	}
+	if err := spend.settle(spec.Provider, buyer, charged, commission); err != nil {
+		return Outcome{Receipt: res.Receipt, Chunks: res.Chunks, StatusCode: res.Status, Charged: charged, Commission: commission, Buyer: buyer, Stored: true}, err
 	}
 	h.ledger.NoteSettled(spec.Provider, charged)
 	h.ledger.NoteCommission(spec.Provider, commission)
-	spend.settle(spec.Provider, buyer, charged, commission)
 	return Outcome{Receipt: res.Receipt, Chunks: res.Chunks, StatusCode: res.Status, Charged: charged, Commission: commission, Buyer: buyer, Stored: true}, nil
 }
 
@@ -570,11 +576,20 @@ func (h *Hub) Execute(ctx context.Context, tenant, model string, spec jobs.Spec,
 // settlement across a reset is no more plausible than a colliding JobID.
 const maxSettledJobs = 1 << 18
 
-// claimSettlement records that a job's receipt is being settled, returning
-// false when the same JobID was already settled by this Hub. It is the
-// defensive half of "one JobID settles exactly once": the TEE signs each job
-// once, so a second settlement of the same JobID is a broken caller or a
-// double-charge attempt, and the Hub refuses to book it twice.
+// claimSettlement records that a job is being settled, returning false when
+// the same job was already settled by this Hub.
+//
+// It is the cheap half of "one job settles exactly once": it refuses the
+// replay in memory, before the money path is entered at all. The ledger is the
+// authoritative half — its order id refuses the same charge durably, across a
+// restart and across this table's reset — so this is the fast path, not the
+// guarantee.
+//
+// The key is the job id the Hub minted (spec.JobID), which is also the ledger's
+// order id: both layers must name the same thing, or the in-memory refusal and
+// the durable one would disagree about what "the same job" is. In production
+// the TEE signs that same id into the receipt, so the receipt, the charge and
+// the order all name one job.
 func (h *Hub) claimSettlement(jobID []byte) bool {
 	h.settledMu.Lock()
 	defer h.settledMu.Unlock()

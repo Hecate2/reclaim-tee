@@ -227,7 +227,7 @@ HUB_WS="ws://127.0.0.1:18085"   # user-facing Hub (scenarios 15-17)
 echo "==> starting reverse-tunnel Hub on :$RT_HUB_PORT (agent gate /v1/agent, tee relay /v1/relay)"
 "$BIN/hub" -serve "127.0.0.1:$RT_HUB_PORT" -host "127.0.0.1:$MP_PORT" \
   -tee "http://127.0.0.1:$TEE_PORT" -agent-keys "$AGENT_KEYS" -relay-key "$RELAY_SECRET" \
-  -accounts "$SIM/accounts-rt.json" -max-job-micros 1000000 > "$SIM/hub-rt.log" 2>&1 &
+  -accounts "$SIM/ledger-rt.db" -max-job-micros 1000000 > "$SIM/hub-rt.log" 2>&1 &
 RT_HUB_PID=$!
 wait_for_port 127.0.0.1 "$RT_HUB_PORT"
 
@@ -464,7 +464,7 @@ echo "    starting the user-facing Hub on :$HUB_API_PORT (10% commission, agent-
 "$BIN/hub" -serve "127.0.0.1:$HUB_API_PORT" -host "127.0.0.1:$MP_PORT" \
   -tee "http://127.0.0.1:$TEE_D" -commission 1000 -agent-keys "$AGENT_KEYS" \
   -relay-key "$RELAY_SECRET" \
-  -accounts "$SIM/accounts-t15.json" -max-job-micros 1000000 \
+  -accounts "$SIM/ledger-t15.db" -max-job-micros 1000000 \
   -tenant-deposits "tenant-t15=5000000,tenant-t15-low=500000" \
   > "$SIM/hub-serve.log" 2>&1 &
 HUB_API_PID=$!
@@ -545,15 +545,16 @@ else
   echo "      !! FAIL: prepaid refusals wrong (nobody=$code_nobody low=$code_low, want 402/402)"
 fi
 
-echo "    assertion: the balance file on disk reflects the settled charges and the seller/platform split:"
-if python3 - "$SIM/accounts-t15.json" <<'PY'
-import json, sys
-doc = json.load(open(sys.argv[1]))
-tenants = doc["tenants"]
+echo "    assertion: the ledger on disk reflects the settled charges and the seller/platform split:"
+if python3 - "$SIM/ledger-t15.db" <<'PY'
+import sqlite3, sys
+con = sqlite3.connect(sys.argv[1])
+tenants = dict(con.execute("SELECT name, balance FROM accounts WHERE role='buyer'"))
+sellers = dict(con.execute("SELECT name, balance FROM accounts WHERE role='seller'"))
+platform = con.execute("SELECT balance FROM accounts WHERE role='platform'").fetchone()
+platform = platform[0] if platform else 0
 rich = tenants.get("tenant-t15")
 low = tenants.get("tenant-t15-low")
-sellers = doc.get("sellers", {})
-platform = doc.get("platform", 0)
 want = 5000000 - 3 * 330000
 ok = True
 if rich != want:
@@ -561,7 +562,7 @@ if rich != want:
 if low != 500000:
     print(f"      !! tenant-t15-low balance = {low}, want 500000 (refusal must not move money)"); ok = False
 if "tenant-nobody" in tenants:
-    print("      !! a refused unfunded tenant must not appear in the balance file"); ok = False
+    print("      !! a refused unfunded tenant must not appear in the ledger"); ok = False
 # Every settled job moves the buyer's bill (0.33) onto cheap-sim's payable (0.30)
 # and the Hub's commission (0.03); 0.30 + 0.03 == 0.33 is the conserved split.
 if sellers.get("cheap-sim") != 3 * 300000:
@@ -574,14 +575,42 @@ if ok:
     print(f"      OK: tenant-t15 balance {rich}, cheap-sim payable {sellers.get('cheap-sim')}, platform {platform} on disk after three settled jobs")
 sys.exit(0 if ok else 1)
 PY
-then :; else echo "      !! FAIL: balance file wrong (see above)"; fi
+then :; else echo "      !! FAIL: ledger wrong (see above)"; fi
 
-echo "    restarting the hub on the same balance file (seeds must not re-apply):"
+echo "    assertion: the ledger conserves, and no order was left holding money:"
+if python3 - "$SIM/ledger-t15.db" <<'PY'
+import sqlite3, sys
+con = sqlite3.connect(sys.argv[1])
+q = lambda sql: con.execute(sql).fetchone()[0]
+booked = q("SELECT COALESCE(SUM(balance), 0) FROM accounts")
+recorded = q("SELECT booked FROM ledger_state WHERE id = 1")
+funded = q("SELECT COALESCE(SUM(funded), 0) FROM journal")
+held = q("SELECT COALESCE(SUM(held), 0) FROM accounts")
+open_orders = q("SELECT COUNT(*) FROM orders WHERE state = 'held'")
+settled = q("SELECT COUNT(*) FROM orders WHERE state = 'settled'")
+# Exactly the two seeded tenants; the third refusal created nothing.
+accounts = q("SELECT COUNT(*) FROM accounts")
+ok = True
+if not (booked == recorded == funded):
+    print(f"      !! ledger does not conserve: balances {booked}, recorded {recorded}, funded {funded}"); ok = False
+if held != 0 or open_orders != 0:
+    print(f"      !! money left frozen: held {held}, open orders {open_orders}"); ok = False
+if settled != 3:
+    print(f"      !! settled orders = {settled}, want 3 (one transaction per job)"); ok = False
+if accounts != 4:
+    print(f"      !! accounts = {accounts}, want 4 (two seeded buyers, one seller, one platform)"); ok = False
+if ok:
+    print(f"      OK: {booked} booked = recorded = funded, {settled} settled orders, nothing held")
+sys.exit(0 if ok else 1)
+PY
+then :; else echo "      !! FAIL: ledger invariants broken (see above)"; fi
+
+echo "    restarting the hub on the same ledger (seeds must not re-apply):"
 kill "$TEE_D_PID" "$HUB_API_PID" 2>/dev/null; wait "$TEE_D_PID" "$HUB_API_PID" 2>/dev/null
 "$BIN/hub" -serve "127.0.0.1:$HUB_API_PORT" -host "127.0.0.1:$MP_PORT" \
   -tee "http://127.0.0.1:$TEE_D" -commission 1000 -agent-keys "$AGENT_KEYS" \
   -relay-key "$RELAY_SECRET" \
-  -accounts "$SIM/accounts-t15.json" -max-job-micros 1000000 \
+  -accounts "$SIM/ledger-t15.db" -max-job-micros 1000000 \
   -tenant-deposits "tenant-t15=5000000,tenant-t15-low=500000" \
   > "$SIM/hub-serve.log" 2>&1 &
 HUB_API_PID=$!
@@ -593,12 +622,14 @@ wait_for_port 127.0.0.1 "$TEE_D"
 wait_for_cheapest "$HUB_API_PORT" cheap-sim
 
 echo "    assertion: balance, seller payables and commission survived the restart on disk (no re-seed, no memory):"
-if python3 - "$SIM/accounts-t15.json" <<'PY'
-import json, sys
-doc = json.load(open(sys.argv[1]))
-rich = doc["tenants"].get("tenant-t15")
-sellers = doc.get("sellers", {})
-platform = doc.get("platform", 0)
+if python3 - "$SIM/ledger-t15.db" <<'PY'
+import sqlite3, sys
+con = sqlite3.connect(sys.argv[1])
+tenants = dict(con.execute("SELECT name, balance FROM accounts WHERE role='buyer'"))
+sellers = dict(con.execute("SELECT name, balance FROM accounts WHERE role='seller'"))
+platform = con.execute("SELECT balance FROM accounts WHERE role='platform'").fetchone()
+platform = platform[0] if platform else 0
+rich = tenants.get("tenant-t15")
 want = 5000000 - 3 * 330000
 ok = True
 if rich != want:
@@ -618,12 +649,14 @@ curl -s --noproxy '*' -X POST "http://127.0.0.1:$HUB_API_PORT/v1/chat/completion
   -H 'Content-Type: application/json' -H 'X-TokenHive-Key: tenant-t15' \
   -d '{"model":"sim-mock-0.5b","messages":[{"role":"user","content":"hi"}],"stream":true}' \
   > "$SIM/user-api-4.out" 2>&1
-if python3 - "$SIM/accounts-t15.json" <<'PY'
-import json, sys
-doc = json.load(open(sys.argv[1]))
-rich = doc["tenants"].get("tenant-t15")
-sellers = doc.get("sellers", {})
-platform = doc.get("platform", 0)
+if python3 - "$SIM/ledger-t15.db" <<'PY'
+import sqlite3, sys
+con = sqlite3.connect(sys.argv[1])
+tenants = dict(con.execute("SELECT name, balance FROM accounts WHERE role='buyer'"))
+sellers = dict(con.execute("SELECT name, balance FROM accounts WHERE role='seller'"))
+platform = con.execute("SELECT balance FROM accounts WHERE role='platform'").fetchone()
+platform = platform[0] if platform else 0
+rich = tenants.get("tenant-t15")
 ok = True
 if rich != 5000000 - 4 * 330000:
     print(f"      !! tenant-t15 balance after the fourth job = {rich}, want {5000000 - 4 * 330000}"); ok = False
@@ -665,7 +698,7 @@ rm -rf "$SIM/receipts"
 "$BIN/hub" -serve "127.0.0.1:$HUB_API_PORT" -host "127.0.0.1:$MP_PORT" \
   -tee "http://127.0.0.1:$TEE_D" -agent-keys "$AGENT_KEYS" \
   -relay-key "$RELAY_SECRET" \
-  -accounts "$SIM/accounts-t16.json" -max-job-micros 1000000 \
+  -accounts "$SIM/ledger-t16.db" -max-job-micros 1000000 \
   -tenant-deposits "tenant-t16=5000000" \
   > "$SIM/hub-serve16.log" 2>&1 &
 HUB_API16_PID=$!
@@ -809,7 +842,7 @@ rm -rf "$SIM/receipts"
   -tee "http://127.0.0.1:$TEE_G" -commission 1000 \
   -session-timeout 30s -session-max 1048576 -session-idle 5s \
   -agent-keys "$AGENT_KEYS" -relay-key "$RELAY_SECRET" \
-  -accounts "$SIM/accounts-t17.json" -max-job-micros 1000000 \
+  -accounts "$SIM/ledger-t17.db" -max-job-micros 1000000 \
   -tenant-deposits "tenant-t17=5000000" > "$SIM/hub-serve17.log" 2>&1 &
 HUB_API17_PID=$!
 wait_for_port 127.0.0.1 "$HUB_API_PORT"
