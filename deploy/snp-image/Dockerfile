@@ -18,6 +18,12 @@ COPY --from=apt-tls /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certifi
 ENV DEBIAN_FRONTEND=noninteractive
 
 ARG APT_SNAPSHOT=20260821T133530Z
+# APT source for the two-tier image build: "snapshot" reproduces an immutable
+# Ubuntu snapshot (default, deterministic base); "aliyun" uses the live Aliyun
+# mirror (CN-friendly fallback when snapshot.ubuntu.com is blocked or flaky via
+# a local proxy). Only the diagnostic base digest changes — the trust root (R)
+# and the app bundle digest are unaffected.
+ARG APT_MIRROR=snapshot
 
 # Cloud-specific kernel: linux-image-gcp or linux-image-aws. Each ships a few
 # non-builtin modules the loader bundles+inserts (gve on GCP, sev-guest on AWS).
@@ -35,10 +41,17 @@ ARG CPIO_VER=2.15+dfsg-1ubuntu2
 ARG BINUTILS_VER=2.42-4ubuntu2.10
 ARG SBSIGNTOOL_VER=0.9.4-3.1ubuntu7
 ARG EFITOOLS_VER=1.9.2-3ubuntu3
-RUN sed -i \
-        -e "s#http://archive.ubuntu.com/ubuntu/#https://snapshot.ubuntu.com/ubuntu/${APT_SNAPSHOT}/#" \
-        -e "s#http://security.ubuntu.com/ubuntu/#https://snapshot.ubuntu.com/ubuntu/${APT_SNAPSHOT}/#" \
-        /etc/apt/sources.list.d/ubuntu.sources \
+RUN if [ "${APT_MIRROR}" = "aliyun" ]; then \
+        sed -i \
+          -e "s#http://archive.ubuntu.com/ubuntu/#https://mirrors.aliyun.com/ubuntu/#" \
+          -e "s#http://security.ubuntu.com/ubuntu/#https://mirrors.aliyun.com/ubuntu/#" \
+          /etc/apt/sources.list.d/ubuntu.sources; \
+    else \
+        sed -i \
+          -e "s#http://archive.ubuntu.com/ubuntu/#https://snapshot.ubuntu.com/ubuntu/${APT_SNAPSHOT}/#" \
+          -e "s#http://security.ubuntu.com/ubuntu/#https://snapshot.ubuntu.com/ubuntu/${APT_SNAPSHOT}/#" \
+          /etc/apt/sources.list.d/ubuntu.sources; \
+    fi \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
         "systemd=${SYSTEMD_VER}" \
