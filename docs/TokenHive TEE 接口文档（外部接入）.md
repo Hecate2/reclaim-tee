@@ -1,6 +1,6 @@
 # TokenHive TEE 接口文档（外部接入）
 
-版本：2026-09-04
+版本：2026-09-16
 
 本文档面向**外部公司/团队接入 TokenHive TEE**：说明 TEE 暴露了哪些接口、线上字节格式、回执如何验签、凭证如何被约束，以及接入时必须做对的校验。所有字段、键号、错误语义均以代码实现为准。
 
@@ -321,8 +321,9 @@ SignedReceipt = {
 
 ### 7.1 谁定义、如何生效
 
-- Policy 是 **Hub 预定义的白名单**，随 TEE **部署配置**加载（`policy.Set.Install / InstallAll`）。Provider 无需参与签名或轮换。
-- 完整性由**证明**背书：TEE 启动时计算整个 Policy 集合的哈希（`policy.Set.Hash()`），并把它绑进 attestation（仿真落在证据的 `policy_set_hash` 字段；真实 SEV-SNP 中 Policy 随镜像/受保护配置一起被 measurement 覆盖）。因此**改动任何一个白名单条目都会改变这个哈希**，验证方可据此判断飞地装的是不是预期那份白名单。
+- Policy 是 **Hub 侧以策略目录形式定义、随 TEE 被测 bundle 一起打包加载的白名单**（本地仿真从 `TOKENHIVE_SIM_DIR` 读取；AWS SEV-SNP 上由 `pack.sh` 通过 `SNP_POLICY_DIR` 目录烤进被测 bundle 的 `./policy/`，tee 以 `-policy-dir` 指向该目录；内部加载仍是 `policy.Set`）。Provider 无需参与签名或轮换。
+- 完整性由**证明**背书：TEE 启动时计算整个 Policy 集合的哈希（`policy.Set.Hash()`），并把它绑进 attestation（仿真落在证据的 `policy_set_hash` 字段；AWS 上策略目录作为被测 bundle 的一部分被 SNP_APP_HASH 一并测量）。因此**改动任何一个白名单条目都会改变这个哈希**，验证方可据此判断飞地装的是不是预期那份白名单；由于策略字节进入了被测 bundle，**轮换白名单会改变应用测量指纹（`snp-app:<hash>`）**，而不是在运行期静默放宽 TEE 接受的边界。
+- 查询：买家/卖家可先调 Hub 的 `GET /v1/policies`（第 12 章）核对本次部署实际接受的白名单及其集合哈希，无需直接问 TEE。
 
 ### 7.2 Policy 字段
 
@@ -505,6 +506,7 @@ hub -audit -provider openai-sim   # 只看一个 Provider
 - 长会话：Hub 另有用户面 WebSocket 端点 **`GET /v1/session`**（模型取自首帧 JSON）。它与 TEE 侧同路径端点（第 5 章）**不是同一个**——前者面向终端用户，后者是 Hub↔TEE 内部面。接入方务必确认打的是 TEE 的 `/v1/session`。
 - 请求体中的 `model` 字段决定走哪个 Provider（最低价优先）；身份为 `X-TokenHive-Key` 头（v1 占位，非最终鉴权方案）。
 - **模型目录**：`GET /v1/models` 列出当前**在线** Agent 声明的全部模型及其最低在线价（即调度器此刻会实际派发的价格），响应为 `{"models":[{"model","provider","price_micros"}, …]}`。可选 `?q=<子串>` 做大小写不敏感过滤：精确 ID（`?q=claude-sim-haiku`）与片段（`?q=deepseek` 命中 `deepseek-pro` 与 `deepseek-flash`）都可搜。目录完全由 Hub 内存中的在线供应算出，**不触发任何对 Agent 或上游的探测**；未配 Agent 门的 Hub 返回空目录。
+- **策略白名单**：`GET /v1/policies` 输出 Hub 侧加载的**部署白名单**（与被测 bundle 携带的策略文件同源），买家/卖家可在发起调用前核对 TEE 允许访问的源头 AI 服务商范围，无需去问 TEE。响应为 `{"policy_set_hash":"<hex>","policies":[{ "provider","display_name","hosts":[…],"rules":[…],"max_response_bytes","max_body_bytes","allowed_headers":[…],"issued_at","expires_at","policy_hash" } …]}`；当 Hub 启动时因策略文件缺失未能装入白名单，会在 `unavailable` 字段置 `true` 表示（此时记日志，但不影响其余接口）。它与 `/v1/models` 同属"部署配置的只读视图"模式。
 - 调度失败（无 Provider / 配额）在首字节写出前返回 JSON 错误（404/429/502），而非 SSE 错误帧。
 
 ---
