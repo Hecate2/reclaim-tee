@@ -304,11 +304,11 @@ SignedReceipt = {
   "host_data": "tokenhive-simulation",
   "debug": false,
   "policy": "NO_DEBUG,NO_MIGRATE",
-  "policy_set_hash": "e488c28b…"
+  "policy_hash": "e488c28b…"
 }
 ```
 
-其中 `policy_set_hash` 是**部署白名单集合的哈希**（第 7.1 节）：它让回执能证明"这个飞地装的就是这份白名单"，而不只是"可信镜像跑过"。
+其中 `policy_hash` 是**部署白名单的哈希**（第 7.1 节）：它让回执能证明"这个飞地装的就是这份白名单"，而不只是"可信镜像跑过"。（不要与同一 JSON 里的 SNP `policy` 字段混淆——那是 guest policy，与本白名单无关。）
 
 ### 6.3 内联证据 vs 证据取回
 
@@ -321,8 +321,10 @@ SignedReceipt = {
 
 ### 7.1 谁定义、如何生效
 
-- Policy 是 **Hub 侧以策略目录形式定义、随 TEE 被测 bundle 一起打包加载的白名单**（本地仿真从 `TOKENHIVE_SIM_DIR` 读取；AWS SEV-SNP 上由 `pack.sh` 通过 `SNP_POLICY_DIR` 目录烤进被测 bundle 的 `./policy/`，tee 以 `-policy-dir` 指向该目录；内部加载仍是 `policy.Set`）。Provider 无需参与签名或轮换。
-- 完整性由**证明**背书：TEE 启动时计算整个 Policy 集合的哈希（`policy.Set.Hash()`），并把它绑进 attestation（仿真落在证据的 `policy_set_hash` 字段；AWS 上策略目录作为被测 bundle 的一部分被 SNP_APP_HASH 一并测量）。因此**改动任何一个白名单条目都会改变这个哈希**，验证方可据此判断飞地装的是不是预期那份白名单；由于策略字节进入了被测 bundle，**轮换白名单会改变应用测量指纹（`snp-app:<hash>`）**，而不是在运行期静默放宽 TEE 接受的边界。
+- 全部署**只有一份** Policy，是部署方的，不是每个 Provider 一份、也不由 Provider 声明。它随 TEE 被测 bundle 一起打包加载（本地仿真从 `TOKENHIVE_SIM_DIR` 读取 `policy.cbor`；AWS SEV-SNP 上由 `pack.sh` 通过 `SNP_POLICY_DIR` 目录烤进被测 bundle 的 `./policy/`，tee 以 `-policy-dir` 指向该目录）。
+- **部署时定死、运行期不可改**：TEE 内没有任何修改 Policy 的代码路径，加载发生在进程启动、之后只读。因此不存在轮换接口，也不需要防回滚逻辑。
+- 完整性由**证明**背书：TEE 启动时计算这份 Policy 的哈希（`policy.Hash()`），并把它绑进 attestation（仿真落在证据的 `policy_hash` 字段；AWS 上策略文件作为被测 bundle 的一部分被 SNP_APP_HASH 一并测量）。**回执里也带同一个 `policy_hash`**，且验证方一旦 pin 了部署白名单，`attest.Verifier` 会逐条比对回执所载的哈希，不符即拒——这才是"回执证明了飞地按这份白名单运行"。由于策略字节进入了被测 bundle，**换白名单会改变应用测量指纹（`snp-app:<hash>`）**，而不是在运行期静默放宽 TEE 接受的边界。
+- **准入**：Provider Agent 上线时，Hub 用同一份 Policy 按 host+path 核对它的上游是否被允许（见第 12 章）；不允许的 Agent 在上线处即被拒，而不是等到作业被 TEE 拒绝。
 - 查询：买家/卖家可先调 Hub 的 `GET /v1/policies`（第 12 章）核对本次部署实际接受的白名单及其集合哈希，无需直接问 TEE。
 
 ### 7.2 Policy 字段
@@ -417,7 +419,7 @@ err := proof.Verify(signed, proof.VerifyOptions{
 
 > **它不验证证据本身**。把"某个飞地签了"升级为"我信任的飞地签了"，是验证方自己的信任根要做的事：
 > - 仿真：`simulated.CheckEvidence(id)` 校验证据格式/非 debug/measurement；`simulated.CheckEvidenceForDeployment(id, policySetHash)` 额外校验部署白名单绑定。
-> - 生产（`aws-sev-snp`）：由部署方提供的 RA-TLS 信任根与镜像 measurement 对照（含 `policy_set_hash` 所对应的部署配置）。
+> - 生产（`aws-sev-snp`）：由部署方提供的 RA-TLS 信任根与镜像 measurement 对照（含 `policy_hash` 所对应的部署配置）。
 > - 阿里云 / 腾讯云（`alicloud` / `tencent`）：**预留骨架**——验证器已接线但远程证明验证未实现，`Verifier.CheckEvidence` 一律返回 `ErrAttestationNotImplemented`，列入 allowlist 的这两个平台其收据**全部验证失败**（fail-closed），直至证明路径实现后启用。
 
 **最小验证清单**（缺一项都可能被伪造或漏审）：
@@ -506,7 +508,7 @@ hub -audit -provider openai-sim   # 只看一个 Provider
 - 长会话：Hub 另有用户面 WebSocket 端点 **`GET /v1/session`**（模型取自首帧 JSON）。它与 TEE 侧同路径端点（第 5 章）**不是同一个**——前者面向终端用户，后者是 Hub↔TEE 内部面。接入方务必确认打的是 TEE 的 `/v1/session`。
 - 请求体中的 `model` 字段决定走哪个 Provider（最低价优先）；身份为 `X-TokenHive-Key` 头（v1 占位，非最终鉴权方案）。
 - **模型目录**：`GET /v1/models` 列出当前**在线** Agent 声明的全部模型及其最低在线价（即调度器此刻会实际派发的价格），响应为 `{"models":[{"model","provider","price_micros"}, …]}`。可选 `?q=<子串>` 做大小写不敏感过滤：精确 ID（`?q=claude-sim-haiku`）与片段（`?q=deepseek` 命中 `deepseek-pro` 与 `deepseek-flash`）都可搜。目录完全由 Hub 内存中的在线供应算出，**不触发任何对 Agent 或上游的探测**；未配 Agent 门的 Hub 返回空目录。
-- **策略白名单**：`GET /v1/policies` 输出 Hub 侧加载的**部署白名单**（与被测 bundle 携带的策略文件同源），买家/卖家可在发起调用前核对 TEE 允许访问的源头 AI 服务商范围，无需去问 TEE。响应为 `{"policy_set_hash":"<hex>","policies":[{ "provider","display_name","hosts":[…],"rules":[…],"max_response_bytes","max_body_bytes","allowed_headers":[…],"issued_at","expires_at","policy_hash" } …]}`；当 Hub 启动时因策略文件缺失未能装入白名单，会在 `unavailable` 字段置 `true` 表示（此时记日志，但不影响其余接口）。它与 `/v1/models` 同属"部署配置的只读视图"模式。
+- **策略白名单**：`GET /v1/policies` 输出 Hub 侧加载的**部署白名单**（与被测 bundle 携带的策略文件同源），买家/卖家可在发起调用前核对 TEE 允许访问的源头 AI 服务商范围，无需去问 TEE。全部署只有一份，因此响应也只描述这一份：`{"policy_hash":"<hex>","policy":{"hosts":[…],"rules":[…],"max_response_bytes":…,"max_body_bytes":…,"allowed_headers":[…],"issued_at":…,"expires_at":…}}`——没有 `provider` 维度可查，因为不存在按 Provider 划分的白名单。当 Hub 启动时因策略文件缺失未能装入白名单，会在 `unavailable` 字段置 `true` 表示（此时记日志，但不影响其余接口）。它与 `/v1/models` 同属"部署配置的只读视图"模式。
 - 调度失败（无 Provider / 配额）在首字节写出前返回 JSON 错误（404/429/502），而非 SSE 错误帧。
 
 ---
