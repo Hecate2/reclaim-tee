@@ -3,7 +3,7 @@
 日期：2026-09-03
 状态：当前架构定稿
 
-定位：本文是 TokenHive 当前架构的集中描述——连接如何建立、由谁持有、经过哪几跳、各组件的最低职责是什么。本文只描述系统现状，不保留任何历史改动的足迹。回执体系与 CBOR 键号、Provider Policy 与定价权、配额与账本、三层测试法这些已定案的内容继续有效，本文在涉及时给出它们的现状与位置，不逐一重复其推导。
+定位：本文是 TokenHive 当前架构的集中描述——连接如何建立、由谁持有、经过哪几跳、各组件的最低职责是什么。本文只描述系统现状，不保留任何历史改动的足迹。回执体系与 CBOR 键号、部署白名单与定价权、配额与账本、三层测试法这些已定案的内容继续有效，本文在涉及时给出它们的现状与位置，不逐一重复其推导。
 
 ---
 
@@ -72,7 +72,7 @@ User ─HTTP/SSE 或 WS─► Hub ─┬─ /v1/execute（请求模式）─► 
 
 Hub 侧维护两个 WebSocket 端点，这是它作为「NAT 背后贡献者和 TEE 的汇合点」的存在方式。两端的处理逻辑在 tokenhive/hub/agenthttp.go 与 agentnet.go。
 
-**AgentGate（/v1/agent）**：Agent 拨入以在线。握手时校验 Agent 预设的共享密钥（agentKeyMatches 做常数时间比较，任何与该 provider 在 Hub 密钥表（-agent-keys）中的密钥不匹配的握手中断），随后把连接包成多路复用隧道，等待 Agent 的第一条控制流。控制流的开流元数据是 AgentRegister——它声明为哪个 provider 出口、可选展示名、可选的自我报价（SelfPrice）、**可选的模型清单（Models）**，以及**密封在 `Credential` 里的 token**：Agent 从 Hub 的 /v1/credential-key 拉取 TEE 收件公钥，把自己的 token 加密成凭证信封（tee.EncryptCredential）后随注册上报，Hub 只把密文信封存入凭证库、永不见明文。每个 agent 每次拨入都要取一次收件公钥，因此 Hub **只合并在途的拉取**：同一时刻到达的调用共用一个到 TEE 的往返，结果分发给全部等待者后即丢弃，下一个调用者仍重新读 TEE。之所以不做 TTL 缓存：收件密钥在 TEE 每次重启时轮换，缓存会在重启后的整个 TTL 窗口内把已作废的公钥发给每一个重连的 agent，它们封出的信封新 TEE 根本打不开——反而把一次重启拖成更长的故障。Models 是软能力提示：非空时该 Agent 只作为这些模型的候选；为空则该 Agent 服务任何模型。控制流保持打开期间该 Agent 视为在线；控制流一旦关闭，Agent 从调度器离线、隧道拆除，Hub 同时从凭证库撤销该 provider 的信封。Agent 未声明自价时接受 Hub 为该 provider 声明的平台默认价；若 provider 无平台默认价，该 Agent 无法注册。
+**AgentGate（/v1/agent）**：Agent 拨入以在线。握手时校验 Agent 预设的共享密钥（agentKeyMatches 做常数时间比较，任何与该 provider 在 Hub 密钥表（-agent-keys）中的密钥不匹配的握手中断），随后把连接包成多路复用隧道，等待 Agent 的第一条控制流。控制流的开流元数据是 AgentRegister——它声明为哪个 provider 出口、可选展示名、可选的自我报价（SelfPrice）、**可选的模型清单（Models）**，以及**密封在 `Credential` 里的 token**：Agent 从 Hub 的 /v1/credential-key 拉取 TEE 收件公钥，把自己的 token 加密成凭证信封（tee.EncryptCredential）后随注册上报，Hub 只把密文信封存入凭证库、永不见明文。每个 agent 每次拨入都要取一次收件公钥，因此 Hub **只合并在途的拉取**：同一时刻到达的调用共用一个到 TEE 的往返，结果分发给全部等待者后即丢弃，下一个调用者仍重新读 TEE。之所以不做 TTL 缓存：收件密钥在 TEE 每次重启时轮换，缓存会在重启后的整个 TTL 窗口内把已作废的公钥发给每一个重连的 agent，它们封出的信封新 TEE 根本打不开——反而把一次重启拖成更长的故障。Models 是软能力提示：非空时该 Agent 只作为这些模型的候选；为空则该 Agent 服务任何模型。Hub 随后用部署白名单按 host+path 预检该 Agent 的上游（`Policy.AllowsRoute`，覆盖 Hub 暴露的全部路由），不通过即拒绝其上线——卖家"卖什么"由自己声明，但"能不能连"由部署决定。控制流保持打开期间该 Agent 视为在线；控制流一旦关闭，Agent 从调度器离线、隧道拆除，Hub 同时从凭证库撤销该 provider 的信封。Agent 未声明自价时接受 Hub 为该 provider 声明的平台默认价；若 provider 无平台默认价，该 Agent 无法注册。
 
 在线注册表（agentRegistry）以 provider 为主键：同一 provider 任一时刻只有一个在线 Agent，后注册者顶掉先前者并关闭其隧道（杜绝同一 provider 的双重身份与陈旧隧道）。每个在线 Agent 连同其有效价与声明的模型清单一起登记，调度器只把新工作路由到此刻在线且（若声明了清单）清单含该模型者。
 
@@ -129,7 +129,7 @@ ChannelConfig 的 egress 配置：RelayURL（经 Hub 中继，生产形态与本
 
 JobSpec（tokenhive/jobs/spec.go）是 Hub 交给 TEE 的作业描述，其哈希签进回执，供 provider 事后核对凭证用途。它是「凭证使用授权」的载体，不携带任何网络拓扑或账务元数据。
 
-现有键号连续编号 1–14：1 Version、2 JobID、3 Provider、4 Method、5 Host、6 Path、7 Query、8 Headers、9 BodyHash、10 Nonce、11 ExpiresAt、12 MaxResponseBytes、13 Stream、14 Session。没有空缺、没有作废编号。键随规格的演进重新连续编号是刻意的：键号属于线格式的一部分，一旦发布不可重用或重编号；当前连续 1–14 是发布时点的确定性快照。
+现有键号连续编号 1–15：1 Version、2 JobID、3 Provider、4 Method、5 Host、6 Path、7 Query、8 Headers、9 BodyHash、10 Nonce、11 ExpiresAt、12 MaxResponseBytes、13 Stream、14 Session、15 Credential。没有空缺。键随规格的演进重新连续编号是刻意的：键号属于线格式的一部分，一旦发布不可重用或重编号；当前连续 1–15 是发布时点的确定性快照。其中键 3 是**卖家 Agent 的身份**（一个 Agent 一个名字、一把 key，同时是回执归属、单调序号与 relay 配对的键），不是上游——上游由部署白名单按 host+path 约束。
 
 Session（键 14，omitempty）标记流式 WebSocket 型会话请求：置位时 TEE 对上游做 HTTP Upgrade 握手而非普通请求，然后中继一条不透明双向字节管道。握手的帧与内容语义（掩码、分片、关闭握手、JSON）全部归 Hub；TEE 只搬运、计量、摘要。会话作业的 body 必须为空——它是一次握手，没有载荷。
 

@@ -90,7 +90,7 @@ JobSpec 描述"用某个 Provider 的凭证，向某处发一个什么样的请�
 |---|---|---|---|---|
 | 1 | `Version` | uint32 | 必须 = `1`（`jobs.VersionV1`） | 唯一接受的版本 |
 | 2 | `JobID` | bytes | **恰好 16 字节** | 每次请求随机生成，回执原样带回 |
-| 3 | `Provider` | string | `[a-z0-9_-]`，≤ 64 | 必须已在 TEE 装载的 Policy 中存在，否则 `no policy for provider` |
+| 3 | `Provider` | string | `[a-z0-9_-]`，≤ 64 | **卖家 Agent 的身份**（一个 Agent 一个名字、一把 key），与上游无关；Hub 在 /v1/agent 已鉴权该名字，TEE 不再查表。它同时是回执归属、单调序号与 relay 配对的键 |
 | 4 | `Method` | string | `GET`/`POST`/`PUT`/`PATCH`/`DELETE` | **不支持 HEAD**（无响应体可证明） |
 | 5 | `Host` | string | `host:port`，≤ 253，不含 `/`、`@`、`?` 与空白 | 不接受 scheme / path / userinfo，防止传入外部可控 URL。端口省略时 Policy 按 :443 比对，但实际拨号需要显式端口——无端口的作业只能在拨号阶段以 `failed` 回执收场 |
 | 6 | `Path` | string | 以 `/` 开头，≤ 2048，不含 `.` / `..` 段与空白 | 必须为绝对路径 |
@@ -325,22 +325,19 @@ SignedReceipt = {
 - **部署时定死、运行期不可改**：TEE 内没有任何修改 Policy 的代码路径，加载发生在进程启动、之后只读。因此不存在轮换接口，也不需要防回滚逻辑。
 - 完整性由**证明**背书：TEE 启动时计算这份 Policy 的哈希（`policy.Hash()`），并把它绑进 attestation（仿真落在证据的 `policy_hash` 字段；AWS 上策略文件作为被测 bundle 的一部分被 SNP_APP_HASH 一并测量）。**回执里也带同一个 `policy_hash`**，且验证方一旦 pin 了部署白名单，`attest.Verifier` 会逐条比对回执所载的哈希，不符即拒——这才是"回执证明了飞地按这份白名单运行"。由于策略字节进入了被测 bundle，**换白名单会改变应用测量指纹（`snp-app:<hash>`）**，而不是在运行期静默放宽 TEE 接受的边界。
 - **准入**：Provider Agent 上线时，Hub 用同一份 Policy 按 host+path 核对它的上游是否被允许（见第 12 章）；不允许的 Agent 在上线处即被拒，而不是等到作业被 TEE 拒绝。
-- 查询：买家/卖家可先调 Hub 的 `GET /v1/policies`（第 12 章）核对本次部署实际接受的白名单及其集合哈希，无需直接问 TEE。
+- 查询：买家/卖家可先调 Hub 的 `GET /v1/policies`（第 12 章）核对本次部署实际接受的白名单及其哈希，无需直接问 TEE。
 
 ### 7.2 Policy 字段
 
 | 键 | 字段 | 说明 |
 |---|---|---|
 | 1 | Version | 1 |
-| 2 | Provider | 与 JobSpec.Provider 同名规则 |
-| 3 | DisplayName | 可选 |
 | 4 | Hosts | 允许的上游 `host:port` 列表（≤16） |
 | 5 | Rules | 规则列表（≤64）：`{Methods, Path, AllowStream, QueryKeys, AllowAnyQuery}` |
 | 7 | Limits | `{MaxResponseBytes, MaxBodyBytes, AllowedHeaders}` |
 | 8/9 | IssuedAt / ExpiresAt | 生效窗口 |
-| 11 | Nonce | 可选，让相同内容的两份 Policy 产生不同哈希 |
 
-> 键 6（旧 `Credential` 注入形态）、键 10（旧 `ProviderKey` 签名公钥）、键 12（旧 `RateCard` 定价）均已**永久作废**：凭证的形状随 token 密封进每次作业的信封（`Secret{Token, Header, Scheme}`，见第 7.4 节），定价是 Hub 侧报价表（见第 10.2 节），两者都不属于这份分布式白名单。
+> 上表即全部字段。键号是线格式的一部分：空缺的键号一律不再使用，也不会被重新编号。
 
 ### 7.3 授权判定与拒绝原因
 
@@ -348,15 +345,15 @@ SignedReceipt = {
 
 | 顺序 | 检查 | 错误 |
 |---|---|---|
-| 1 | 该 Provider 有 Policy 吗 | `no policy for provider: "<p>"` |
-| 2 | Policy.Provider == Spec.Provider | `policy provider does not match the job` |
-| 3 | Host 在白名单 | `host is not allowed by policy: "<h>"` |
-| 4 | Path 匹配规则（含 `{占位符}`） | `path is not allowed by policy: "<path>"` |
-| 5 | Method 在该规则内 | `method is not allowed by policy: "<M> <path>"` |
-| 6 | 调用方 Header 在 `AllowedHeaders` | `header is not allowed by policy: "<h>"` |
-| 7 | Query 键允许（`QueryKeys` / `AllowAnyQuery`） | `query parameter is not allowed by policy: "<k>"` |
-| 8 | 流式是否被允许 | `streaming is not allowed by policy: "<M> <path>"` |
-| 9 | 限额：`min(作业, Policy)` | `job exceeds a policy limit: …` |
+| 1 | Host 在白名单 | `host is not allowed by policy: "<h>"` |
+| 2 | Path 匹配规则（含 `{占位符}`） | `path is not allowed by policy: "<path>"` |
+| 3 | Method 在该规则内 | `method is not allowed by policy: "<M> <path>"` |
+| 4 | 调用方 Header 在 `AllowedHeaders` | `header is not allowed by policy: "<h>"` |
+| 5 | Query 键允许（`QueryKeys` / `AllowAnyQuery`） | `query parameter is not allowed by policy: "<k>"` |
+| 6 | 流式是否被允许 | `streaming is not allowed by policy: "<M> <path>"` |
+| 7 | 限额：`min(作业, Policy)` | `job exceeds a policy limit: …` |
+
+**上线准入**：Provider Agent 注册时，Hub 用同一份 Policy 按相同顺序预检该部署的全部路由（`Policy.AllowsRoute`），未覆盖即拒绝该 Agent 上线——这样"某上游不允许"在卖家上线处就可见，而不是等到买家请求时被 TEE 拒绝。
 
 凭证由 TEE 从作业携带的信封内解密出 `Secret{Header, Scheme, Token}` 并注入请求（见 7.4）；调用方永远拿不到、也设置不了它——`authorization` 等凭证头在 JobSpec 里出现即被拒（第 3.1 节）。
 
@@ -544,7 +541,6 @@ hub -audit -provider openai-sim   # 只看一个 Provider
 | `invalid job ID / nonce / body hash / expiry / limit` | 结构校验失败 | 否 |
 | `job spec has expired: …` | 超过 ExpiresAt | 否 |
 | `request body does not match the hash committed in the job spec` | 请求体与 BodyHash 不符 | 否 |
-| `no policy for provider: "…"` | 该 Provider 未装载 Policy | 否 |
 | `host / path / method / header / query … not allowed by policy` | 白名单拒绝 | 否 |
 | `streaming is not allowed by policy` | 该规则不允许流式 | 否 |
 | `job exceeds a policy limit: …` | 作业 MaxResponseBytes 超过 Policy 限额 | 否 |
