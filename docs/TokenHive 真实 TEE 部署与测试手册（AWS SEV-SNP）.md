@@ -304,6 +304,8 @@ env -u PYTHONHOME -u PYTHONPATH ./snp.sh build
 
 第一步，`pack.sh` 把 loader 探针程序（`runner/main.go`）交叉编译为静态 amd64 二进制，并用 Python 的 tarfile 模块打成确定性的 bundle 归档：文件按名称排序、owner/group 固定为 0、mtime 固定为 2025-01-01 纪元值。确定性是硬要求，因为 bundle 的 SHA-256 就是 SNP_APP_HASH 与跨云应用身份 `snp-app:<hash>`，同样的输入必须产出同样的摘要，否则验证方锚定的值无法被重建。这一步输出 `snp-app:6944dc93...` 格式的摘要行。
 
+白名单策略与运行时代码一起打进被测 bundle：设置 `SNP_POLICY_DIR=<目录>`（目录内为 `LoadPolicySetAll` 读取的 `policy.cbor` + `policies/<provider>.cbor` 布局）后，`pack.sh` 会把它原样拷进 bundle 的 `./policy/`（每个拓扑都做）。这既让 tee（`-policy-dir` 指向，运行期等价于 `TEE_POLICY_DIR` 环境变量）和单机 supervisor 拉起的 hub 读取同一份被测字节，也让白名单被 loader 的 SNP_APP_HASH 一并测量——**轮换策略会改变 `snp-app:` 摘要与 PCR 8 预期值，而不是在运行期静默放宽外墙**。不设 `SNP_POLICY_DIR` 也能正常打 bundle（`pack.sh` 会打一行 warning），只是策略另走配置路径，不会进入本次度量范围。
+
 第二步，`deploy/snp-build.sh` 编译 Secure Boot loader（`deploy/snp-image/loader`），然后在 Docker 内完成两层镜像组装（`snp-image/Dockerfile` + `tier-build.sh`）：基础 initrd 以 loader 为 /init，打入 AWS 需要的非内置内核模块（ena 网卡驱动、tsm_report、sev-guest 的 SEV 设备驱动）；ukify 用内核与 initrd 组装 UKI，并用 R.key/R.crt.pem 通过 sbsign 签名，随后 sbverify 验证签名；systemd-repart 把磁盘组装为 ESP 分区（放置签名 UKI）与一个独立的 96MB 原始分区（CopyBlocks 写入 app bundle）。这一步的日志会打印三行关键摘要：`base_uki_sha256`（基础 UKI 摘要，随应用变化稳定）、`app_sha256`（应用 bundle 摘要，即 SNP_APP_HASH）、`expected_PCR8`（PCR 8 的理论预期值）。
 
 第三步，云打包（AWS 路径）：`qemu-img` 把原始磁盘转换为 streamOptimized 的确定性 VMDK，并修正其中 CID 字段的格式问题（qemu 用 %x 写出的短 CID 会被 AWS 误判为带父盘引用的增量盘而拒绝）；幂等创建暂存桶 `snp-vmimport-<账号ID>` 后上传 VMDK；发起 `import-snapshot` 并轮询直到 completed（实测约 8-10 分钟）；最后用 `register-image` 注册 AMI，关键参数包括 `--boot-mode uefi`、`--tpm-support v2.0` 与 `--uefi-data "$(cat aws-uefi-data.b64)"`——正是这一步把包含新 R 证书的 UEFI 变量存储写进镜像，实例启动后固件加载的就是这份 db。
@@ -366,7 +368,7 @@ SNP_TEST_RESULT matched=yes attestation_type=secure-boot app_hash=6944dc93157560
 
 **单机（single）拓扑**：只用一台 SEV-SNP 机密实例，其 bundle 的 `./app` 是 supervisor（`tokenhive/cmd/single`），它在实例内以 loopback 依次拉起 mockprovider、真正的 tee、hub 与 provider agent，并通过与双机完全相同的 `/v1/init-cert` 握手把 tee 的 RA-TLS 证书固定给 hub。所有组件都在同一台机密实例内闭环，不需要普通主机。这种形态用于验证"整条业务链都在 TEE 度量范围内"的最强隔离，也方便在没有第二台机器时做端到端回归。
 
-两种拓扑共用同一个 bundle：`pack.sh` 的 `TOKENHIVE_BUILD_SINGLE=1` 模式把 supervisor 打成 `./app`、四个真实服务打成 `./svc/*`，并附上 hub 的 mTLS 身份（`./mtls/{hub-ca,hub-cert,hub-key}.pem`）；默认模式则把真实 tee 打成 `./app` 并附 hub-ca。supervisor 在 `TOKENHIVE_SUPERVISE=1` 时执行整个单机闭环，未设置时只是 `exec ./svc/tee`，行为与双机 bundle 完全一致——同一个镜像文件可以按 user-data 切换拓扑。
+两种拓扑共用同一个 bundle：`pack.sh` 的 `TOKENHIVE_BUILD_SINGLE=1` 模式把 supervisor 打成 `./app`、四个真实服务打成 `./svc/*`，并附上 hub 的 mTLS 身份（`./mtls/{hub-ca,hub-cert,hub-key}.pem`）；默认模式则把真实 tee 打成 `./app` 并附 hub-ca。supervisor 在 `TOKENHIVE_SUPERVISE=1` 时执行整个单机闭环，未设置时只是 `exec ./svc/tee`，行为与双机 bundle 完全一致——同一个镜像文件可以按 user-data 切换拓扑。每个拓扑都会把 `SNP_POLICY_DIR` 指向的白名单备份进 bundle 的 `./policy/`（受与 `./app` 相同的 SNP_APP_HASH 测量，见第 5 节）；单机 supervisor 在 bundle 带 `./policy` 时会给 tee 与 hub 都传 `-policy-dir`，令二者读取同一份被测策略。
 
 ### 9.2 构建两种 AMI
 
@@ -382,7 +384,7 @@ cd tokenhive/cloudtest/snp
 
 ### 9.3 机密实例的配置注入与 TOFU 自举
 
-机密实例没有 sshd，其运行配置完全由 loader 从 EC2 user-data 注入为环境变量：`TEE_ADDR`（mTLS 请求面监听地址）、`TEE_RELAY`（双机模式的反向隧道地址）、`TEE_PLATFORM=sevsnp`（强制真实 attestation，非 SNP 环境直接失败）、`TEE_MTLS=1`（RA-TLS + 要求 hub 客户端证书）、`TEE_CA=/run/bundle/mtls/mp-ca.pem`（mock provider 的 CA 打进被测 bundle，tee 据此校验上游 TLS 端点，机密实例无系统信任库可依）、`TEE_INIT_ADDR`/`TEE_INIT_TOKEN`（TOFU 自举监听器）。tee 的每个命令行 flag 都支持从同名环境变量回退取值，因此被测 bundle 保持字节一致，运行时路由完全由 VM metadata 决定。
+机密实例没有 sshd，其运行配置完全由 loader 从 EC2 user-data 注入为环境变量：`TEE_ADDR`（mTLS 请求面监听地址）、`TEE_RELAY`（双机模式的反向隧道地址）、`TEE_PLATFORM=sevsnp`（强制真实 attestation，非 SNP 环境直接失败）、`TEE_MTLS=1`（RA-TLS + 要求 hub 客户端证书）、`TEE_CA=/run/bundle/mtls/mp-ca.pem`（mock provider 的 CA 打进被测 bundle，tee 据此校验上游 TLS 端点，机密实例无系统信任库可依）、`TEE_INIT_ADDR`/`TEE_INIT_TOKEN`（TOFU 自举监听器）、`TEE_POLICY_DIR=/run/bundle/policy`（策略目录，tee 据此从被测 bundle 加载所执行的白名单）。tee 的每个命令行 flag 都支持从同名环境变量回退取值，因此被测 bundle 保持字节一致，运行时路由完全由 VM metadata 决定。
 
 mockprovider 也改用固定身份：`-ca/-cert/-key` 三个 flag 让它加载并复现 bundle 内 `mtls/mp-*.pem` 的身份，并把 CA 复写到 `TOKENHIVE_SIM_DIR/ca.pem`（供 agent 拉取模型列表时信任该模拟提供商）。这正是真实闭环的必要条件——tee 与 mockprovider 分处不同主机，CA 必须随被测 bundle 度量进 TEE，而非运行时从无 sshd 的机密实例经不可信路径传递。
 
