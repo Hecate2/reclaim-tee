@@ -90,7 +90,7 @@ JobSpec 描述"用某个 Provider 的凭证，向某处发一个什么样的请�
 |---|---|---|---|---|
 | 1 | `Version` | uint32 | 必须 = `1`（`jobs.VersionV1`） | 唯一接受的版本 |
 | 2 | `JobID` | bytes | **恰好 16 字节** | 每次请求随机生成，回执原样带回 |
-| 3 | `Provider` | string | `[a-z0-9_-]`，≤ 64 | 必须已在 TEE 装载的 Policy 中存在，否则 `no policy for provider` |
+| 3 | `Provider` | string | `[a-z0-9_-]`，≤ 64 | **卖家 Agent 的身份**（一个 Agent 一个名字、一把 key），与上游无关；Hub 在 /v1/agent 已鉴权该名字，TEE 不再查表。它同时是回执归属、单调序号与 relay 配对的键 |
 | 4 | `Method` | string | `GET`/`POST`/`PUT`/`PATCH`/`DELETE` | **不支持 HEAD**（无响应体可证明） |
 | 5 | `Host` | string | `host:port`，≤ 253，不含 `/`、`@`、`?` 与空白 | 不接受 scheme / path / userinfo，防止传入外部可控 URL。端口省略时 Policy 按 :443 比对，但实际拨号需要显式端口——无端口的作业只能在拨号阶段以 `failed` 回执收场 |
 | 6 | `Path` | string | 以 `/` 开头，≤ 2048，不含 `.` / `..` 段与空白 | 必须为绝对路径 |
@@ -304,11 +304,11 @@ SignedReceipt = {
   "host_data": "tokenhive-simulation",
   "debug": false,
   "policy": "NO_DEBUG,NO_MIGRATE",
-  "policy_set_hash": "e488c28b…"
+  "policy_hash": "e488c28b…"
 }
 ```
 
-其中 `policy_set_hash` 是**部署白名单集合的哈希**（第 7.1 节）：它让回执能证明"这个飞地装的就是这份白名单"，而不只是"可信镜像跑过"。
+其中 `policy_hash` 是**部署白名单的哈希**（第 7.1 节）：它让回执能证明"这个飞地装的就是这份白名单"，而不只是"可信镜像跑过"。（不要与同一 JSON 里的 SNP `policy` 字段混淆——那是 guest policy，与本白名单无关。）
 
 ### 6.3 内联证据 vs 证据取回
 
@@ -321,24 +321,23 @@ SignedReceipt = {
 
 ### 7.1 谁定义、如何生效
 
-- Policy 是 **Hub 侧以策略目录形式定义、随 TEE 被测 bundle 一起打包加载的白名单**（本地仿真从 `TOKENHIVE_SIM_DIR` 读取；AWS SEV-SNP 上由 `pack.sh` 通过 `SNP_POLICY_DIR` 目录烤进被测 bundle 的 `./policy/`，tee 以 `-policy-dir` 指向该目录；内部加载仍是 `policy.Set`）。Provider 无需参与签名或轮换。
-- 完整性由**证明**背书：TEE 启动时计算整个 Policy 集合的哈希（`policy.Set.Hash()`），并把它绑进 attestation（仿真落在证据的 `policy_set_hash` 字段；AWS 上策略目录作为被测 bundle 的一部分被 SNP_APP_HASH 一并测量）。因此**改动任何一个白名单条目都会改变这个哈希**，验证方可据此判断飞地装的是不是预期那份白名单；由于策略字节进入了被测 bundle，**轮换白名单会改变应用测量指纹（`snp-app:<hash>`）**，而不是在运行期静默放宽 TEE 接受的边界。
-- 查询：买家/卖家可先调 Hub 的 `GET /v1/policies`（第 12 章）核对本次部署实际接受的白名单及其集合哈希，无需直接问 TEE。
+- 全部署**只有一份** Policy，是部署方的，不是每个 Provider 一份、也不由 Provider 声明。它随 TEE 被测 bundle 一起打包加载（本地仿真从 `TOKENHIVE_SIM_DIR` 读取 `policy.cbor`；AWS SEV-SNP 上由 `pack.sh` 通过 `SNP_POLICY_DIR` 目录烤进被测 bundle 的 `./policy/`，tee 以 `-policy-dir` 指向该目录）。
+- **部署时定死、运行期不可改**：TEE 内没有任何修改 Policy 的代码路径，加载发生在进程启动、之后只读。因此不存在轮换接口，也不需要防回滚逻辑。
+- 完整性由**证明**背书：TEE 启动时计算这份 Policy 的哈希（`policy.Hash()`），并把它绑进 attestation（仿真落在证据的 `policy_hash` 字段；AWS 上策略文件作为被测 bundle 的一部分被 SNP_APP_HASH 一并测量）。**回执里也带同一个 `policy_hash`**，且验证方一旦 pin 了部署白名单，`attest.Verifier` 会逐条比对回执所载的哈希，不符即拒——这才是"回执证明了飞地按这份白名单运行"。由于策略字节进入了被测 bundle，**换白名单会改变应用测量指纹（`snp-app:<hash>`）**，而不是在运行期静默放宽 TEE 接受的边界。
+- **准入**：Provider Agent 上线时，Hub 用同一份 Policy 按 host+path 核对它的上游是否被允许（见第 12 章）；不允许的 Agent 在上线处即被拒，而不是等到作业被 TEE 拒绝。
+- 查询：买家/卖家可先调 Hub 的 `GET /v1/policies`（第 12 章）核对本次部署实际接受的白名单及其哈希，无需直接问 TEE。
 
 ### 7.2 Policy 字段
 
 | 键 | 字段 | 说明 |
 |---|---|---|
 | 1 | Version | 1 |
-| 2 | Provider | 与 JobSpec.Provider 同名规则 |
-| 3 | DisplayName | 可选 |
 | 4 | Hosts | 允许的上游 `host:port` 列表（≤16） |
 | 5 | Rules | 规则列表（≤64）：`{Methods, Path, AllowStream, QueryKeys, AllowAnyQuery}` |
 | 7 | Limits | `{MaxResponseBytes, MaxBodyBytes, AllowedHeaders}` |
 | 8/9 | IssuedAt / ExpiresAt | 生效窗口 |
-| 11 | Nonce | 可选，让相同内容的两份 Policy 产生不同哈希 |
 
-> 键 6（旧 `Credential` 注入形态）、键 10（旧 `ProviderKey` 签名公钥）、键 12（旧 `RateCard` 定价）均已**永久作废**：凭证的形状随 token 密封进每次作业的信封（`Secret{Token, Header, Scheme}`，见第 7.4 节），定价是 Hub 侧报价表（见第 10.2 节），两者都不属于这份分布式白名单。
+> 上表即全部字段。键号是线格式的一部分：空缺的键号一律不再使用，也不会被重新编号。
 
 ### 7.3 授权判定与拒绝原因
 
@@ -346,15 +345,15 @@ SignedReceipt = {
 
 | 顺序 | 检查 | 错误 |
 |---|---|---|
-| 1 | 该 Provider 有 Policy 吗 | `no policy for provider: "<p>"` |
-| 2 | Policy.Provider == Spec.Provider | `policy provider does not match the job` |
-| 3 | Host 在白名单 | `host is not allowed by policy: "<h>"` |
-| 4 | Path 匹配规则（含 `{占位符}`） | `path is not allowed by policy: "<path>"` |
-| 5 | Method 在该规则内 | `method is not allowed by policy: "<M> <path>"` |
-| 6 | 调用方 Header 在 `AllowedHeaders` | `header is not allowed by policy: "<h>"` |
-| 7 | Query 键允许（`QueryKeys` / `AllowAnyQuery`） | `query parameter is not allowed by policy: "<k>"` |
-| 8 | 流式是否被允许 | `streaming is not allowed by policy: "<M> <path>"` |
-| 9 | 限额：`min(作业, Policy)` | `job exceeds a policy limit: …` |
+| 1 | Host 在白名单 | `host is not allowed by policy: "<h>"` |
+| 2 | Path 匹配规则（含 `{占位符}`） | `path is not allowed by policy: "<path>"` |
+| 3 | Method 在该规则内 | `method is not allowed by policy: "<M> <path>"` |
+| 4 | 调用方 Header 在 `AllowedHeaders` | `header is not allowed by policy: "<h>"` |
+| 5 | Query 键允许（`QueryKeys` / `AllowAnyQuery`） | `query parameter is not allowed by policy: "<k>"` |
+| 6 | 流式是否被允许 | `streaming is not allowed by policy: "<M> <path>"` |
+| 7 | 限额：`min(作业, Policy)` | `job exceeds a policy limit: …` |
+
+**上线准入**：Provider Agent 注册时，Hub 用同一份 Policy 按相同顺序预检该部署的全部路由（`Policy.AllowsRoute`），未覆盖即拒绝该 Agent 上线——这样"某上游不允许"在卖家上线处就可见，而不是等到买家请求时被 TEE 拒绝。
 
 凭证由 TEE 从作业携带的信封内解密出 `Secret{Header, Scheme, Token}` 并注入请求（见 7.4）；调用方永远拿不到、也设置不了它——`authorization` 等凭证头在 JobSpec 里出现即被拒（第 3.1 节）。
 
@@ -417,7 +416,7 @@ err := proof.Verify(signed, proof.VerifyOptions{
 
 > **它不验证证据本身**。把"某个飞地签了"升级为"我信任的飞地签了"，是验证方自己的信任根要做的事：
 > - 仿真：`simulated.CheckEvidence(id)` 校验证据格式/非 debug/measurement；`simulated.CheckEvidenceForDeployment(id, policySetHash)` 额外校验部署白名单绑定。
-> - 生产（`aws-sev-snp`）：由部署方提供的 RA-TLS 信任根与镜像 measurement 对照（含 `policy_set_hash` 所对应的部署配置）。
+> - 生产（`aws-sev-snp`）：由部署方提供的 RA-TLS 信任根与镜像 measurement 对照（含 `policy_hash` 所对应的部署配置）。
 > - 阿里云 / 腾讯云（`alicloud` / `tencent`）：**预留骨架**——验证器已接线但远程证明验证未实现，`Verifier.CheckEvidence` 一律返回 `ErrAttestationNotImplemented`，列入 allowlist 的这两个平台其收据**全部验证失败**（fail-closed），直至证明路径实现后启用。
 
 **最小验证清单**（缺一项都可能被伪造或漏审）：
@@ -506,7 +505,7 @@ hub -audit -provider openai-sim   # 只看一个 Provider
 - 长会话：Hub 另有用户面 WebSocket 端点 **`GET /v1/session`**（模型取自首帧 JSON）。它与 TEE 侧同路径端点（第 5 章）**不是同一个**——前者面向终端用户，后者是 Hub↔TEE 内部面。接入方务必确认打的是 TEE 的 `/v1/session`。
 - 请求体中的 `model` 字段决定走哪个 Provider（最低价优先）；身份为 `X-TokenHive-Key` 头（v1 占位，非最终鉴权方案）。
 - **模型目录**：`GET /v1/models` 列出当前**在线** Agent 声明的全部模型及其最低在线价（即调度器此刻会实际派发的价格），响应为 `{"models":[{"model","provider","price_micros"}, …]}`。可选 `?q=<子串>` 做大小写不敏感过滤：精确 ID（`?q=claude-sim-haiku`）与片段（`?q=deepseek` 命中 `deepseek-pro` 与 `deepseek-flash`）都可搜。目录完全由 Hub 内存中的在线供应算出，**不触发任何对 Agent 或上游的探测**；未配 Agent 门的 Hub 返回空目录。
-- **策略白名单**：`GET /v1/policies` 输出 Hub 侧加载的**部署白名单**（与被测 bundle 携带的策略文件同源），买家/卖家可在发起调用前核对 TEE 允许访问的源头 AI 服务商范围，无需去问 TEE。响应为 `{"policy_set_hash":"<hex>","policies":[{ "provider","display_name","hosts":[…],"rules":[…],"max_response_bytes","max_body_bytes","allowed_headers":[…],"issued_at","expires_at","policy_hash" } …]}`；当 Hub 启动时因策略文件缺失未能装入白名单，会在 `unavailable` 字段置 `true` 表示（此时记日志，但不影响其余接口）。它与 `/v1/models` 同属"部署配置的只读视图"模式。
+- **策略白名单**：`GET /v1/policies` 输出 Hub 侧加载的**部署白名单**（与被测 bundle 携带的策略文件同源），买家/卖家可在发起调用前核对 TEE 允许访问的源头 AI 服务商范围，无需去问 TEE。全部署只有一份，因此响应也只描述这一份：`{"policy_hash":"<hex>","policy":{"hosts":[…],"rules":[…],"max_response_bytes":…,"max_body_bytes":…,"allowed_headers":[…],"issued_at":…,"expires_at":…}}`——没有 `provider` 维度可查，因为不存在按 Provider 划分的白名单。当 Hub 启动时因策略文件缺失未能装入白名单，会在 `unavailable` 字段置 `true` 表示（此时记日志，但不影响其余接口）。它与 `/v1/models` 同属"部署配置的只读视图"模式。
 - 调度失败（无 Provider / 配额）在首字节写出前返回 JSON 错误（404/429/502），而非 SSE 错误帧。
 
 ---
@@ -542,7 +541,6 @@ hub -audit -provider openai-sim   # 只看一个 Provider
 | `invalid job ID / nonce / body hash / expiry / limit` | 结构校验失败 | 否 |
 | `job spec has expired: …` | 超过 ExpiresAt | 否 |
 | `request body does not match the hash committed in the job spec` | 请求体与 BodyHash 不符 | 否 |
-| `no policy for provider: "…"` | 该 Provider 未装载 Policy | 否 |
 | `host / path / method / header / query … not allowed by policy` | 白名单拒绝 | 否 |
 | `streaming is not allowed by policy` | 该规则不允许流式 | 否 |
 | `job exceeds a policy limit: …` | 作业 MaxResponseBytes 超过 Policy 限额 | 否 |

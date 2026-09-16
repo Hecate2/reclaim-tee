@@ -9,16 +9,18 @@
 //
 //  1. resolves the full attestation evidence for a receipt that carries only an
 //     EvidenceHash (the small, cheap receipt form) by asking its Fetcher;
-//  2. validates the evidence through the platform's EvidenceVerifier, asserting
-//     the trusted measurement and, when the caller knows the deployment, the
-//     policy-set configuration bound into it;
-//  3. refuses anything outside the caller's AllowedPlatforms.
+//  2. checks, when the caller pinned a whitelist, that the receipt names it and
+//     that its evidence is bound to it;
+//  3. validates the evidence through the platform's EvidenceVerifier, asserting
+//     the trusted measurement;
+//  4. refuses anything outside the caller's AllowedPlatforms.
 //
 // All three are configurable so a Hub, an auditor, or a provider can each
 // verify against their own trust root without changing the wire format.
 package attest
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"errors"
@@ -53,7 +55,15 @@ func (f FuncFetcher) Fetch(ctx context.Context, id platform.Identity) ([]byte, e
 // defaultProofOptions mirrors the canonical receipt verification: no offline
 // cache means evidence must be inline; MaxAge is deliberately off here because
 // freshness is a policy choice the caller owns.
-var errFetcherMiss = errors.New("attestation evidence not in cache")
+var (
+	errFetcherMiss = errors.New("attestation evidence not in cache")
+
+	// ErrPolicyMismatch means the receipt names a whitelist other than the one
+	// the deployment pinned. The signature is genuine and the enclave may be
+	// trusted; it simply ran under different rules than the verifier is willing
+	// to accept, which is precisely the case the pin exists to catch.
+	ErrPolicyMismatch = errors.New("receipt names a different policy than the deployment")
+)
 
 // Cache is an in-memory Fetcher, populated when a trusted TEE is seen online.
 // It is keyed by platform, application ID and evidence hash so that several
@@ -120,12 +130,12 @@ type Config struct {
 	// choice; the verifier accepts either when a Fetcher is set.
 	Fetcher Fetcher
 
-	// PolicySetHash, when non-zero, requires every receipt's evidence to carry
-	// a deployment binding to exactly this whitelist digest. It is how an
-	// auditor proves a receipt is not just from the trusted image, but from the
-	// trusted image configured with the policy set the deployment shipped. Zero
-	// skips the deployment-binding assertion.
-	PolicySetHash [32]byte
+	// PolicyHash, when non-zero, is the whitelist the deployment shipped, and
+	// every receipt must both name it and come from evidence bound to it. It is
+	// how an auditor proves a receipt is not just from the trusted image, but
+	// from the trusted image configured with exactly the whitelist the
+	// deployment intended. Zero skips both assertions.
+	PolicyHash [32]byte
 }
 
 // Verifier validates signed receipts end to end against a deployer-chosen trust
@@ -135,8 +145,8 @@ type Verifier struct {
 	byPlatform map[string]platform.EvidenceVerifier
 	fetcher    Fetcher
 
-	havePolicy    bool
-	policySetHash [32]byte
+	havePolicy bool
+	policyHash [32]byte
 }
 
 // New validates a Config and returns a ready Verifier.
@@ -163,10 +173,10 @@ func New(cfg Config) (*Verifier, error) {
 		allowed:    allowed,
 		byPlatform: cfg.ByPlatform,
 		fetcher:    cfg.Fetcher,
-		havePolicy: cfg.PolicySetHash != [32]byte{},
+		havePolicy: cfg.PolicyHash != [32]byte{},
 	}
-	if cfg.PolicySetHash != [32]byte{} {
-		v.policySetHash = cfg.PolicySetHash
+	if cfg.PolicyHash != [32]byte{} {
+		v.policyHash = cfg.PolicyHash
 	}
 
 	// A platform the operator advertises as trusted but provides no verifier
@@ -205,6 +215,18 @@ func (v *Verifier) Check(signed proof.SignedReceipt) error {
 		return err
 	}
 
+	// The receipt names the whitelist the enclave enforced, and a pinned
+	// deployment requires that name to be its own. This is the assertion that
+	// makes the policy part of the execution proof on every platform: the
+	// platform's own deployment binding covers the measured image, which holds
+	// the whitelist only as bytes inside the bundle and without naming it.
+	if v.havePolicy {
+		if got := signed.Receipt.PolicyHash; !bytes.Equal(got, v.policyHash[:]) {
+			return fmt.Errorf("%w: receipt names policy %x, deployment expects %x",
+				ErrPolicyMismatch, got, v.policyHash)
+		}
+	}
+
 	id, err := signed.Receipt.Identity()
 	if err != nil {
 		return err
@@ -228,7 +250,7 @@ func (v *Verifier) Check(signed proof.SignedReceipt) error {
 		return fmt.Errorf("attest: no evidence verifier for platform %q", id.Platform)
 	}
 	if v.havePolicy {
-		return platformVerifier.CheckEvidenceForDeployment(id, v.policySetHash)
+		return platformVerifier.CheckEvidenceForDeployment(id, v.policyHash)
 	}
 	return platformVerifier.CheckEvidence(id)
 }
