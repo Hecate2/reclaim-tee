@@ -200,11 +200,18 @@ PY
     [[ -n "${snap}" && "${snap}" != None ]] || { echo "[image] no snapshot produced" >&2; exit 1; }
     aws --region "${region}" ec2 deregister-image --image-id "$(aws --region "${region}" ec2 describe-images --owners self --filters "Name=name,Values=${image}" --query 'Images[-1].ImageId' --output text 2>/dev/null)" >/dev/null 2>&1 || true
     local uefi_data; uefi_data="$(tr -d '\n' < "${SECURE_BOOT_DIR}/aws-uefi-data.b64")"
+    # Tag the image with the app bundle digest it embeds. The bundle rides
+    # inside this AMI, so the digest is a statement about the image, and it has
+    # to travel with the image: a launcher that re-hashed its local bin/ instead
+    # would record whatever the last build left there, which is not necessarily
+    # what this image measures (a build that packed but failed before registering
+    # leaves exactly that). `crosshost.sh up` reads this tag to pin the TEE.
     local ami; ami="$(aws --region "${region}" ec2 register-image --name "${image}" \
         --architecture x86_64 --virtualization-type hvm --boot-mode uefi --ena-support --sriov-net-support simple \
         --tpm-support v2.0 --root-device-name /dev/xvda \
         --uefi-data="${uefi_data}" \
         --block-device-mappings "DeviceName=/dev/xvda,Ebs={SnapshotId=${snap},DeleteOnTermination=true,VolumeType=gp3}" \
+        --tag-specifications "ResourceType=image,Tags=[{Key=snp-app,Value=${DIGEST#snp-app:}}]" \
         --query 'ImageId' --output text)"
     echo "[image] AMI ${ami} (${image}) registered -> snp-pair.sh SNP_T_IMAGE/SNP_K_IMAGE tag = ${tag}"
 }

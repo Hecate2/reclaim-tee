@@ -21,6 +21,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/reclaimprotocol/reclaim-tee/tokenhive/cmd/internal/shared"
 )
 
 // bundleDir is where the loader extracts the measured ./app (this binary) and
@@ -36,9 +38,14 @@ const bundleDir = "/run/bundle"
 // for the life of the deployment, so changing it is a rebuild — which moves the
 // attestation fingerprint rather than silently widening what the enclave
 // accepts.
+//
+// The children resolve this themselves too (see shared.ResolvePolicyDir); the
+// supervisor passes it explicitly so a failure to resolve shows up in the
+// spawned command line rather than only in the child's log. It does not require
+// the whitelist here: when the bundle lacks one, the sevsnp TEE child refuses
+// to serve on its own, which is where the rule belongs.
 func bundlePolicyArgs() []string {
-	d := filepath.Join(bundleDir, "policy")
-	if _, err := os.Stat(d); err == nil {
+	if d, err := shared.ResolvePolicyDir("", false); err == nil && d != "" {
 		return []string{"-policy-dir", d}
 	}
 	return nil

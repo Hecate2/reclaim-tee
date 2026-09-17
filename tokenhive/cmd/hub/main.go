@@ -76,6 +76,7 @@ func main() {
 	serveAddr := flag.String("serve", "", "run as the OpenAI-compatible HTTP service on this address (empty = one-shot CLI mode)")
 	provider := flag.String("provider", "openai-sim", "provider name")
 	host := flag.String("host", "127.0.0.1:18080", "provider host:port (must match policy)")
+	providerHosts := flag.String("provider-hosts", "", "per-provider upstream hosts as provider=host:port[,provider=host:port]; a provider absent from the map is served at -host (needed when sellers span several vendors)")
 	model := flag.String("model", "sim-mock-0.5b", "declared model (opaque to TEE)")
 	query := flag.String("query", "", "provider URL query, e.g. fault=401|429|truncate|slow|big")
 	tenant := flag.String("tenant", "tenant-demo-001", "tenant the request is attributed to for quota")
@@ -104,7 +105,7 @@ func main() {
 	// On an SNP bundle the deployment whitelist lives inside the measured tar at
 	// ./policy; point this there so the /v1/policies view (what buyers and sellers
 	// are told the enclave will accept) is the same bytes the enclave enforces.
-	policyDir := flag.String("policy-dir", "", "directory the deployed whitelist policy is baked into (the measured bundle's policy/ on SNP); empty = load from TOKENHIVE_SIM_DIR")
+	policyDir := flag.String("policy-dir", "", "directory holding the deployment whitelist (policy.cbor); empty = the measured bundle's policy/ when it has one, else TOKENHIVE_SIM_DIR")
 	evFetchURL := flag.String("evidence-fetch", "", "base URL for remote evidence retrieval (e.g. https://tee:18090); empty = resolve EvidenceHash from the local evidence store only")
 	mtlsCA := flag.String("mtls-ca", "", "PEM file pinning the TEE's RA-TLS certificate (or the CA that signs it); the RA-TLS verification half of Hub↔TEE mTLS. Implies -tee is https://")
 	mtlsCert := flag.String("mtls-cert", "", "client certificate the Hub presents to the TEE under mTLS; empty defaults to <simdir>/hub-client.pem")
@@ -134,9 +135,10 @@ func main() {
 		return
 	}
 
-	// The Hub's market table: seller-reported prices. The whitelist policy is
-	// a TEE concern and never reaches the Hub — the Hub prices from its own
-	// rates, not from what the TEE will authorise.
+	// The Hub's market table: seller-reported prices. Pricing never consults the
+	// whitelist — the Hub prices from its own rates, not from what the TEE will
+	// authorise. (The whitelist does reach the Hub, for admission and
+	// /v1/policies; see below. It just has nothing to say about the price.)
 	rates, err := shared.LoadRates()
 	if err != nil {
 		log.Fatalf("load rates: %v", err)
@@ -152,6 +154,10 @@ func main() {
 	perProviderKeys, err := parseAgentKeys(*agentKeys)
 	if err != nil {
 		log.Fatalf("agent-keys: %v", err)
+	}
+	perProviderHosts, err := parseProviderHosts(*providerHosts)
+	if err != nil {
+		log.Fatalf("provider-hosts: %v", err)
 	}
 	tenants, err := parseTenantKeys(*tenantKeys)
 	if err != nil {
@@ -179,12 +185,38 @@ func main() {
 	// up before any TEE materialized the fixtures still starts, but it reports
 	// the whitelist unavailable and admits nobody, rather than admitting sellers
 	// the enclave would then refuse job by job.
-	if *policyDir != "" {
-		shared.SetPolicyDir(*policyDir)
+	//
+	// It resolves through the same rule the TEE uses: an explicit -policy-dir
+	// wins, then the measured bundle's copy, then the state directory. A Hub
+	// inside a bundle has to enforce what that bundle carries, or it would
+	// admit and price against rules the attestation says nothing about. The Hub
+	// is not the enclave, so it does not require a whitelist the way the TEE
+	// does: unconfigured-and-unavailable is reported and nothing is admitted,
+	// never a panic — but an explicitly configured directory that holds no
+	// whitelist is an operator error and fails fast, rather than silently
+	// falling back to a default nobody chose.
+	if resolved, err := shared.ResolvePolicyDir(*policyDir, false); err != nil {
+		log.Fatalf("resolve policy dir: %v", err)
+	} else if resolved != "" {
+		shared.SetPolicyDir(resolved)
 	}
 	var policyDoc *policy.Policy
 	if policyDoc, err = shared.LoadPolicy(); err != nil {
 		log.Printf("policy unavailable: %v", err)
+	}
+
+	// The resident routing every spec-framing site and the agent admission
+	// check share: one Hub-wide default upstream, overridden per provider
+	// where sellers span several vendors. Built once so the admission check
+	// judges each agent on the exact host its own jobs will egress to.
+	serveCfg := serveConfig{
+		Addr:          *serveAddr,
+		Host:          *host,
+		ProviderHosts: perProviderHosts,
+		Query:         *query,
+		Max:           *maxBytes,
+		Tenants:       tenantResolver{keys: tenants},
+		Policy:        policyDoc,
 	}
 
 	h, err := hub.New(hub.Config{
@@ -206,7 +238,7 @@ func main() {
 		AgentKeys:            perProviderKeys,
 		RelaySecret:          []byte(*relayKey),
 		Credentials:          teeClient,
-		AdmitAgent:           admitAgainstPolicy(policyDoc, *host),
+		AdmitAgent:           admitAgainstPolicy(policyDoc, serveCfg.HostFor),
 	})
 	if err != nil {
 		log.Fatalf("build hub: %v", err)
@@ -235,14 +267,7 @@ func main() {
 		log.Fatal(err)
 	}
 	if *serveAddr != "" {
-		runServe(h, serveConfig{
-			Addr:    *serveAddr,
-			Host:    *host,
-			Query:   *query,
-			Max:     *maxBytes,
-			Tenants: tenantResolver{keys: tenants},
-			Policy:  policyDoc,
-		})
+		runServe(h, serveCfg)
 		return
 	}
 
@@ -251,7 +276,7 @@ func main() {
 
 	for i := 1; i <= *n; i++ {
 		fmt.Printf("\n=== request %d/%d ===\n", i, *n)
-		spec, err := buildSpec(*provider, *host, "/v1/chat/completions", *query, body, *maxBytes)
+		spec, err := buildSpec(*provider, serveCfg.HostFor(*provider), "/v1/chat/completions", *query, body, *maxBytes)
 		if err != nil {
 			logf("build spec: %v", err)
 			continue
@@ -450,11 +475,13 @@ func buildVerifier(allowed, expectedApp, policyHash, evFetchURL string, evClient
 		Fetcher:          fetcher,
 	}
 	// The deployment binding is opt-in. At runtime the Hub pins the platform
-	// trust root, not the exact policy digest: policy files are rewritten with a
-	// fresh IssuedAt on every startup, so deriving the hash here would race the
-	// TEE's own binding and reject valid receipts. An operator who wants the
-	// strongest bound (prove the enclave ran a specific whitelist config)
-	// passes the digest explicitly.
+	// trust root, not the exact policy digest: the shipped whitelist is
+	// deterministic (policy.Default stamps a constant IssuedAt, so rebuilding
+	// never moves the hash on its own), and demanding a pre-registered digest
+	// would turn every whitelist rotation — which is a redeploy by design —
+	// into a Hub flag rotation as well. An operator who wants the strongest
+	// bound (prove the enclave ran a specific whitelist config) passes the
+	// digest explicitly.
 	if policyHash != "" {
 		h, err := hex.DecodeString(policyHash)
 		if err != nil {
@@ -574,6 +601,52 @@ func parseAgentKeys(spec string) (map[string][]byte, error) {
 		keys[p[0]] = []byte(p[1])
 	}
 	return keys, nil
+}
+
+// parseProviderHosts turns the -provider-hosts flag into the per-provider
+// upstream map: which AI-service host:port the TEE is asked to reach for each
+// seller. A provider name that could never be registered is rejected here, so
+// a typo is a startup failure rather than an override that silently matches
+// nothing; a malformed host is rejected for the same reason. The TEE
+// re-validates every spec's host at execution — this only exists to fail fast
+// on operator typos, and an override for a provider with no agent online yet
+// is inert, not an error.
+func parseProviderHosts(spec string) (map[string]string, error) {
+	pairs, err := parsePairs(spec)
+	if err != nil {
+		return nil, err
+	}
+	if pairs == nil {
+		return nil, nil
+	}
+	hosts := make(map[string]string, len(pairs))
+	for _, p := range pairs {
+		if err := jobs.ValidateProviderName(p[0]); err != nil {
+			return nil, err
+		}
+		if err := validateUpstreamHost(p[1]); err != nil {
+			return nil, fmt.Errorf("provider %q: %w", p[0], err)
+		}
+		hosts[p[0]] = p[1]
+	}
+	return hosts, nil
+}
+
+// validateUpstreamHost is the flag parser's shape check for an upstream
+// host:port: non-empty, bounded, and carrying no scheme, path, or userinfo.
+// Anything finer (numeric ports, plain DNS names) is enforced by the job
+// layer on every spec the TEE executes.
+func validateUpstreamHost(host string) error {
+	if host == "" {
+		return fmt.Errorf("upstream host is empty")
+	}
+	if len(host) > jobs.MaxHostLength {
+		return fmt.Errorf("upstream host %q exceeds %d bytes", host, jobs.MaxHostLength)
+	}
+	if strings.ContainsAny(host, " \t\r\n/@?") {
+		return fmt.Errorf("upstream host %q must be host or host:port", host)
+	}
+	return nil
 }
 
 // parseTenantKeys turns the -tenant-keys flag into the user key -> tenant map.

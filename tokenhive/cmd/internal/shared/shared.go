@@ -13,6 +13,7 @@
 package shared
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -23,7 +24,6 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
-	"math"
 	"math/big"
 	"net"
 	"os"
@@ -46,25 +46,11 @@ import (
 // they are device identities, keyed by each agent's dial-in key and by the Hub's
 // rate table. They are deliberately NOT upstreams — what a seller charges and
 // which agent it is have nothing to do with which AI endpoint the deployment
-// reaches, which is the whitelist's business (see DefaultPolicy).
+// reaches, which is the whitelist's business (see policy.Default).
 const (
 	providerName  = "openai-sim"
 	providerCheap = "cheap-sim"
-	providerHost  = "127.0.0.1:18080"
-	providerPath  = "/v1/chat/completions"
 )
-
-// policyNoExpiry is the ExpiresAt stamped on the Hub-predefined public
-// whitelist. That policy is deployment scaffolding every seller onboards
-// against, not a rotating per-seller grant, so its window is deliberately left
-// effectively open: a lapsed default policy would turn every seller
-// unserviceable the moment the clock crossed it, and nothing would say so until
-// a job was refused. It is still replaceable — a policy with a newer IssuedAt
-// wins on install (see policy.Set.InstallAll) — the calendar just never forces
-// it. math.MaxInt64 seconds since the epoch is ~292 billion years, and
-// policy.ValidateAt only requires ExpiresAt > IssuedAt, so this simply never
-// trips ErrPolicyExpired.
-const policyNoExpiry = int64(math.MaxInt64)
 
 // ConfigDir returns the simulation working directory. Override with
 // TOKENHIVE_SIM_DIR to keep runs isolated.
@@ -95,9 +81,95 @@ func PolicyDir() string {
 	return ConfigDir()
 }
 
-// EnsureDefaults writes the fixture files if they are missing: a
-// Hub-predefined whitelist policy per provider (deployment config) and the
-// Hub's seller-reported rate table. Credentials are intentionally NOT written:
+// bundleRoot is where the SNP loader extracts the measured bundle. A variable
+// so a test can point it at a fixture instead of /run/bundle.
+var bundleRoot = "/run/bundle"
+
+// ResolvePolicyDir is the one rule for where a whitelist comes from:
+//
+//  1. An explicitly configured directory (a flag or an environment variable),
+//     when used, must hold a policy.cbor — in every mode. A configured
+//     directory without one is an operator error, never a cue to fall back to
+//     something else: silently enforcing a whitelist nobody chose is exactly
+//     how the policy a deployment runs drifts from the policy it measures.
+//  2. Otherwise the measured bundle's copy, when it carries one.
+//  3. Otherwise the state directory, which is the simulation's: the caller
+//     materializes the shipped default there.
+//
+// require selects the TEE's policy on a real deployment (the sevsnp platform):
+// there the whitelist is mandatory, because its bytes are exactly what the
+// attestation covers, so a missing policy is an operator error — the TEE must
+// refuse to serve on a default it materialized for itself, not quietly start
+// enforcing rules the fingerprint says nothing about. On top of that, an
+// explicit setting may only restate the measured copy, never replace it: when
+// the bundle carries a whitelist whose bytes differ from the configured one,
+// resolving fails. Enforcing anything but the measured bytes would run rules
+// the attestation describes nothing about, while every receipt kept carrying
+// the bundle's identity.
+//
+// The deployment's binaries resolve through here — the TEE, the Hub, and the
+// single-instance supervisor for the children it spawns — because a process
+// that has a measured copy must use it. (faketee, the simulation stand-in, has
+// no measured bundle to prefer and keeps reading the state directory.)
+func ResolvePolicyDir(configured string, require bool) (string, error) {
+	measured := filepath.Join(bundleRoot, "policy")
+	measuredFile := filepath.Join(measured, "policy.cbor")
+	_, measuredErr := os.Stat(measuredFile)
+
+	if configured != "" {
+		configuredFile := filepath.Join(configured, "policy.cbor")
+		if _, err := os.Stat(configuredFile); err != nil {
+			return "", fmt.Errorf("configured policy dir %s holds no whitelist at %s: %v", configured, configuredFile, err)
+		}
+		if require {
+			if measuredErr != nil {
+				return "", fmt.Errorf("no deployment whitelist at %s (a sevsnp bundle ships ./policy/policy.cbor; rebuild it): refusing to enforce the explicitly configured %s instead", measuredFile, configured)
+			}
+			same, err := samePolicyBytes(configuredFile, measuredFile)
+			if err != nil {
+				return "", fmt.Errorf("compare configured policy %s against measured %s: %v", configuredFile, measuredFile, err)
+			}
+			if !same {
+				return "", fmt.Errorf("configured policy dir %s differs from the measured bundle's %s: on sevsnp the enclave must enforce the measured bytes, or the attestation describes rules it does not run", configured, measured)
+			}
+		}
+		return configured, nil
+	}
+
+	if measuredErr == nil {
+		return measured, nil
+	}
+	if require {
+		return "", fmt.Errorf("no deployment whitelist at %s (a sevsnp bundle ships ./policy/policy.cbor; rebuild it)", measuredFile)
+	}
+	return "", nil
+}
+
+// samePolicyBytes reports whether two policy.cbor files carry identical bytes.
+// A configured directory holding a byte-identical copy of the measured bundle's
+// whitelist enforces exactly what the attestation covers, so it is a restatement,
+// not an override. Read failures are errors, not "different": the caller is
+// about to trust one of these files on the strength of the comparison.
+func samePolicyBytes(a, b string) (bool, error) {
+	if ae, err := filepath.Abs(a); err == nil {
+		if be, err := filepath.Abs(b); err == nil && ae == be {
+			return true, nil
+		}
+	}
+	ab, err := os.ReadFile(a)
+	if err != nil {
+		return false, fmt.Errorf("read %s: %w", a, err)
+	}
+	bb, err := os.ReadFile(b)
+	if err != nil {
+		return false, fmt.Errorf("read %s: %w", b, err)
+	}
+	return bytes.Equal(ab, bb), nil
+}
+
+// EnsureDefaults writes the fixture files if they are missing: the default
+// whitelist policy (deployment config) and the Hub's seller-reported rate
+// table. Credentials are intentionally NOT written:
 // they arrive at runtime through agent registration (see the package comment).
 func EnsureDefaults() error {
 	dir := ConfigDir()
@@ -107,11 +179,19 @@ func EnsureDefaults() error {
 	if err := writeIfAbsent(filepath.Join(dir, "rates.json"), DefaultRates()); err != nil {
 		return err
 	}
-	// The one deployment whitelist. It is not per-provider: every agent the
-	// simulation brings online egresses under this single document, which is
-	// what lets the Hub price and schedule sellers independently of it.
-	if err := writePolicy(dir, DefaultPolicy()); err != nil {
-		return err
+	// The fixtures materialize the default whitelist for a deployment that has
+	// none — the simulation. When a policy directory was configured explicitly
+	// (an SNP bundle's measured ./policy, or an operator's own directory), one
+	// is already in force and writing a second, generated copy into the state
+	// directory would only leave a file that looks authoritative and is not.
+	if policyDirOverride == "" {
+		p, err := policy.Default()
+		if err != nil {
+			return err
+		}
+		if err := writePolicy(dir, p); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -186,54 +266,20 @@ func writePolicy(dir string, p policy.Policy) error {
 // the loaders expect, without booting a TEE. pack.sh uses it so the whitelist
 // travels inside the measured SNP bundle (covered by SNP_APP_HASH), and tests
 // use it to produce a policy directory to point -policy-dir at.
+//
+// It writes policy.Default — the document in tokenhive/policy/whitelist.json.
+// Nothing here defines the whitelist: this only puts it on disk in the layout a
+// policy directory needs.
 func WritePolicyDir(dir string) error {
-	return writePolicy(dir, DefaultPolicy())
-}
-
-func policyPath() string            { return policyPathIn(PolicyDir()) }
-func policyPathIn(dir string) string { return filepath.Join(dir, "policy.cbor") }
-
-// DefaultPolicy is the deployment whitelist the simulation ships. It is the
-// real policy.Policy type — the simulation loads it through the genuine policy
-// engine, not a parallel hand-rolled structure.
-//
-// One document covers the whole deployment: every provider agent egresses under
-// it and none of them can widen it. Hosts name the upstreams the deployment is
-// willing to reach, so the list is the two real API endpoints the whitelist
-// exists to bound plus the mock host the simulation runs them behind.
-//
-// The whitelisted paths mirror the Hub's user-facing routes: the OpenAI chat
-// completions endpoint, the OpenAI Responses endpoint, the Anthropic messages
-// endpoint, and the streaming-session endpoint. In a real deployment the first
-// two live on api.openai.com and the third on api.anthropic.com; the simulation
-// serves all four shapes from one mock host so a single whitelist covers every
-// route.
-func DefaultPolicy() policy.Policy {
-	return policy.Policy{
-		Version: policy.VersionV1,
-		Hosts: []string{
-			providerHost,
-			"api.openai.com",
-			"api.anthropic.com",
-		},
-		Rules: []policy.Rule{
-			{Methods: []string{"POST"}, Path: providerPath, AllowStream: true, QueryKeys: []string{"fault"}},
-			{Methods: []string{"POST"}, Path: "/v1/responses", AllowStream: true, QueryKeys: []string{"fault"}},
-			{Methods: []string{"POST"}, Path: "/v1/messages", AllowStream: true, QueryKeys: []string{"fault"}},
-			// The streaming-session endpoint: a WebSocket upgrade, so it is a GET
-			// with no body whose whole framing is the Hub's business. AllowStream
-			// is set because the tunnel is unbounded by definition.
-			{Methods: []string{"GET"}, Path: "/v1/realtime", AllowStream: true, AllowAnyQuery: true},
-		},
-		Limits: policy.Limits{
-			MaxResponseBytes: 1 << 20,
-			MaxBodyBytes:     1 << 20,
-			AllowedHeaders:   []string{"Content-Type"},
-		},
-		IssuedAt:  time.Now().Unix(),
-		ExpiresAt: policyNoExpiry,
+	p, err := policy.Default()
+	if err != nil {
+		return err
 	}
+	return writePolicy(dir, p)
 }
+
+func policyPath() string             { return policyPathIn(PolicyDir()) }
+func policyPathIn(dir string) string { return filepath.Join(dir, "policy.cbor") }
 
 // LoadPolicy reads the deployment whitelist. There is exactly one, so the TEE
 // that enforces it and the Hub that advertises and admits against it read the

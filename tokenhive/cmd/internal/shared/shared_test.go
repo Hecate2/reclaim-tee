@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/reclaimprotocol/reclaim-tee/tokenhive/policy"
 )
 
 // TestWritePolicyDirRoundTrips pins the "bake the whitelist into a policy
@@ -41,7 +43,7 @@ func TestWritePolicyDirRoundTrips(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadPolicy from the policy dir: %v", err)
 	}
-	want := DefaultPolicy()
+	want := defaultPolicy(t)
 	if len(loaded.Hosts) != len(want.Hosts) {
 		t.Fatalf("hosts = %v, want %v", loaded.Hosts, want.Hosts)
 	}
@@ -95,7 +97,7 @@ func TestStalePerProviderPoliciesAreIgnored(t *testing.T) {
 	}
 
 	// A wider whitelist, at the path an older deployment would have used.
-	stale := DefaultPolicy()
+	stale := defaultPolicy(t)
 	stale.Hosts = append(stale.Hosts, "evil.example.com")
 	enc, err := stale.EncodeCanonical()
 	if err != nil {
@@ -130,12 +132,13 @@ func TestStalePerProviderPoliciesAreIgnored(t *testing.T) {
 // onboards against this document, so dropping either API would silently make
 // every seller of that shape unadmittable.
 func TestDefaultPolicyCoversTheRealAPIs(t *testing.T) {
-	p := DefaultPolicy()
+	p := defaultPolicy(t)
 
 	for _, r := range []struct{ host, path, method string }{
 		{"api.openai.com", "/v1/chat/completions", "POST"},
 		{"api.openai.com", "/v1/responses", "POST"},
 		{"api.anthropic.com", "/v1/messages", "POST"},
+		{"chatgpt.com", "/backend-api/codex/responses", "POST"},
 	} {
 		if err := p.AllowsRoute(r.host, r.path, r.method); err != nil {
 			t.Errorf("%s %s%s not admitted by the default policy: %v", r.method, r.host, r.path, err)
@@ -149,6 +152,165 @@ func TestDefaultPolicyCoversTheRealAPIs(t *testing.T) {
 	}
 }
 
+// TestResolvePolicyDir pins the one rule for where a whitelist comes from: an
+// explicit setting must hold a policy.cbor in every mode (a configured
+// directory without one is an operator error, never a cue to fall back); the
+// measured bundle wins over the state directory; and on a real deployment
+// (require) a missing whitelist is an error, while the simulation stays
+// lenient. On top of that, require lets an explicit setting only restate the
+// measured bytes, never replace them.
+func TestResolvePolicyDir(t *testing.T) {
+	root := t.TempDir()
+	old := bundleRoot
+	bundleRoot = root
+	t.Cleanup(func() { bundleRoot = old })
+
+	measured := filepath.Join(root, "policy")
+	if err := WritePolicyDir(measured); err != nil {
+		t.Fatalf("WritePolicyDir: %v", err)
+	}
+	opDir := t.TempDir()
+	if err := WritePolicyDir(opDir); err != nil {
+		t.Fatalf("WritePolicyDir(operator): %v", err)
+	}
+	// A valid whitelist that is NOT the measured one: same shape, one extra
+	// host, so resolving against it exercises the override refusal rather
+	// than a parse failure.
+	otherDir := t.TempDir()
+	other := defaultPolicy(t)
+	other.Hosts = append(append([]string{}, other.Hosts...), "extra.example.com")
+	if err := writePolicy(otherDir, other); err != nil {
+		t.Fatalf("writePolicy(other): %v", err)
+	}
+
+	cases := []struct {
+		name       string
+		configured string
+		require    bool
+		want       string
+		wantErr    bool
+	}{
+		{"bundle present, lenient", "", false, measured, false},
+		{"bundle present, required", "", true, measured, false},
+		{"explicit setting wins", opDir, false, opDir, false},
+		// A deployed TEE must not invent a default for itself.
+		{"explicit setting missing, required", "/operator/policy", true, "", true},
+		// A configured directory without a whitelist is an operator error even
+		// where the simulation is otherwise lenient: falling back would
+		// silently enforce rules nobody chose.
+		{"explicit setting missing, lenient", "/operator/policy", false, "", true},
+		// A byte-identical restatement of the measured whitelist is allowed on
+		// a deployment: it enforces exactly what the attestation covers.
+		// (WritePolicyDir is deterministic, so opDir carries the same bytes.)
+		{"explicit restatement wins, required", opDir, true, opDir, false},
+		// A differing whitelist smuggled in through configuration is refused
+		// on a deployment, even though it is perfectly valid on its own.
+		{"explicit override refused, required", otherDir, true, "", true},
+		// ... while the simulation still lets an operator point at any valid
+		// whitelist, which is what makes local policy experiments cheap.
+		{"explicit override wins, lenient", otherDir, false, otherDir, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := ResolvePolicyDir(tc.configured, tc.require)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("ResolvePolicyDir(%q, %v) = %q, want error", tc.configured, tc.require, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ResolvePolicyDir(%q, %v): %v", tc.configured, tc.require, err)
+			}
+			if got != tc.want {
+				t.Fatalf("ResolvePolicyDir(%q, %v) = %q, want %q", tc.configured, tc.require, got, tc.want)
+			}
+		})
+	}
+
+	// A bundle that carries no whitelist is satisfied leniently (the caller
+	// decides the fallback, so a missing measured policy is never quietly
+	// replaced by an unrelated file) but is an error for a deployment that
+	// requires one — including when an explicit whitelist was configured:
+	// without measured bytes there is nothing the attestation covers, so there
+	// is nothing a deployment may enforce.
+	empty := t.TempDir()
+	bundleRoot = empty
+	if got, err := ResolvePolicyDir("", false); err != nil || got != "" {
+		t.Fatalf("ResolvePolicyDir(lenient, no policy) = %q, %v; want empty, nil", got, err)
+	}
+	if _, err := ResolvePolicyDir("", true); err == nil {
+		t.Fatal("ResolvePolicyDir(required, no policy) must fail, got nil")
+	}
+	if _, err := ResolvePolicyDir(opDir, true); err == nil {
+		t.Fatal("ResolvePolicyDir(required, explicit policy, no measured copy) must fail, got nil")
+	}
+}
+
+// TestEnsureDefaultsLeavesAConfiguredPolicyAlone pins that the fixture writer
+// does not drop a second, generated whitelist beside a directory the operator
+// configured. Two policy files, one enforced and one merely present, is exactly
+// how the policy a deployment runs drifts from the policy it measures.
+func TestEnsureDefaultsLeavesAConfiguredPolicyAlone(t *testing.T) {
+	simDir := t.TempDir()
+	t.Setenv("TOKENHIVE_SIM_DIR", simDir)
+	t.Cleanup(func() { SetPolicyDir("") })
+
+	SetPolicyDir(t.TempDir())
+	if err := EnsureDefaults(); err != nil {
+		t.Fatalf("EnsureDefaults: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(simDir, "policy.cbor")); err == nil {
+		t.Fatal("EnsureDefaults wrote a whitelist beside a configured policy directory")
+	}
+	// The rate table is not policy: the Hub still needs it.
+	if _, err := os.Stat(filepath.Join(simDir, "rates.json")); err != nil {
+		t.Fatalf("EnsureDefaults must still write the rate table: %v", err)
+	}
+
+	// With nothing configured, the simulation's own whitelist is materialized
+	// and loadable.
+	SetPolicyDir("")
+	if err := EnsureDefaults(); err != nil {
+		t.Fatalf("EnsureDefaults: %v", err)
+	}
+	if _, err := LoadPolicy(); err != nil {
+		t.Fatalf("the simulation whitelist should be loadable: %v", err)
+	}
+}
+
+// TestDefaultPolicyIsReproducible pins that the shipped whitelist is a function
+// of the code alone. Its bytes are measured, so a document that changed on
+// every generation would move SNP_APP_HASH with no code change and leave the
+// artifact irreproducible — which is also what lets a build re-emit the policy
+// on every run instead of freezing a copy that silently goes stale.
+func TestDefaultPolicyIsReproducible(t *testing.T) {
+	first, err := defaultPolicy(t).Hash()
+	if err != nil {
+		t.Fatalf("hash: %v", err)
+	}
+
+	// Round-trip through the filesystem as well, so the encoder and the loader
+	// are in the loop and not just the in-memory document.
+	dir := t.TempDir()
+	if err := WritePolicyDir(dir); err != nil {
+		t.Fatalf("WritePolicyDir: %v", err)
+	}
+	t.Cleanup(func() { SetPolicyDir("") })
+	SetPolicyDir(dir)
+	loaded, err := LoadPolicy()
+	if err != nil {
+		t.Fatalf("LoadPolicy: %v", err)
+	}
+	again, err := loaded.Hash()
+	if err != nil {
+		t.Fatalf("hash loaded: %v", err)
+	}
+	if first != again {
+		t.Fatal("the default whitelist is not reproducible across generations")
+	}
+}
+
 // TestDefaultPolicyDoesNotLapse pins the "the public default whitelist is
 // open-ended" contract. The default policy is what every seller onboards
 // against, so a finite window would eventually start refusing every job with
@@ -159,11 +321,25 @@ func TestDefaultPolicyDoesNotLapse(t *testing.T) {
 	// timestamp, so an open-ended policy passes and a term of years fails.
 	far := time.Unix(1<<40, 0)
 
-	p := DefaultPolicy()
+	p := defaultPolicy(t)
 	if err := p.Validate(); err != nil {
-		t.Fatalf("DefaultPolicy().Validate: %v", err)
+		t.Fatalf("policy.Default().Validate: %v", err)
 	}
 	if err := p.ValidateAt(far); err != nil {
 		t.Fatalf("default policy lapsed before t=%d: %v", far.Unix(), err)
 	}
+}
+
+// defaultPolicy is the shipped deployment whitelist, for the tests that need to
+// compare a loaded policy against it. It is policy.Default — the document in
+// tokenhive/policy/whitelist.json — reached through the same call the runtime
+// makes, so a document that stopped parsing fails here rather than in a test
+// fixture that had its own copy.
+func defaultPolicy(t *testing.T) policy.Policy {
+	t.Helper()
+	p, err := policy.Default()
+	if err != nil {
+		t.Fatalf("policy.Default: %v", err)
+	}
+	return p
 }

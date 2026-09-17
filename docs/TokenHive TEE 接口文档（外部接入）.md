@@ -321,23 +321,24 @@ SignedReceipt = {
 
 ### 7.1 谁定义、如何生效
 
-- 全部署**只有一份** Policy，是部署方的，不是每个 Provider 一份、也不由 Provider 声明。它随 TEE 被测 bundle 一起打包加载（本地仿真从 `TOKENHIVE_SIM_DIR` 读取 `policy.cbor`；AWS SEV-SNP 上由 `pack.sh` 通过 `SNP_POLICY_DIR` 目录烤进被测 bundle 的 `./policy/`，tee 以 `-policy-dir` 指向该目录）。
+- 全部署**只有一份** Policy，是部署方的，不是每个 Provider 一份、也不由 Provider 声明。它随 TEE 被测 bundle 一起打包加载：`pack.sh` 把 `SNP_POLICY_DIR` 的 `policy.cbor` 烤进被测 bundle 的 `./policy/`，loader 解包到 `/run/bundle`，运行在里面的进程（tee、hub）按同一条规则取用它——显式 `-policy-dir`/`TEE_POLICY_DIR` 若给出就必须装着 `policy.cbor`，缺失在任何模式下都是启动错误（绝不静默回落到另一份白名单）；未显式配置时取 bundle 里的 `./policy`，再没有才落到 `TOKENHIVE_SIM_DIR`（`shared.ResolvePolicyDir`）。本地仿真没有 bundle，于是走最后一条：`EnsureDefaults` 在状态目录里生成 `policy.cbor`。宽松只属于仿真：sevsnp 平台上白名单是**强制**的，bundle 里没有 `policy.cbor`，TEE 直接 `log.Fatalf` 拒绝启动，绝不回退到默认文档；且 sevsnp 下显式目录只能**复述**被测字节（逐字节一致才放行），内容不一致同样拒绝启动——飞地执行的必须恰好是 attestation 覆盖的那份，覆盖不能替代度量。bundle 外的 Hub（跨主机部署时跑在普通主机上）由 `crosshost.sh deploy` 收到同一份 `policy.cbor` 并以 `-policy-dir` 指向它，这样 hub 的准入与 `/v1/policies` 与 TEE 执行的是**同一份、且被 `SNP_APP_HASH` 覆盖的字节**。这条不变量由 `crosshost.sh` 保证、而非仅靠约定：`up` 记录的 `app_hash` 取自所启动镜像自带的 `snp-app` 标签（即该镜像内嵌 bundle 的摘要），`deploy` 按这个摘要从 `bin/bundles/<sha256>.tar` 取回**那一版**的白名单，取不到就拒绝部署——所以 hub 拿到的永远是被测应用里那一份，而不是「当前构建」那一份。
+- **写下来的是一份 JSON 文档**：白名单以 `tokenhive/policy/whitelist.json` 维护（随代码发行，由 `policy.Default` 读取），`-emit-policy-dir` 把它转成 `policy.cbor` 交付给 bundle——`policy.cbor` 是派生件，文档才是唯一定义。文档只写规则（`version`/`hosts`/`rules`/`limits`）；**有效期窗口不在文档里**，由加载方统一盖成"永不过期"（`policy.NoIssueDate`/`policy.NoExpiry`）：日期是策略而不是规则，且 `IssuedAt` 必须是常量，否则每次构建都会挪动 `SNP_APP_HASH`。文档里出现未知字段会被**直接拒绝**，不会静默丢弃——白名单最不能有的失败就是"文件写着一条规则、飞地其实没执行"。改白名单=改这份文档并重新构建。
 - **部署时定死、运行期不可改**：TEE 内没有任何修改 Policy 的代码路径，加载发生在进程启动、之后只读。因此不存在轮换接口，也不需要防回滚逻辑。
 - 完整性由**证明**背书：TEE 启动时计算这份 Policy 的哈希（`policy.Hash()`），并把它绑进 attestation（仿真落在证据的 `policy_hash` 字段；AWS 上策略文件作为被测 bundle 的一部分被 SNP_APP_HASH 一并测量）。**回执里也带同一个 `policy_hash`**，且验证方一旦 pin 了部署白名单，`attest.Verifier` 会逐条比对回执所载的哈希，不符即拒——这才是"回执证明了飞地按这份白名单运行"。由于策略字节进入了被测 bundle，**换白名单会改变应用测量指纹（`snp-app:<hash>`）**，而不是在运行期静默放宽 TEE 接受的边界。
-- **准入**：Provider Agent 上线时，Hub 用同一份 Policy 按 host+path 核对它的上游是否被允许（见第 12 章）；不允许的 Agent 在上线处即被拒，而不是等到作业被 TEE 拒绝。
+- **准入**：Provider Agent 上线时，Hub 用同一份 Policy 按 host+path 核对它的上游是否被允许（见第 12 章）；不允许的 Agent 在上线处即被拒，而不是等到作业被 TEE 拒绝。核对的 host 是该 Provider 自己的上游——Hub 启动参数 `-provider-hosts` 有覆盖用覆盖，否则走 Hub 统一 `-host`——因此多 vendor 部署里每个卖家按自家上游独立准入。
 - 查询：买家/卖家可先调 Hub 的 `GET /v1/policies`（第 12 章）核对本次部署实际接受的白名单及其哈希，无需直接问 TEE。
 
 ### 7.2 Policy 字段
 
-| 键 | 字段 | 说明 |
-|---|---|---|
-| 1 | Version | 1 |
-| 4 | Hosts | 允许的上游 `host:port` 列表（≤16） |
-| 5 | Rules | 规则列表（≤64）：`{Methods, Path, AllowStream, QueryKeys, AllowAnyQuery}` |
-| 7 | Limits | `{MaxResponseBytes, MaxBodyBytes, AllowedHeaders}` |
-| 8/9 | IssuedAt / ExpiresAt | 生效窗口 |
+| 键 | 文档键（whitelist.json） | 字段 | 说明 |
+|---|---|---|---|
+| 1 | `version` | Version | 1 |
+| 4 | `hosts` | Hosts | 允许的上游 `host:port` 列表（≤16） |
+| 5 | `rules` | Rules | 规则列表（≤64）：`{methods, path, allow_stream, query_keys, allow_any_query}` |
+| 7 | `limits` | Limits | `{max_response_bytes, max_body_bytes, allowed_headers}` |
+| 8/9 | `issued_at` / `expires_at` | IssuedAt / ExpiresAt | 生效窗口；**不在文档里**，由加载方盖成永不过期 |
 
-> 上表即全部字段。键号是线格式的一部分：空缺的键号一律不再使用，也不会被重新编号。
+> 上表即全部字段。键号是线格式（CBOR）的一部分：空缺的键号一律不再使用，也不会被重新编号。文档键即 `tokenhive/policy/whitelist.json` 的写法，该文件本身就是一份完整示例。
 
 ### 7.3 授权判定与拒绝原因
 
@@ -473,7 +474,7 @@ hub -audit -provider openai-sim   # 只看一个 Provider
 
 - **Agent 同时承载两件事**：其一是一条反向隧道让 TEE 经你的网络出口访问上游；其二是把你声明的 `token` 用 TEE 收件公钥加密、随注册上报（7.4.3）。所以**你的 token 只写在你自己的 Agent 启动参数里**，平台上只有密文信封。
 - Agent 是你机器上的进程，位于 NAT 后**不可被拨入**：它主动拨 Hub 的 AgentGate 并保持反向隧道，断开自动重连。重连按指数退避（起点 1s、封顶 30s，连接成功后重置），且**每次等待都带随机抖动**——因此平台侧（Hub/TEE）重启后，整个机群是错峰回来的，不会同一瞬间一齐冲上来。
-- 契约：**多路复用反向隧道**。Agent 主动拨 Hub 的 AgentGate，与 Hub 之间是一条多路复用 WebSocket；Hub 在隧道上为每条流指定一个上游 `host:port`（必须落在 Agent 的 `-targets` allowlist 内），Agent 拨向该 host 并双向复制字节。Agent **不做应用层代理、不解密**——TEE 与 AI 服务商的 TLS 会话端到端加密封装穿过隧道。
+- 契约：**多路复用反向隧道**。Agent 主动拨 Hub 的 AgentGate，与 Hub 之间是一条多路复用 WebSocket；Hub 在隧道上为每条流指定一个上游 `host:port`（必须落在 Agent 的 `-targets` allowlist 内），Agent 拨向该 host 并双向复制字节。指派的 host 按 Provider 路由：Hub 的 `-provider-hosts` 有覆盖用覆盖，否则走统一 `-host`——所以你的 `-targets` 必须包含 Hub 会指派给你的那个 host，否则流打不开。Agent **不做应用层代理、不解密**——TEE 与 AI 服务商的 TLS 会话端到端加密封装穿过隧道。
 - 安全边界：Agent 永不接触 TLS 密钥，只能看到未参与会话的一段密文；可用 tap 把转发字节落盘自证"只见到密文"。
 - **认证形状尽量少配**：Agent 启动时默认按 `authorization` 头 + `Bearer` 前缀上报 token（覆盖 OpenAI 及多数服务）；若你的服务用 `x-api-key` 这类"原样 token 头"，只需传 `-auth-header x-api-key`（`-auth-scheme auto` 会自动改为"无前缀"）。需要完全自定义时再显式写 `-auth-scheme`。
 - **可选声明 models 能力**：`-models <逗号分隔的模型 ID>` 声明你的上游能服务哪些模型。Hub 把它当**软能力提示**：调度只把请求派给声明了该模型的 Agent（声明列表里没有该模型的 Agent 被跳过，免得白买上游一次拒绝）；所有在线 Agent 都没声明的模型以"无 Provider 服务该模型"直接拒绝。**注册消息未携带声明（空列表）的 Agent 被 Hub 视为"服务一切"**，调度照常尝试——这只发生在内嵌 provider 包、不配置自动发现的形态；从 CLI 启动时你实际上总会声明或自动发现（见下一条），不会落入该分支。买家的模型目录（`GET /v1/models`，见第 12 节）只列出在线 Agent **声明过**的模型，未声明者不产生目录行。
