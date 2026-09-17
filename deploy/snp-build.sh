@@ -189,7 +189,12 @@ PY
             || { echo "[image] cannot ensure bucket s3://${bucket}:" >&2; cat /tmp/snp-mb.err >&2; rm -f /tmp/snp-mb.err; exit 1; }
     fi
     rm -f /tmp/snp-mb.err
-    aws s3 cp "${vmdk}" "s3://${bucket}/${key}" --no-progress --checksum-algorithm SHA256
+    # A single PUT rather than `s3 cp`: cp switches to a multipart upload above
+    # 8 MB, and S3 then reports a composite checksum (sha256 of the part
+    # checksums, suffixed "-N") which can never equal the file's own digest.
+    # The VMDK is ~31 MB, far below the 5 GB single-PUT limit.
+    aws --region "${region}" s3api put-object \
+        --bucket "${bucket}" --key "${key}" --body "${vmdk}" --checksum-algorithm SHA256 >/dev/null
     # Fail closed. import-snapshot reads whatever sits at this key, so prove the
     # object is the bytes we just wrote before paying for an import and before
     # registering an AMI that claims a digest. This is the check whose absence
