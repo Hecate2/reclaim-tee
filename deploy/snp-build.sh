@@ -153,7 +153,13 @@ package_aws() {
     local image="snp-${tag}" region="${AWS_SNP_REGION:?set AWS_SNP_REGION in deploy/.env}"
     local acct bucket key tmp vmdk
     acct="$(aws sts get-caller-identity --query Account --output text)"
-    bucket="${SNP_S3_BUCKET:-snp-vmimport-${acct}}"; key="${image}.vmdk"
+    # The staging object is named after the app the disk carries, not after the
+    # image alone. Under a fixed name a stale object is indistinguishable from
+    # this build's, and that is not hypothetical: when an upload did not land,
+    # import-snapshot silently consumed the previous build's disk and the AMI was
+    # registered tagged with this build's digest -- the digest the launcher pins
+    # the TEE to, and the one the Hub is then told to expect.
+    bucket="${SNP_S3_BUCKET:-snp-vmimport-${acct}}"; key="${image}-${DIGEST#snp-app:}.vmdk"
     tmp="$(mktemp -d)"; vmdk="${tmp}/disk.vmdk"
     echo "[image] raw -> deterministic streamOptimized VMDK..."
     qemu-img convert -f raw -O vmdk -o subformat=streamOptimized "${RAW}" "${vmdk}"
@@ -183,7 +189,22 @@ PY
             || { echo "[image] cannot ensure bucket s3://${bucket}:" >&2; cat /tmp/snp-mb.err >&2; rm -f /tmp/snp-mb.err; exit 1; }
     fi
     rm -f /tmp/snp-mb.err
-    aws s3 cp "${vmdk}" "s3://${bucket}/${key}" --no-progress; rm -rf "${tmp}"
+    aws s3 cp "${vmdk}" "s3://${bucket}/${key}" --no-progress --checksum-algorithm SHA256
+    # Fail closed. import-snapshot reads whatever sits at this key, so prove the
+    # object is the bytes we just wrote before paying for an import and before
+    # registering an AMI that claims a digest. This is the check whose absence
+    # turned a silent no-op upload into a mislabelled image.
+    local want got
+    want="$(python3 -c 'import base64,hashlib,sys; print(base64.b64encode(hashlib.sha256(open(sys.argv[1],"rb").read()).digest()).decode())' "${vmdk}")"
+    rm -rf "${tmp}"
+    got="$(aws --region "${region}" s3api head-object --bucket "${bucket}" --key "${key}" --checksum-mode ENABLED --query ChecksumSHA256 --output text 2>/dev/null || true)"
+    [[ -n "${got}" && "${got}" == "${want}" ]] || {
+        echo "[image] upload verification failed for s3://${bucket}/${key}" >&2
+        echo "[image]   object checksum = ${got:-<unreadable>}" >&2
+        echo "[image]   local  checksum = ${want}" >&2
+        echo "[image] refusing to import: the image would not measure the digest it is tagged with" >&2
+        exit 1
+    }
     local task; task="$(aws --region "${region}" ec2 import-snapshot --description "${image}" \
         --disk-container "Format=VMDK,UserBucket={S3Bucket=${bucket},S3Key=${key}}" --query 'ImportTaskId' --output text)"
     echo "[image] import-snapshot ${task}; waiting (5-15 min)..."
@@ -198,6 +219,11 @@ PY
         sleep 20
     done
     [[ -n "${snap}" && "${snap}" != None ]] || { echo "[image] no snapshot produced" >&2; exit 1; }
+    # The snapshot is a copy of the object, so the staging object is spent. Drop
+    # it: the name is content-addressed, so leaving it would only cost 30 MB per
+    # build forever.
+    aws --region "${region}" s3 rm "s3://${bucket}/${key}" >/dev/null 2>&1 \
+        || echo "[image] warning: staging object s3://${bucket}/${key} was not removed" >&2
     aws --region "${region}" ec2 deregister-image --image-id "$(aws --region "${region}" ec2 describe-images --owners self --filters "Name=name,Values=${image}" --query 'Images[-1].ImageId' --output text 2>/dev/null)" >/dev/null 2>&1 || true
     local uefi_data; uefi_data="$(tr -d '\n' < "${SECURE_BOOT_DIR}/aws-uefi-data.b64")"
     # Tag the image with the app bundle digest it embeds. The bundle rides
