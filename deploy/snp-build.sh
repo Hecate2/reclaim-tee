@@ -153,7 +153,13 @@ package_aws() {
     local image="snp-${tag}" region="${AWS_SNP_REGION:?set AWS_SNP_REGION in deploy/.env}"
     local acct bucket key tmp vmdk
     acct="$(aws sts get-caller-identity --query Account --output text)"
-    bucket="${SNP_S3_BUCKET:-snp-vmimport-${acct}}"; key="${image}.vmdk"
+    # The staging object is named after the app the disk carries, not after the
+    # image alone. Under a fixed name a stale object is indistinguishable from
+    # this build's, and that is not hypothetical: when an upload did not land,
+    # import-snapshot silently consumed the previous build's disk and the AMI was
+    # registered tagged with this build's digest -- the digest the launcher pins
+    # the TEE to, and the one the Hub is then told to expect.
+    bucket="${SNP_S3_BUCKET:-snp-vmimport-${acct}}"; key="${image}-${DIGEST#snp-app:}.vmdk"
     tmp="$(mktemp -d)"; vmdk="${tmp}/disk.vmdk"
     echo "[image] raw -> deterministic streamOptimized VMDK..."
     qemu-img convert -f raw -O vmdk -o subformat=streamOptimized "${RAW}" "${vmdk}"
@@ -183,7 +189,27 @@ PY
             || { echo "[image] cannot ensure bucket s3://${bucket}:" >&2; cat /tmp/snp-mb.err >&2; rm -f /tmp/snp-mb.err; exit 1; }
     fi
     rm -f /tmp/snp-mb.err
-    aws s3 cp "${vmdk}" "s3://${bucket}/${key}" --no-progress; rm -rf "${tmp}"
+    # A single PUT rather than `s3 cp`: cp switches to a multipart upload above
+    # 8 MB, and S3 then reports a composite checksum (sha256 of the part
+    # checksums, suffixed "-N") which can never equal the file's own digest.
+    # The VMDK is ~31 MB, far below the 5 GB single-PUT limit.
+    aws --region "${region}" s3api put-object \
+        --bucket "${bucket}" --key "${key}" --body "${vmdk}" --checksum-algorithm SHA256 >/dev/null
+    # Fail closed. import-snapshot reads whatever sits at this key, so prove the
+    # object is the bytes we just wrote before paying for an import and before
+    # registering an AMI that claims a digest. This is the check whose absence
+    # turned a silent no-op upload into a mislabelled image.
+    local want got
+    want="$(python3 -c 'import base64,hashlib,sys; print(base64.b64encode(hashlib.sha256(open(sys.argv[1],"rb").read()).digest()).decode())' "${vmdk}")"
+    rm -rf "${tmp}"
+    got="$(aws --region "${region}" s3api head-object --bucket "${bucket}" --key "${key}" --checksum-mode ENABLED --query ChecksumSHA256 --output text 2>/dev/null || true)"
+    [[ -n "${got}" && "${got}" == "${want}" ]] || {
+        echo "[image] upload verification failed for s3://${bucket}/${key}" >&2
+        echo "[image]   object checksum = ${got:-<unreadable>}" >&2
+        echo "[image]   local  checksum = ${want}" >&2
+        echo "[image] refusing to import: the image would not measure the digest it is tagged with" >&2
+        exit 1
+    }
     local task; task="$(aws --region "${region}" ec2 import-snapshot --description "${image}" \
         --disk-container "Format=VMDK,UserBucket={S3Bucket=${bucket},S3Key=${key}}" --query 'ImportTaskId' --output text)"
     echo "[image] import-snapshot ${task}; waiting (5-15 min)..."
@@ -198,6 +224,11 @@ PY
         sleep 20
     done
     [[ -n "${snap}" && "${snap}" != None ]] || { echo "[image] no snapshot produced" >&2; exit 1; }
+    # The snapshot is a copy of the object, so the staging object is spent. Drop
+    # it: the name is content-addressed, so leaving it would only cost 30 MB per
+    # build forever.
+    aws --region "${region}" s3 rm "s3://${bucket}/${key}" >/dev/null 2>&1 \
+        || echo "[image] warning: staging object s3://${bucket}/${key} was not removed" >&2
     aws --region "${region}" ec2 deregister-image --image-id "$(aws --region "${region}" ec2 describe-images --owners self --filters "Name=name,Values=${image}" --query 'Images[-1].ImageId' --output text 2>/dev/null)" >/dev/null 2>&1 || true
     local uefi_data; uefi_data="$(tr -d '\n' < "${SECURE_BOOT_DIR}/aws-uefi-data.b64")"
     # Tag the image with the app bundle digest it embeds. The bundle rides
@@ -234,7 +265,7 @@ record_digest_env() {
     fi
     [[ "${role}" == k ]] && kd="${digest}" || td="${digest}"
     { echo "SNP_K_DIGEST=${kd}"; echo "SNP_T_DIGEST=${td}"; echo "COMMIT=${commit}"; } > "${f}"
-    echo "[build]   recorded ${role^^} digest in deploy/snp-digests.env (COMMIT=${commit:0:7})"
+    echo "[build]   recorded ${ROLE_UC} digest in deploy/snp-digests.env (COMMIT=${commit:0:7})"
 }
 
 ROLE="${1:?usage: $0 <k|t> <gcp|aws> [TAG]}"
@@ -242,6 +273,11 @@ CLOUD="${2:?usage: $0 <k|t> <gcp|aws> [TAG]}"
 case "${ROLE}" in k|t) ;; *) echo "role must be k|t" >&2; exit 1 ;; esac
 case "${CLOUD}" in gcp|aws) ;; *) echo "cloud must be gcp|aws" >&2; exit 1 ;; esac
 TAG="${3:-tee${ROLE}-${CLOUD}}"
+# ${VAR^^} is bash-4 syntax, but this script is run from the operator's Mac,
+# where /bin/bash is 3.2. Deriving the uppercase label with tr keeps the two
+# report lines at the end of the build from aborting on "bad substitution" --
+# which would fail the build after the image was already registered.
+ROLE_UC="$(tr '[:lower:]' '[:upper:]' <<< "${ROLE}")"
 
 # Reproducible per-commit app build. The app is VCS-stamped, so its digest is
 # commit-specific AND a dirty tree taints it. Default to the latest app_images
@@ -312,4 +348,4 @@ fi
 echo "[build] DONE tee_${ROLE}@${CLOUD}"
 echo "[build]   base UKI   = ${BASE_UKI}  (diagnostic only; trust root is Secure Boot R)"
 echo "[build]   app digest = ${DIGEST}  (commit $(git -C "${REPO_ROOT}" rev-parse --short HEAD))"
-echo "[build]   -> record in deploy/image-history.json + allowlist on the router; pass to snp-pair.sh via SNP_${ROLE^^}_DIGEST"
+echo "[build]   -> record in deploy/image-history.json + allowlist on the router; pass to snp-pair.sh via SNP_${ROLE_UC}_DIGEST"
