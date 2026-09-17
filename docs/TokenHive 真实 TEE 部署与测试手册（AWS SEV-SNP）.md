@@ -386,7 +386,7 @@ cd tokenhive/cloudtest/snp
 
 ### 9.3 机密实例的配置注入与 TOFU 自举
 
-机密实例没有 sshd，其运行配置完全由 loader 从 EC2 user-data 注入为环境变量：`TEE_ADDR`（mTLS 请求面监听地址）、`TEE_RELAY`（双机模式的反向隧道地址）、`TEE_PLATFORM=sevsnp`（强制真实 attestation，非 SNP 环境直接失败）、`TEE_MTLS=1`（RA-TLS + 要求 hub 客户端证书）、`TEE_CA=/run/bundle/mtls/mp-ca.pem`（mock provider 的 CA 打进被测 bundle，tee 据此校验上游 TLS 端点，机密实例无系统信任库可依）、`TEE_INIT_ADDR`/`TEE_INIT_TOKEN`（TOFU 自举监听器）、`TEE_POLICY_DIR=/run/bundle/policy`（策略目录：sevsnp 下必须指向被测 bundle 的 `./policy` 本体或其逐字节副本，换一份即拒绝启动）。tee 的每个命令行 flag 都支持从同名环境变量回退取值，因此被测 bundle 保持字节一致，运行时路由完全由 VM metadata 决定。
+机密实例没有 sshd，其运行配置完全由 loader 从 EC2 user-data 注入为环境变量：`TEE_ADDR`（mTLS 请求面监听地址）、`TEE_RELAY`（双机模式的反向隧道地址）、`TEE_PLATFORM=sevsnp`（强制真实 attestation，非 SNP 环境直接失败）、`TEE_MTLS=1`（RA-TLS + 要求 hub 客户端证书）、`TEE_CA=/run/bundle/mtls/mp-ca.pem`（mock provider 的 CA 打进被测 bundle，tee 据此校验上游 TLS 端点，机密实例无系统信任库可依）、`TEE_INIT_ADDR`/`TEE_INIT_TOKEN`（TOFU 自举监听器）。策略目录**不在**这份 user-data 里：tee 的 `-policy-dir`/`TEE_POLICY_DIR` 留空，于是按默认规则直接取被测 bundle 的 `./policy` 本体（sevsnp 下该文件必须存在，否则拒绝启动）。tee 的每个命令行 flag 都支持从同名环境变量回退取值，因此被测 bundle 保持字节一致，运行时路由完全由 VM metadata 决定。
 
 mockprovider 也改用固定身份：`-ca/-cert/-key` 三个 flag 让它加载并复现 bundle 内 `mtls/mp-*.pem` 的身份，并把 CA 复写到 `TOKENHIVE_SIM_DIR/ca.pem`（供 agent 拉取模型列表时信任该模拟提供商）。这正是真实闭环的必要条件——tee 与 mockprovider 分处不同主机，CA 必须随被测 bundle 度量进 TEE，而非运行时从无 sshd 的机密实例经不可信路径传递。
 
