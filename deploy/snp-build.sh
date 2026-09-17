@@ -234,7 +234,7 @@ record_digest_env() {
     fi
     [[ "${role}" == k ]] && kd="${digest}" || td="${digest}"
     { echo "SNP_K_DIGEST=${kd}"; echo "SNP_T_DIGEST=${td}"; echo "COMMIT=${commit}"; } > "${f}"
-    echo "[build]   recorded ${role^^} digest in deploy/snp-digests.env (COMMIT=${commit:0:7})"
+    echo "[build]   recorded ${ROLE_UC} digest in deploy/snp-digests.env (COMMIT=${commit:0:7})"
 }
 
 ROLE="${1:?usage: $0 <k|t> <gcp|aws> [TAG]}"
@@ -242,6 +242,11 @@ CLOUD="${2:?usage: $0 <k|t> <gcp|aws> [TAG]}"
 case "${ROLE}" in k|t) ;; *) echo "role must be k|t" >&2; exit 1 ;; esac
 case "${CLOUD}" in gcp|aws) ;; *) echo "cloud must be gcp|aws" >&2; exit 1 ;; esac
 TAG="${3:-tee${ROLE}-${CLOUD}}"
+# ${VAR^^} is bash-4 syntax, but this script is run from the operator's Mac,
+# where /bin/bash is 3.2. Deriving the uppercase label with tr keeps the two
+# report lines at the end of the build from aborting on "bad substitution" --
+# which would fail the build after the image was already registered.
+ROLE_UC="$(tr '[:lower:]' '[:upper:]' <<< "${ROLE}")"
 
 # Reproducible per-commit app build. The app is VCS-stamped, so its digest is
 # commit-specific AND a dirty tree taints it. Default to the latest app_images
@@ -312,4 +317,4 @@ fi
 echo "[build] DONE tee_${ROLE}@${CLOUD}"
 echo "[build]   base UKI   = ${BASE_UKI}  (diagnostic only; trust root is Secure Boot R)"
 echo "[build]   app digest = ${DIGEST}  (commit $(git -C "${REPO_ROOT}" rev-parse --short HEAD))"
-echo "[build]   -> record in deploy/image-history.json + allowlist on the router; pass to snp-pair.sh via SNP_${ROLE^^}_DIGEST"
+echo "[build]   -> record in deploy/image-history.json + allowlist on the router; pass to snp-pair.sh via SNP_${ROLE_UC}_DIGEST"

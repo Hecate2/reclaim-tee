@@ -9,9 +9,13 @@ VALID_COMMIT="$(git -C "${REPO_ROOT}" rev-parse --verify HEAD~1)"
 ABBREVIATED_COMMIT="${VALID_COMMIT:0:12}"
 NON_COMMIT="$(git -C "${REPO_ROOT}" rev-parse --verify HEAD:go.mod)"
 MISSING_COMMIT="$(printf '0%.0s' {1..40})"
+# Same commit, upper-cased: the contract is an exact lowercase 40-hex ID, so
+# this must be rejected. Built with tr rather than ${VAR^^} because /bin/bash is
+# 3.2 on macOS, where that syntax is a "bad substitution" that kills the test.
+UPPERCASE_COMMIT="$(tr '[:lower:]' '[:upper:]' <<< "${VALID_COMMIT}")"
 
 snp_require_source_commit "${REPO_ROOT}" "${VALID_COMMIT}"
-for invalid in --help "${ABBREVIATED_COMMIT}" "${NON_COMMIT}" "${MISSING_COMMIT}" "${VALID_COMMIT^^}"; do
+for invalid in --help "${ABBREVIATED_COMMIT}" "${NON_COMMIT}" "${MISSING_COMMIT}" "${UPPERCASE_COMMIT}"; do
     if snp_require_source_commit "${REPO_ROOT}" "${invalid}" 2>/dev/null; then
         echo "accepted invalid source commit: ${invalid}" >&2
         exit 1
