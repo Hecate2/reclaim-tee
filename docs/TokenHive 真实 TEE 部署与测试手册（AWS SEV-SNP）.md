@@ -401,7 +401,7 @@ mockprovider 也改用固定身份：`-ca/-cert/-key` 三个 flag 让它加载�
 ./crosshost.sh down          # 严格按双 tag 终止两台实例
 ```
 
-`up` 用幂等语义确保 VPC、子网、安全组、密钥对"先查后建"，并把跨主机端口（18085 hub relay、18090/18091 tee）在安全组内放行（源为安全组自身，仅组内成员互通）。普通主机先启动，其公网 IP 自动注入 tee 的 `TEE_RELAY`。`up` 还会把当前 bundle 的摘要记录进状态（`crosshost.json` 的 `tee.app_hash`），因为 hub 必须把它写成 `-expected-app snp-app:<hash>` 才能接受这篇由 loader 度量的应用的证明。`deploy` 在启动 hub 时带上 `-allowed-platforms aws-sev-snp -expected-app snp-app:<hash>`：前者令 hub 放行真实 SEV-SNP 平台（默认值 `simulated` 会拒绝真实证明），后者把应用身份锚定到被测 bundle 的精确字节。实测闭环中，hub 日志出现 `relay` 建立与 `chat/completions` 响应即代表请求面与上游面都真实走通；tee 控制台出现 `Memory Encryption Features active: AMD SEV SEV-ES SEV-SNP`、`SEV: SNP running at VMPL0` 与 `extended PCR 8 with app_sha256` 即代表硬件机密内存与度量链激活。
+`up` 用幂等语义确保 VPC、子网、安全组、密钥对"先查后建"，并把跨主机端口（18085 hub relay、18090/18091 tee）在安全组内放行（源为安全组自身，仅组内成员互通）。普通主机先启动，其公网 IP 自动注入 tee 的 `TEE_RELAY`。`up` 还会把当前 bundle 的摘要记录进状态（`crosshost.json` 的 `tee.app_hash`），因为 hub 必须把它写成 `-expected-app snp-app:<hash>` 才能接受这篇由 loader 度量的应用的证明。`deploy` 在启动 hub 时带上 `-allowed-platforms aws-sev-snp -expected-app snp-app:<hash>`：前者令 hub 放行真实 SEV-SNP 平台（默认值 `simulated` 会拒绝真实证明），后者把应用身份锚定到被测 bundle 的精确字节。`deploy` 还会把 `build` 时生成的那一份 `policy.cbor` 上传到普通主机，并令 hub 以 `-policy-dir` 读取它——hub 的准入与 `/v1/policies` 必须与 TEE 执行的是同一份白名单，而只有 build 的副本才是被 `SNP_APP_HASH` 覆盖的字节；因此未先 `build` 时 `deploy` 会直接报错退出，不会另生成一份。TEE 侧无需配置：`/run/bundle/policy` 存在即优先加载它（`shared.ResolvePolicyDir`），显式 `-policy-dir`/`TEE_POLICY_DIR` 仍可覆盖。实测闭环中，hub 日志出现 `relay` 建立与 `chat/completions` 响应即代表请求面与上游面都真实走通；tee 控制台出现 `Memory Encryption Features active: AMD SEV SEV-ES SEV-SNP`、`SEV: SNP running at VMPL0` 与 `extended PCR 8 with app_sha256` 即代表硬件机密内存与度量链激活。
 
 ### 9.5 单机运行全流程
 

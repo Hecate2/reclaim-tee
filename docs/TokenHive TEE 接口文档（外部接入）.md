@@ -321,7 +321,7 @@ SignedReceipt = {
 
 ### 7.1 谁定义、如何生效
 
-- 全部署**只有一份** Policy，是部署方的，不是每个 Provider 一份、也不由 Provider 声明。它随 TEE 被测 bundle 一起打包加载（本地仿真从 `TOKENHIVE_SIM_DIR` 读取 `policy.cbor`；AWS SEV-SNP 上由 `pack.sh` 通过 `SNP_POLICY_DIR` 目录烤进被测 bundle 的 `./policy/`，tee 以 `-policy-dir` 指向该目录）。
+- 全部署**只有一份** Policy，是部署方的，不是每个 Provider 一份、也不由 Provider 声明。它随 TEE 被测 bundle 一起打包加载：`pack.sh` 把 `SNP_POLICY_DIR` 的 `policy.cbor` 烤进被测 bundle 的 `./policy/`，loader 解包到 `/run/bundle`，运行在里面的进程（tee、hub）按同一条规则取用它——显式 `-policy-dir`/`TEE_POLICY_DIR` 优先，其次是 bundle 里的 `./policy`，最后才是 `TOKENHIVE_SIM_DIR`（`shared.ResolvePolicyDir`）。本地仿真没有 bundle，于是走最后一条：`EnsureDefaults` 在状态目录里生成 `policy.cbor`。bundle 外的 Hub（跨主机部署时跑在普通主机上）由 `crosshost.sh deploy` 收到同一份 `policy.cbor` 并以 `-policy-dir` 指向它，这样 hub 的准入与 `/v1/policies` 与 TEE 执行的是**同一份、且被 `SNP_APP_HASH` 覆盖的字节**。
 - **部署时定死、运行期不可改**：TEE 内没有任何修改 Policy 的代码路径，加载发生在进程启动、之后只读。因此不存在轮换接口，也不需要防回滚逻辑。
 - 完整性由**证明**背书：TEE 启动时计算这份 Policy 的哈希（`policy.Hash()`），并把它绑进 attestation（仿真落在证据的 `policy_hash` 字段；AWS 上策略文件作为被测 bundle 的一部分被 SNP_APP_HASH 一并测量）。**回执里也带同一个 `policy_hash`**，且验证方一旦 pin 了部署白名单，`attest.Verifier` 会逐条比对回执所载的哈希，不符即拒——这才是"回执证明了飞地按这份白名单运行"。由于策略字节进入了被测 bundle，**换白名单会改变应用测量指纹（`snp-app:<hash>`）**，而不是在运行期静默放宽 TEE 接受的边界。
 - **准入**：Provider Agent 上线时，Hub 用同一份 Policy 按 host+path 核对它的上游是否被允许（见第 12 章）；不允许的 Agent 在上线处即被拒，而不是等到作业被 TEE 拒绝。
