@@ -322,6 +322,7 @@ SignedReceipt = {
 ### 7.1 谁定义、如何生效
 
 - 全部署**只有一份** Policy，是部署方的，不是每个 Provider 一份、也不由 Provider 声明。它随 TEE 被测 bundle 一起打包加载：`pack.sh` 把 `SNP_POLICY_DIR` 的 `policy.cbor` 烤进被测 bundle 的 `./policy/`，loader 解包到 `/run/bundle`，运行在里面的进程（tee、hub）按同一条规则取用它——显式 `-policy-dir`/`TEE_POLICY_DIR` 优先，其次是 bundle 里的 `./policy`，最后才是 `TOKENHIVE_SIM_DIR`（`shared.ResolvePolicyDir`）。本地仿真没有 bundle，于是走最后一条：`EnsureDefaults` 在状态目录里生成 `policy.cbor`。bundle 外的 Hub（跨主机部署时跑在普通主机上）由 `crosshost.sh deploy` 收到同一份 `policy.cbor` 并以 `-policy-dir` 指向它，这样 hub 的准入与 `/v1/policies` 与 TEE 执行的是**同一份、且被 `SNP_APP_HASH` 覆盖的字节**。
+- **写下来的是一份 JSON 文档**：白名单以 `tokenhive/policy/whitelist.json` 维护（随代码发行，由 `policy.Default` 读取），`-emit-policy-dir` 把它转成 `policy.cbor` 交付给 bundle——`policy.cbor` 是派生件，文档才是唯一定义。文档只写规则（`version`/`hosts`/`rules`/`limits`）；**有效期窗口不在文档里**，由加载方统一盖成"永不过期"（`policy.NoIssueDate`/`policy.NoExpiry`）：日期是策略而不是规则，且 `IssuedAt` 必须是常量，否则每次构建都会挪动 `SNP_APP_HASH`。文档里出现未知字段会被**直接拒绝**，不会静默丢弃——白名单最不能有的失败就是"文件写着一条规则、飞地其实没执行"。改白名单=改这份文档并重新构建。
 - **部署时定死、运行期不可改**：TEE 内没有任何修改 Policy 的代码路径，加载发生在进程启动、之后只读。因此不存在轮换接口，也不需要防回滚逻辑。
 - 完整性由**证明**背书：TEE 启动时计算这份 Policy 的哈希（`policy.Hash()`），并把它绑进 attestation（仿真落在证据的 `policy_hash` 字段；AWS 上策略文件作为被测 bundle 的一部分被 SNP_APP_HASH 一并测量）。**回执里也带同一个 `policy_hash`**，且验证方一旦 pin 了部署白名单，`attest.Verifier` 会逐条比对回执所载的哈希，不符即拒——这才是"回执证明了飞地按这份白名单运行"。由于策略字节进入了被测 bundle，**换白名单会改变应用测量指纹（`snp-app:<hash>`）**，而不是在运行期静默放宽 TEE 接受的边界。
 - **准入**：Provider Agent 上线时，Hub 用同一份 Policy 按 host+path 核对它的上游是否被允许（见第 12 章）；不允许的 Agent 在上线处即被拒，而不是等到作业被 TEE 拒绝。
@@ -329,15 +330,15 @@ SignedReceipt = {
 
 ### 7.2 Policy 字段
 
-| 键 | 字段 | 说明 |
-|---|---|---|
-| 1 | Version | 1 |
-| 4 | Hosts | 允许的上游 `host:port` 列表（≤16） |
-| 5 | Rules | 规则列表（≤64）：`{Methods, Path, AllowStream, QueryKeys, AllowAnyQuery}` |
-| 7 | Limits | `{MaxResponseBytes, MaxBodyBytes, AllowedHeaders}` |
-| 8/9 | IssuedAt / ExpiresAt | 生效窗口 |
+| 键 | 文档键（whitelist.json） | 字段 | 说明 |
+|---|---|---|---|
+| 1 | `version` | Version | 1 |
+| 4 | `hosts` | Hosts | 允许的上游 `host:port` 列表（≤16） |
+| 5 | `rules` | Rules | 规则列表（≤64）：`{methods, path, allow_stream, query_keys, allow_any_query}` |
+| 7 | `limits` | Limits | `{max_response_bytes, max_body_bytes, allowed_headers}` |
+| 8/9 | `issued_at` / `expires_at` | IssuedAt / ExpiresAt | 生效窗口；**不在文档里**，由加载方盖成永不过期 |
 
-> 上表即全部字段。键号是线格式的一部分：空缺的键号一律不再使用，也不会被重新编号。
+> 上表即全部字段。键号是线格式（CBOR）的一部分：空缺的键号一律不再使用，也不会被重新编号。文档键即 `tokenhive/policy/whitelist.json` 的写法，该文件本身就是一份完整示例。
 
 ### 7.3 授权判定与拒绝原因
 
