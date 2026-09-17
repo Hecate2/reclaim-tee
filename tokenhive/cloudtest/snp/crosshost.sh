@@ -16,12 +16,17 @@
 #   ./crosshost.sh up        launch ordinary host + confidential tee (crosshost.json)
 #   ./crosshost.sh up --single  launch single-instance mode (one confidential tee)
 #   ./crosshost.sh up --tee-only  launch ONLY the confidential tee (cross-host
-#               bundle's real tee binary), no ordinary host / Hub anywhere
+#               bundle's real tee binary), no ordinary host / Hub anywhere.
+#               Add --host-ip <hub-ip> when the Hub lives on a separate machine:
+#               it becomes the tee's TEE_RELAY target (the address as the tee
+#               sees the Hub, i.e. the private IP when both share this VPC/SG).
 #   ./crosshost.sh fetch     ssh to host: pull tee RA-TLS cert via /v1/init-cert
 #   ./crosshost.sh deploy    scp binaries+certs, start mockprovider/hub/agent on host
 #   ./crosshost.sh drive     curl a chat request via the host's Hub
 #   ./crosshost.sh verify    hub/tee/agent logs + tee console attestation
 #   ./crosshost.sh down      terminate BOTH instances strictly by tag
+#   ./crosshost.sh down --tee-only  terminate ONLY the recorded confidential tee,
+#               leaving a separately-provisioned Hub host untouched
 #   ./crosshost.sh down --dry-run   list what would be terminated, delete nothing
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"          # cloudtest/snp
@@ -233,11 +238,30 @@ cmd_build_single() {
 
 cmd_up() {
   [ -f "${CERTS_DIR}/hub-ca.pem" ] || { echo "run ./crosshost.sh build first (certs)"; exit 1; }
-  local a token mode="" name="snp-tokenhive" digest
-  case "${2:-}" in
-    --single)   mode="--single";   name="snp-tokenhive-single" ;;
-    --tee-only) mode="--tee-only" ;;
-  esac
+  local a token mode="" name="snp-tokenhive" digest host_ip="" host_arg=""
+  shift || true                       # drop the "up" verb
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --single)   mode="--single";   name="snp-tokenhive-single" ;;
+      --tee-only) mode="--tee-only" ;;
+      --host-ip)  shift; host_ip="${1:-}" ;;
+      *) echo "up: unknown option $1" >&2; exit 2 ;;
+    esac
+    shift
+  done
+  # --host-ip names the Hub's address as the TEE reaches it. Only a bare tee
+  # needs it: cross-host mode derives the relay from the ordinary host it just
+  # launched, and single mode runs the Hub on loopback with no relay at all.
+  # Refusing the mismatch is the point — ignoring it would leave a decoupled
+  # deploy quietly aimed at the inert placeholder relay, and nothing dispatches
+  # jobs without a Hub to notice.
+  if [[ -n "${host_ip}" ]]; then
+    [[ "${mode}" == "--tee-only" ]] || {
+      echo "up: --host-ip requires --tee-only (cross-host derives the relay itself; --single has none)" >&2
+      exit 2
+    }
+    host_arg="--host-ip ${host_ip}"
+  fi
   a="$(ami_id "${name}")"
   log "AMI ${a}"
   # Pin the attested app identity for the Hub: the AMI embeds the app bundle
@@ -262,7 +286,7 @@ cmd_up() {
     token="$(openssl rand -hex 16)"
     printf '%s\n' "${token}" > "${CERTS_DIR}/init-token"
   fi
-  ( cd "${HERE}" && "${PY}" crosshost.py "${a}" --token "${token}" ${mode} ) | tee -a "${LOG_DIR}/run.log"
+  ( cd "${HERE}" && "${PY}" crosshost.py "${a}" --token "${token}" ${mode} ${host_arg} ) | tee -a "${LOG_DIR}/run.log"
   # Record it only now that the instance exists: crosshost.py owns the state
   # file (it creates the tee record merged into below), and an identity recorded
   # for an instance that never came up would pin the next deploy to an app that
@@ -411,9 +435,66 @@ EOF
   dump_tee_console "$(tee_field public_ip)"
 }
 
+# cmd_down [--dry-run] [--tee-only]
+# A plain down deletes EVERY instance carrying the cloudtest tag pair. That is
+# right for a coupled run: both instances were launched for this state, and
+# matching purely by tag is what keeps teardown working after crosshost.json is
+# lost. It is wrong for a decoupled one, where the Hub host carries the same tag
+# pair but was provisioned separately (a colleague's Hub, or an
+# `up --tee-only --host-ip` placement) and has to outlive the tee.
+# --tee-only narrows teardown to the tee recorded in crosshost.json. The record
+# is never trusted on its own: the instance is re-checked for both tags before
+# it is terminated, so a stale or hand-edited entry cannot widen the match.
 cmd_down() {
-  log "step: down (strict tag deletion of all matching instances)"
-  ( cd "${CLOUDTEST}" && "${PY}" delete.py "${1:-}" ) | tee -a "${LOG_DIR}/run.log"
+  local dry_run="" tee_only="" arg iid
+  for arg in "$@"; do
+    case "${arg}" in
+      --dry-run)  dry_run="--dry-run" ;;
+      --tee-only) tee_only="1" ;;
+      *) echo "down: unknown option ${arg}" >&2; exit 2 ;;
+    esac
+  done
+  if [[ -z "${tee_only}" ]]; then
+    log "step: down (strict tag deletion of all matching instances)"
+    ( cd "${CLOUDTEST}" && "${PY}" delete.py ${dry_run} ) | tee -a "${LOG_DIR}/run.log"
+    return
+  fi
+  iid="$(tee_field instance_id 2>/dev/null || true)"
+  if [[ -z "${iid}" ]]; then
+    log "step: down --tee-only (no tee record in ${HOSTS}; nothing to terminate)"
+    return
+  fi
+  log "step: down --tee-only (terminate only the recorded confidential tee)"
+  py_cd - "${iid}" ${dry_run} <<'PY' | tee -a "${LOG_DIR}/run.log"
+import boto3, sys
+from config import load
+
+iid = sys.argv[1]
+dry = "--dry-run" in sys.argv[2:]
+cfg = load()
+ec2 = boto3.client("ec2", region_name=cfg.region)
+try:
+    inst = ec2.describe_instances(InstanceIds=[iid])["Reservations"][0]["Instances"][0]
+except Exception as e:
+    # The record can outlive its instance. Only "gone" is recoverable here; every
+    # other failure (auth, throttling) has to surface rather than read as "done".
+    code = getattr(e, "response", {}).get("Error", {}).get("Code", "")
+    if code not in ("InvalidInstanceID.NotFound", "InvalidInstanceID.Malformed"):
+        raise
+    print(f"==> {iid} no longer exists; nothing to terminate")
+    sys.exit(0)
+tags = {t["Key"]: t["Value"] for t in inst.get("Tags", [])}
+if tags.get(cfg.tag_owner) != cfg.tag_owner_value or tags.get(cfg.tag_user) != cfg.user:
+    sys.exit(f"==> {iid} does not carry the cloudtest tags; refusing to terminate it")
+print(f"    {iid}  {inst['State']['Name']}  {inst.get('PrivateIpAddress', '-')}")
+if dry:
+    print(f"==> dry-run: {iid} would be terminated; nothing deleted")
+elif inst["State"]["Name"] in ("terminated", "shutting-down"):
+    print(f"==> {iid} is already {inst['State']['Name']}; nothing to do")
+else:
+    ec2.terminate_instances(InstanceIds=[iid])
+    print(f"==> terminated: {iid}")
+PY
 }
 
 case "${1:-}" in
@@ -424,8 +505,8 @@ case "${1:-}" in
   deploy)  cmd_deploy ;;
   drive)   cmd_drive ;;
   verify)  cmd_verify ;;
-  down)    cmd_down "${2:-}" ;;
+  down)    cmd_down "${@:2}" ;;
   *)
-    sed -n '2,25p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    awk 'NR==1{next} /^set -euo/{exit} {sub(/^# ?/,""); print}' "${BASH_SOURCE[0]}"
     exit 1 ;;
 esac
