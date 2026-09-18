@@ -229,7 +229,10 @@ PY
     # build forever.
     aws --region "${region}" s3 rm "s3://${bucket}/${key}" >/dev/null 2>&1 \
         || echo "[image] warning: staging object s3://${bucket}/${key} was not removed" >&2
-    aws --region "${region}" ec2 deregister-image --image-id "$(aws --region "${region}" ec2 describe-images --owners self --filters "Name=name,Values=${image}" --query 'Images[-1].ImageId' --output text 2>/dev/null)" >/dev/null 2>&1 || true
+    # Deregister the previous AMI and release its EBS snapshots
+    aws --region "${region}" ec2 deregister-image \
+        --image-id "$(aws --region "${region}" ec2 describe-images --owners self --filters "Name=name,Values=${image}" --query 'Images[-1].ImageId' --output text 2>/dev/null)" \
+        --delete-associated-snapshots >/dev/null 2>&1 || true
     local uefi_data; uefi_data="$(tr -d '\n' < "${SECURE_BOOT_DIR}/aws-uefi-data.b64")"
     # Tag the image with the app bundle digest it embeds. The bundle rides
     # inside this AMI, so the digest is a statement about the image, and it has
