@@ -166,6 +166,14 @@ func RegisterWithRetry(ctx context.Context, register func(context.Context) error
 	}
 }
 
+// RATLSRefresher is the rotation surface RunRATLSRefresh drives. *RATLSManager
+// is the direct implementation; a platform adapter whose Refresh also
+// re-verifies the rotated epoch before publishing it satisfies this too, so
+// both callers share one cadence and one failure policy.
+type RATLSRefresher interface {
+	Refresh(context.Context) error
+}
+
 // RunRATLSRefresh rotates the RA-TLS cert on a fixed interval until ctx
 // is cancelled. Errors are logged; the loop continues so a transient
 // launcher-socket failure doesn't kill the goroutine.
@@ -180,7 +188,7 @@ func RegisterWithRetry(ctx context.Context, register func(context.Context) error
 // until the next one — letting SEV-SNP track the actual NitroTPM leaf expiry
 // (refresh SNPRefreshMargin before NotAfter) instead of a fixed cadence. A nil
 // callback (or a non-positive return) falls back to the fixed ratlsRefreshInterval().
-func RunRATLSRefresh(ctx context.Context, ratls *RATLSManager, postRefresh func() error, nextInterval func() time.Duration, health *AttestationHealth, logger *Logger) {
+func RunRATLSRefresh(ctx context.Context, ratls RATLSRefresher, postRefresh func() error, nextInterval func() time.Duration, health *AttestationHealth, logger *Logger) {
 	// Run postRefresh once immediately so the per-session attestation
 	// cache is populated before the server starts accepting traffic.
 	// Without this, the cache sits empty for the first RATLSRefreshInterval
