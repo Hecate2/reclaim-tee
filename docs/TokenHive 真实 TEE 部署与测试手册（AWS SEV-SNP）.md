@@ -368,7 +368,7 @@ SNP_TEST_RESULT matched=yes attestation_type=secure-boot app_hash=6944dc93157560
 
 **双机（cross-host）拓扑**：一台普通 EC2 实例运行 hub（请求网关）、provider agent（上游代理）与 mockprovider（模拟模型服务）；一台 SEV-SNP 机密实例运行真正的 `tee` 二进制（loader 的 broker/app 双进程模式）。hub 通过 mTLS（mutual TLS，双向传输层安全）主动连接 tee 的 `/v1/execute` 请求面；tee 通过 WebSocket 反向隧道连接 hub 的 `/v1/relay` 上游面，经 agent 隧道访问 mockprovider。这种形态最接近生产部署：hub 与 provider agent 可以位于家庭私有网络（只有反向隧道出站，无需入站端口）。
 
-**单机（single）拓扑**：只用一台 SEV-SNP 机密实例，其 bundle 的 `./app` 是 supervisor（`tokenhive/cmd/single`），它在实例内以 loopback 依次拉起 mockprovider、真正的 tee、hub 与 provider agent，并通过与双机完全相同的 `/v1/init-cert` 握手把 tee 的 RA-TLS 证书固定给 hub。所有组件都在同一台机密实例内闭环，不需要普通主机。这种形态用于验证"整条业务链都在 TEE 度量范围内"的最强隔离，也方便在没有第二台机器时做端到端回归。
+**单机（single）拓扑**：只用一台 SEV-SNP 机密实例，其 bundle 的 `./app` 是 supervisor（`tokenhive/cmd/single`），它在实例内以 loopback 依次拉起 mockprovider、真正的 tee、hub 与 provider agent；hub 对 tee 采用与双机完全相同的 attestation 校验（`-tee-verify attestation`）。所有组件都在同一台机密实例内闭环，不需要普通主机。这种形态用于验证"整条业务链都在 TEE 度量范围内"的最强隔离，也方便在没有第二台机器时做端到端回归。
 
 两种拓扑共用同一个 bundle：`pack.sh` 的 `TOKENHIVE_BUILD_SINGLE=1` 模式把 supervisor 打成 `./app`、四个真实服务打成 `./svc/*`，并附上 hub 的 mTLS 身份（`./mtls/{hub-ca,hub-cert,hub-key}.pem`）；默认模式则把真实 tee 打成 `./app` 并附 hub-ca。supervisor 在 `TOKENHIVE_SUPERVISE=1` 时执行整个单机闭环，未设置时只是 `exec ./svc/tee`，行为与双机 bundle 完全一致——同一个镜像文件可以按 user-data 切换拓扑。每个拓扑都会把 `SNP_POLICY_DIR` 指向的白名单备份进 bundle 的 `./policy/`（受与 `./app` 相同的 SNP_APP_HASH 测量，见第 5 节）；单机 supervisor 在 bundle 带 `./policy` 时会给 tee 与 hub 都传 `-policy-dir`，令二者读取同一份被测策略。
 
@@ -384,26 +384,28 @@ cd tokenhive/cloudtest/snp
 ./crosshost.sh build-single   # -> snp-tokenhive-single AMI（单机）
 ```
 
-### 9.3 机密实例的配置注入与 TOFU 自举
+### 9.3 机密实例的配置注入与信任建立
 
-机密实例没有 sshd，其运行配置完全由 loader 从 EC2 user-data 注入为环境变量：`TEE_ADDR`（mTLS 请求面监听地址）、`TEE_RELAY`（双机模式的反向隧道地址）、`TEE_PLATFORM=sevsnp`（强制真实 attestation，非 SNP 环境直接失败）、`TEE_MTLS=1`（RA-TLS + 要求 hub 客户端证书）、`TEE_CA=/run/bundle/mtls/mp-ca.pem`（mock provider 的 CA 打进被测 bundle，tee 据此校验上游 TLS 端点，机密实例无系统信任库可依）、`TEE_INIT_ADDR`/`TEE_INIT_TOKEN`（TOFU 自举监听器）。策略目录**不在**这份 user-data 里：tee 的 `-policy-dir`/`TEE_POLICY_DIR` 留空，于是按默认规则直接取被测 bundle 的 `./policy` 本体（sevsnp 下该文件必须存在，否则拒绝启动）。tee 的每个命令行 flag 都支持从同名环境变量回退取值，因此被测 bundle 保持字节一致，运行时路由完全由 VM metadata 决定。
+机密实例没有 sshd，其运行配置完全由 loader 从 EC2 user-data 注入为环境变量：`TEE_ADDR`（mTLS 请求面监听地址）、`TEE_RELAY`（双机模式的反向隧道地址）、`TEE_PLATFORM=sevsnp`（强制真实 attestation，非 SNP 环境直接失败）、`TEE_MTLS=1`（RA-TLS + 要求 hub 客户端证书）、`TEE_CA=/run/bundle/mtls/mp-ca.pem`（mock provider 的 CA 打进被测 bundle，tee 据此校验上游 TLS 端点，机密实例无系统信任库可依）、`TEE_INIT_ADDR`/`TEE_INIT_TOKEN`（明文只读端点，见下）。策略目录**不在**这份 user-data 里：tee 的 `-policy-dir`/`TEE_POLICY_DIR` 留空，于是按默认规则直接取被测 bundle 的 `./policy` 本体（sevsnp 下该文件必须存在，否则拒绝启动）。tee 的每个命令行 flag 都支持从同名环境变量回退取值，因此被测 bundle 保持字节一致，运行时路由完全由 VM metadata 决定。
 
 mockprovider 也改用固定身份：`-ca/-cert/-key` 三个 flag 让它加载并复现 bundle 内 `mtls/mp-*.pem` 的身份，并把 CA 复写到 `TOKENHIVE_SIM_DIR/ca.pem`（供 agent 拉取模型列表时信任该模拟提供商）。这正是真实闭环的必要条件——tee 与 mockprovider 分处不同主机，CA 必须随被测 bundle 度量进 TEE，而非运行时从无 sshd 的机密实例经不可信路径传递。
 
-信任建立采用 TOFU（Trust On First Use，首次使用即信任）自举：tee 在 mTLS 请求面之外，额外监听一个只含 `GET /v1/init-cert` 的明文 HTTP 端口，由 `TEE_INIT_TOKEN` 门禁。hub 在第一次 mTLS 握手前，先从这个端点取回 tee 的 RA-TLS 叶子证书并固定为 `-mtls-ca`。单机模式下 supervisor 对 `127.0.0.1:18091` 做同样的自举，把证书写到 `TOKENHIVE_SIM_DIR/tee-cert.pem`（默认 `/tmp/tee/tee-cert.pem`）供本地 hub 使用。这个设计解决了"机密实例没有带外通道，证书如何送出来"的问题——不是通过 sshd 或串口，而是通过 tee 自己提供的、带令牌的一次性端点。
+**信任建立：attestation，不是证书固定。** hub 以 `-tee-verify attestation` 启动，它不比对任何本地证书文件，而是校验 tee 在握手时出示的 RA-TLS 叶**内部嵌的 SEV-SNP 证据**：证据须链到 AWS/AMD 根、须与那张叶自己的公钥绑定（证据不能被搬到别的密钥上）、并经 `-expected-app snp-app:<sha256>` 收敛到被测应用的精确字节。之所以必须是这个模式：`TEE_PLATFORM=sevsnp` 的实例会**持续轮换**它的 attested epoch（NitroTPM 证据只有小时级有效期，见 `docs/cert-lifetime-audit.md`），一次启动只固定一次的叶证书在第一个刷新周期后就不再匹配。attestation 模式没有任何需要重新分发的东西，因此轮换对部署完全不可见。
+
+> `TEE_INIT_ADDR`/`TEE_INIT_TOKEN` 保留下来的是一个**只读诊断端点**：`GET /v1/init-cert`（明文 HTTP、令牌门禁）返回 tee **当前**监听器所持的那张叶证书，供运维在没有 sshd 的实例上取回并独立核对（`./crosshost.sh fetch`）。它**不是**信任链的一环——hub 不再固定该证书，端点返回什么都不会改变 hub 的判定。单机模式下 supervisor 只用 tee 写出的 `TOKENHIVE_SIM_DIR/tee-cert.pem` 作为"tee 已可服务"的启动信号，不再经该端点回读。
 
 ### 9.4 双机运行全流程
 
 ```bash
 ./crosshost.sh up            # 启动普通主机 + 机密 tee（幂等，可复用未删除的实例）
-./crosshost.sh fetch         # 从 tee 拉取 RA-TLS 证书（TOFU 自举），固定到 .certs/tee-cert.pem
+./crosshost.sh fetch         # 取回 tee 当前的 RA-TLS 叶到 .certs/tee-cert.pem（只供人工核对，不参与信任）
 ./crosshost.sh deploy        # 上传 hub/agent/mockprovider 与证书到普通主机并启动
 ./crosshost.sh drive         # 通过 hub 发送 2 次真实 chat 请求
 ./crosshost.sh verify        # 打印 hub/agent/mockprovider 日志 + tee 控制台（attestation 证据）
 ./crosshost.sh down          # 严格按双 tag 终止两台实例
 ```
 
-`up` 用幂等语义确保 VPC、子网、安全组、密钥对"先查后建"，并把跨主机端口（18085 hub relay、18090/18091 tee）在安全组内放行（源为安全组自身，仅组内成员互通）。普通主机先启动，其公网 IP 自动注入 tee 的 `TEE_RELAY`。`up` 会把**所启动镜像自己携带的摘要**记录进状态（`crosshost.json` 的 `tee.app_hash`）：`snp-build.sh` 注册镜像时用 `snp-app` 标签写下它内嵌的 bundle 摘要，`up` 读这个标签而不是本地 `bin/`——本地 bundle 每次构建都会被覆盖（`build-single` 共用同一路径），而一次「打好了包、却在注册镜像前失败」的构建会让本地文件描述一个任何镜像都不包含的应用。hub 必须把它写成 `-expected-app snp-app:<hash>` 才能接受这篇由 loader 度量的应用的证明。`deploy` 在启动 hub 时带上 `-allowed-platforms aws-sev-snp -expected-app snp-app:<hash>`：前者令 hub 放行真实 SEV-SNP 平台（默认值 `simulated` 会拒绝真实证明），后者把应用身份锚定到被测 bundle 的精确字节。白名单同样按那个身份取：每次 `build` 都把 bundle 归档到 `bin/bundles/<sha256>.tar`（键就是它被测出的摘要），`deploy` 按状态里的 `app_hash` 取回对应归档、从其 `./policy/policy.cbor` 抽出白名单，上传到 `~/policy/policy.cbor`，并以 `-policy-dir "$HOME/policy"` 让 hub 读取——上传点与读取点由同一个变量派生，不会再各写一份而漂移。**取不到能测出该摘要的归档时 `deploy` 直接报错退出**，绝不退而使用「当前构建的那一份」：否则「改了白名单 → 重新构建 → 却部署更早启动的实例」会让 hub 按一套规则准入、而飞地执行另一套。TEE 侧通常无需配置：sevsnp 启动时默认从 `/run/bundle/policy` 加载被测白名单（`shared.ResolvePolicyDir`）；显式 `-policy-dir`/`TEE_POLICY_DIR` 只能复述该目录的精确字节（不一致即拒绝），缺失 `policy.cbor` 同样直接拒绝启动（白名单对真实 TEE 强制，见 §5）。多 vendor 部署（OpenAI 与 Anthropic 卖家并存）时，hub 另需 `-provider-hosts provider=host:port,...` 声明各卖家的上游，未列出的 provider 走 `-host` 默认；该 host 必须在白名单内（上线准入即查），且必须落在对应 agent 的 `-targets` 内，否则流打不开。实测闭环中，hub 日志出现 `relay` 建立与 `chat/completions` 响应即代表请求面与上游面都真实走通；tee 控制台出现 `Memory Encryption Features active: AMD SEV SEV-ES SEV-SNP`、`SEV: SNP running at VMPL0` 与 `extended PCR 8 with app_sha256` 即代表硬件机密内存与度量链激活。
+`up` 用幂等语义确保 VPC、子网、安全组、密钥对"先查后建"，并把跨主机端口（18085 hub relay、18090/18091 tee）在安全组内放行（源为安全组自身，仅组内成员互通）。普通主机先启动，其公网 IP 自动注入 tee 的 `TEE_RELAY`。`up` 会把**所启动镜像自己携带的摘要**记录进状态（`crosshost.json` 的 `tee.app_hash`）：`snp-build.sh` 注册镜像时用 `snp-app` 标签写下它内嵌的 bundle 摘要，`up` 读这个标签而不是本地 `bin/`——本地 bundle 每次构建都会被覆盖（`build-single` 共用同一路径），而一次「打好了包、却在注册镜像前失败」的构建会让本地文件描述一个任何镜像都不包含的应用。hub 必须把它写成 `-expected-app snp-app:<hash>` 才能接受这篇由 loader 度量的应用的证明。`deploy` 在启动 hub 时带上 `-tee-verify attestation -allowed-platforms aws-sev-snp -expected-app snp-app:<hash>`：第一项让 hub 以证书内嵌的证据校验 tee（而不是比对一张本地固定证书，见 9.3），`-allowed-platforms aws-sev-snp` 令 hub 放行真实 SEV-SNP 平台（默认值 `simulated` 会拒绝真实证明），`-expected-app` 把应用身份锚定到被测 bundle 的精确字节。三者缺一不可：attestation 模式**要求**有 `-expected-app`（否则 hub 拒绝启动），并**拒绝**同时给出 `-mtls-ca`。白名单同样按那个身份取：每次 `build` 都把 bundle 归档到 `bin/bundles/<sha256>.tar`（键就是它被测出的摘要），`deploy` 按状态里的 `app_hash` 取回对应归档、从其 `./policy/policy.cbor` 抽出白名单，上传到 `~/policy/policy.cbor`，并以 `-policy-dir "$HOME/policy"` 让 hub 读取——上传点与读取点由同一个变量派生，不会再各写一份而漂移。**取不到能测出该摘要的归档时 `deploy` 直接报错退出**，绝不退而使用「当前构建的那一份」：否则「改了白名单 → 重新构建 → 却部署更早启动的实例」会让 hub 按一套规则准入、而飞地执行另一套。TEE 侧通常无需配置：sevsnp 启动时默认从 `/run/bundle/policy` 加载被测白名单（`shared.ResolvePolicyDir`）；显式 `-policy-dir`/`TEE_POLICY_DIR` 只能复述该目录的精确字节（不一致即拒绝），缺失 `policy.cbor` 同样直接拒绝启动（白名单对真实 TEE 强制，见 §5）。多 vendor 部署（OpenAI 与 Anthropic 卖家并存）时，hub 另需 `-provider-hosts provider=host:port,...` 声明各卖家的上游，未列出的 provider 走 `-host` 默认；该 host 必须在白名单内（上线准入即查），且必须落在对应 agent 的 `-targets` 内，否则流打不开。实测闭环中，hub 日志出现 `relay` 建立与 `chat/completions` 响应即代表请求面与上游面都真实走通；tee 控制台出现 `Memory Encryption Features active: AMD SEV SEV-ES SEV-SNP`、`SEV: SNP running at VMPL0` 与 `extended PCR 8 with app_sha256` 即代表硬件机密内存与度量链激活。
 
 ### 9.5 单机运行全流程
 
@@ -413,7 +415,7 @@ mockprovider 也改用固定身份：`-ca/-cert/-key` 三个 flag 让它加载�
 ./crosshost.sh down          # 严格按双 tag 终止实例
 ```
 
-单机模式不启动普通主机，`fetch`/`deploy`/`drive` 都不适用（业务请求由 supervisor 在实例内通过 loopback 驱动）。`verify` 通过 EC2 控制台输出一次拿到 supervisor 的全部日志：mockprovider 的 TLS 服务、tee 的 mTLS 监听与 RA-TLS 证书自举、hub 的 relay 与会话、agent 的隧道连接，以及 loader 的 attestation 证据行。
+单机模式不启动普通主机，`fetch`/`deploy`/`drive` 都不适用（业务请求由 supervisor 在实例内通过 loopback 驱动）。`verify` 通过 EC2 控制台输出一次拿到 supervisor 的全部日志：mockprovider 的 TLS 服务、tee 的 mTLS 监听与 RA-TLS 叶的发布、hub 的 relay 与会话、agent 的隧道连接，以及 loader 的 attestation 证据行。
 
 ### 9.6 实测要点与故障
 
@@ -421,7 +423,7 @@ mockprovider 也改用固定身份：`-ca/-cert/-key` 三个 flag 让它加载�
 
 **tee 实例启动后自动关机**：根因是 AWS 把 EC2 user-data 以**一整段 base64** 返回给 loader，loader 原先按多行 `KEY=VAL` 切分，只能注入一个环境变量，`TEE_PLATFORM=sevsnp` 从未生效，tee 落入模拟模式、找不到 `.sim/ca.pem` 后退出，loader 随即 powerOff 关机。修复在 loader 的 `parseMetadataEnv`：当 user-data 无换行且是合法的 base64 并解码出 `KEY=VAL` 文本时，先展开再切分；该行为有单元测试锁定（`deploy/snp-image/loader/main_test.go`）。
 
-**单机 AMI 启动后自动关机（本轮新根因）**：单机 bundle（`./app` 为 supervisor）在 `pack.sh build` 的 `TOKENHIVE_BUILD_SINGLE=1` 分支中，若当时 `.certs/` 尚未生成 mock AI provider 的 TLS 固定件（缺少 `mp-ca/mp-cert/mp-key.pem`）或未通过 `SNP_MP_CA/SNP_MP_CERT/SNP_MP_KEY` 注入，打包进 bundle 的 `./mtls/mp-ca.pem` 就会缺失。tee 在 attestation 成功（控制台已打印 `policy hash bound into attestation evidence`，证明 broker 的度量链一切正常）之后，加载上游 TLS CA 时因读不到 `./mtls/mp-ca.pem` 而 `log.Fatalf("upstream TLS config")` 退出，从未启动 `:18091` 的 TOFU 自举端点；supervisor 等待 RA-TLS 证书满 4 分钟超时后返回错误，loader 随即 powerOff 关机。诊断特征为控制台出现 `[tee] upstream TLS config: read CA /run/bundle/mtls/mp-ca.pem: no such file or directory` 与 `[loader] FATAL: TEE app exited`；mockprovider 同样加载这份身份，缺失时也会先于它退出。修复是先在 `.certs/` 生成齐全（`gencerts` 输出 `mp-ca/cert/key`）后再执行 `crosshost.sh build-single`，让 supervisor bundle 确实带上三个 `mp-*` 文件。
+**单机 AMI 启动后自动关机（本轮新根因）**：单机 bundle（`./app` 为 supervisor）在 `pack.sh build` 的 `TOKENHIVE_BUILD_SINGLE=1` 分支中，若当时 `.certs/` 尚未生成 mock AI provider 的 TLS 固定件（缺少 `mp-ca/mp-cert/mp-key.pem`）或未通过 `SNP_MP_CA/SNP_MP_CERT/SNP_MP_KEY` 注入，打包进 bundle 的 `./mtls/mp-ca.pem` 就会缺失。tee 在 attestation 成功（控制台已打印 `policy hash bound into attestation evidence`，证明 broker 的度量链一切正常）之后，加载上游 TLS CA 时因读不到 `./mtls/mp-ca.pem` 而 `log.Fatalf("upstream TLS config")` 退出，从未写出 RA-TLS 叶（`TOKENHIVE_SIM_DIR/tee-cert.pem`）；supervisor 等待该文件满 4 分钟超时后返回错误，loader 随即 powerOff 关机。诊断特征为控制台出现 `[tee] upstream TLS config: read CA /run/bundle/mtls/mp-ca.pem: no such file or directory` 与 `[loader] FATAL: TEE app exited`；mockprovider 同样加载这份身份，缺失时也会先于它退出。修复是先在 `.certs/` 生成齐全（`gencerts` 输出 `mp-ca/cert/key`）后再执行 `crosshost.sh build-single`，让 supervisor bundle 确实带上三个 `mp-*` 文件。
 
 **hub 拒绝 tee 证明（app hash 不匹配）**：`up` 记录的是所启动镜像自带的 `snp-app` 标签，正常情况下与实例里 loader 度量的摘要一致。若仍不一致（AMI 由别的机器/检出构建，或 `crosshost.json` 被手改过），hub 会报 `verify receipt: attestation does not match the signing key`。对齐方法：从机密实例控制台的 `[loader] app_sha256 = <hash>` 读实际摘要，把 `crosshost.json` 的 `tee.app_hash` 与 hub 的 `-expected-app` 都调成该值。
 
@@ -439,7 +441,7 @@ mockprovider 也改用固定身份：`-ca/-cert/-key` 三个 flag 让它加载�
 
 - **构建**：`build` 与 `build-single` 都能无错产出确定性 bundle 并注册 `snp-tokenhive` 与 `snp-tokenhive-single` 两个 AMI，其 bundle 摘要分别记录为 `snp-app:` 值供 hub 的 `-expected-app` 固定。构建本身验证通过。
 - **双机端到端业务闭环通过**：按 9.4 的 `up → fetch → deploy → drive → verify` 完整执行。`drive` 的两次真实 chat 请求均返回 HTTP 200，`hub.log` 显示 `status=200 ... provider="openai-sim" ... err=<nil>`（且正常计费 `charged=1.00`），证明 hub 在 `-allowed-platforms aws-sev-snp -expected-app` 约束下**完整验证通过了 tee 的 SEV-SNP attestation 证据**（含 Secure Boot tag 的事件日志验证），并走通了 `hub→tee mTLS→relay→agent→mockprovider` 全链路。tee 控制台同时出现 `Memory Encryption Features active: AMD SEV SEV-ES SEV-SNP`、`SEV: SNP running at VMPL0` 与 `extended PCR 8 with app_sha256`，请求面与上游面均真实建立。
-- **单机端到端业务闭环通过**：按 9.5 的 `up --single` 启动后，supervisor 在单台机密实例内以 loopback 依次拉起 mockprovider、tee、hub、agent，并完成与双机相同的 `:18091` TOFU 自举固定 tee 证书。监测机密实例控制台出现 supervisor 自检结果 `[single] self-test: HTTP 200`，证明一次真实 chat 请求在实例内部走通 `hub→tee→agent→mockprovider`；实例保持运行不再自动关机（supervisor 进入 `waitAll` 持续守护）。脏凭证留下的诊断实例已用独立 `user` tag 安全终止。
+- **单机端到端业务闭环通过**：按 9.5 的 `up --single` 启动后，supervisor 在单台机密实例内以 loopback 依次拉起 mockprovider、tee、hub、agent，hub 以 attestation 校验 tee 的 RA-TLS 叶。监测机密实例控制台出现 supervisor 自检结果 `[single] self-test: HTTP 200`，证明一次真实 chat 请求在实例内部走通 `hub→tee→agent→mockprovider`；实例保持运行不再自动关机（supervisor 进入 `waitAll` 持续守护）。脏凭证留下的诊断实例已用独立 `user` tag 安全终止。
 
 单机与双机两条真实 SEV-SNP 业务闭环至此都得到验证。9.4 / 9.5 的命令序列即为现行运行方式。
 
