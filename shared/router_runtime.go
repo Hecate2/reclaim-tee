@@ -82,10 +82,21 @@ func AttestationCacheTTL() time.Duration {
 // hardcoded guess. For GCP/CS (no short-lived NitroTPM leaf) it falls back to
 // now + AttestationCacheTTL().
 func SNPAttestationExpiry(attestation []byte) time.Time {
+	deadline, _ := SNPAttestationExpiryFromLeaf(attestation)
+	return deadline
+}
+
+// SNPAttestationExpiryFromLeaf is SNPAttestationExpiry plus whether the deadline
+// came from the attestation's own NitroTPM leaf (AWS) rather than the fixed
+// cache-TTL fallback. A caller that schedules on the deadline uses the flag to
+// tell the adaptive cadence apart from the guess it silently degrades to — the
+// state that looks like a healthy two-hour schedule right up to the point the
+// three-hour leaf expires under it.
+func SNPAttestationExpiryFromLeaf(attestation []byte) (time.Time, bool) {
 	if notAfter, ok := SNPNitroLeafNotAfter(attestation); ok {
-		return notAfter.Add(-SNPRefreshMargin)
+		return notAfter.Add(-SNPRefreshMargin), true
 	}
-	return time.Now().Add(AttestationCacheTTL())
+	return time.Now().Add(AttestationCacheTTL()), false
 }
 
 // RunHeartbeats fires a heartbeat to the router every `interval` until
@@ -230,6 +241,11 @@ func RunRATLSRefresh(ctx context.Context, ratls RATLSRefresher, postRefresh func
 				health.RecordFailure(err)
 				continue
 			}
+			// A rotation that succeeded clears the failure streak. RecordFailure
+			// increments it and nothing else in this loop decrements it, so without
+			// this a single transient failure keeps the TEE reporting unhealthy for
+			// the life of the process (or until the self-reset it triggers).
+			health.RecordSuccess()
 			if postRefresh != nil {
 				if err := postRefresh(); err != nil {
 					logger.Error("RA-TLS post-refresh hook failed", zap.Error(err))
