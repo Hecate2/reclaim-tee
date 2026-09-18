@@ -84,7 +84,7 @@ Hub 侧维护两个 WebSocket 端点，这是它作为「NAT 背后贡献者和 
 
 ## 5. TEE 侧的出站路径
 
-TEE 的出站不再知道任何 Agent 地址；它只有一个 Hub 中继端点。tokenhive/transport 拆成两层。
+TEE 的出站不知道任何 Agent 地址；它只有一个 Hub 中继端点。tokenhive/transport 拆成两层。
 
 ChannelManager（transport/channel.go）持有连接驻留语义：以 (provider, host) 为键的通道池，空闲连接在窗口内不关闭（连接「一直保持」由此落实），同一时刻一条 HTTP/1.1 连接承载一个在途请求，异常后整体作废不再复用半开连接。它满足 tee.Transport 与 tee.SessionOpener 两个接口，tee.Service 主体流程（校验 → 授权 → 注入 → 执行 → 摘要 → 签回执）与 /v1/execute 线格式不因连接模型而变。
 
@@ -151,7 +151,7 @@ harness 场景矩阵覆盖：正常流、策略拒绝、provider 故障（401/42
 
 TEE 持有的凭证与 TLS 密钥不出 TEE；Agent 只看到密文，LaaS 无从越权读取注入头；JobSpec 无账务字段，TEE 无从泄露 model/tenant；回执的流式摘要 + body_hash 绑定 + ProviderSeq 单调性构成 provider 事后核对凭证未被越权使用的四段证据链（出口一致性、Policy 白名单绑定 attestation、回执签名与字节摘要、凭证用途自证）。
 
-Hub 的 AgentGate 以共享密钥为门，拒斥未持密者的拨入。Gate 现在按 per-provider 密钥表（-agent-keys）校验：每个 provider 只能用自己的密钥拨入，注册因此绑定到该 provider，任何卖家都无法冒名注册他人（顶掉其在线隧道并截获流量）；此前单一全局 AgentSecret 的提权面已被消除。同时 Hub 要求 TEE 以 -relay-key 认证中继拨入，中继不再是开放出口代理。
+Hub 的 AgentGate 以共享密钥为门，拒斥未持密者的拨入。Gate 现在按 per-provider 密钥表（-agent-keys）校验：每个 provider 只能用自己的密钥拨入，注册因此绑定到该 provider，任何卖家都无法冒名注册他人（顶掉其在线隧道并截获流量）；不存在全局共享密钥。同时 Hub 要求 TEE 以 -relay-key 认证中继拨入，中继要求认证、不是开放代理。
 
 Hub 的 TeeRelay 依赖网络边界自证（受信的 Hub↔TEE 通道）。任何能连到该端点的调用方凭 provider+host 可开一条到某在线 Agent allowlist 内主机的流；防线目前只有 Agent 的 allowlist。应把 TeeRelay 与其余 Hub↔TEE 通道放在同一 mTLS 之后（Upstream 加固项 2，与既有「生产启用 mTLS」的部署边界一致）。
 

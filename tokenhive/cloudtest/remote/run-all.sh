@@ -43,8 +43,9 @@ EXPECTED_ARG=()
 #   sevsnp     the certificate embeds SEV-SNP evidence, which the Hub verifies
 #              against the AWS/AMD roots and pins to the measured bundle. This
 #              is the only mode a long-lived TEE can use: the epoch rotates
-#              (its NitroTPM evidence is hours-scale), so a pinned leaf — or the
-#              tee-cert.pem below — stops matching within a refresh interval.
+#              (its NitroTPM evidence is hours-scale), so a pinned leaf stops
+#              matching within a refresh interval — the TEE publishes no leaf
+#              file in this mode.
 #   simulated  no such evidence exists. The sim test certificate is only
 #              meaningful against the exact bytes the TEE published, so the Hub
 #              pins them.
@@ -75,14 +76,25 @@ if [ "$TEE_PLATFORM" = "simulated" ]; then CA_ARG="-ca $SIM/ca.pem"; fi
   $CA_ARG >"$RESULTS/tee.log" 2>&1 &
 TEE_PID=$!
 
-echo "==> waiting for the TEE to publish its RA-TLS certificate ($SIM/tee-cert.pem)"
+# Readiness is platform-shaped: sevsnp rotates its leaf (nothing stable to
+# pin), so wait for the listener itself; simulated publishes a fixed leaf the
+# Hub pins, so wait for those bytes.
+tee_ready() {
+  if [ "$TEE_PLATFORM" = "sevsnp" ]; then
+    (echo > /dev/tcp/127.0.0.1/18090) 2>/dev/null
+  else
+    [ -s "$SIM/tee-cert.pem" ]
+  fi
+}
+
+echo "==> waiting for the TEE ($TEE_PLATFORM)"
 for _ in $(seq 1 60); do
-  [ -s "$SIM/tee-cert.pem" ] && break
+  tee_ready && break
   kill -0 "$TEE_PID" 2>/dev/null || break
   sleep 0.5
 done
-if [ ! -s "$SIM/tee-cert.pem" ]; then
-  echo "!! TEE did not publish tee-cert.pem; see $RESULTS/tee.log"
+if ! tee_ready; then
+  echo "!! TEE not ready (platform=$TEE_PLATFORM); see $RESULTS/tee.log"
   tail -20 "$RESULTS/tee.log"
   kill "$MP_PID" "$TEE_PID" 2>/dev/null
   exit 1
