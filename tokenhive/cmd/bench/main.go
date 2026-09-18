@@ -18,13 +18,12 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"context"
-	"crypto/rand"
 	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -232,7 +231,7 @@ func runTEE(n int, host, query string, maxBytes uint64, body []byte, teeURL stri
 	totalWall := time.Duration(0)
 	totalPayload := int64(0)
 	for i := 0; i < n; i++ {
-		spec, err := buildSpec(host, query, body, maxBytes)
+		spec, err := shared.BuildSpec("openai-sim", host, "/v1/chat/completions", query, body, maxBytes)
 		if err != nil {
 			return nil, err
 		}
@@ -265,7 +264,20 @@ func oneTEE(client *http.Client, teeURL string, spec jobs.Spec, body []byte) (sa
 		return sample{}, err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return sample{}, fmt.Errorf("tee http %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
+	}
 	res := readSSE(resp.Body, 0)
+	// Both are failures to measure, and both used to be silently reported as a
+	// zero-payload sample — a refusal with no chunks looked exactly like a
+	// provider that answered with nothing, and the S5 gate passed either way.
+	if res.teeErr != "" {
+		return sample{}, fmt.Errorf("tee refused the job: %s", res.teeErr)
+	}
+	if res.receiptB64 == "" {
+		return sample{}, errors.New("tee stream ended without a receipt frame")
+	}
 	s := sample{
 		ttfbMs:      res.firstByteAt.Sub(t0).Seconds() * 1000,
 		payloadByte: float64(totalLen(res.chunks)),
@@ -291,72 +303,47 @@ type sseResult struct {
 	lastChunkAt time.Time
 	receiptB64  string
 	receiptAt   time.Time
+	teeErr      string
 }
 
+// readSSE collects the stream's chunks and the instants they arrived, stopping
+// once capBytes have arrived (0 = no cap). The framing is tee.NewSSEStream, the
+// same decoder the Hub settles against; only the measurements are bench's.
 func readSSE(r io.Reader, capBytes int) sseResult {
-	reader := bufio.NewReader(r)
-	var (
-		eventType string
-		data      strings.Builder
-		dataLines int
-		chunks    [][]byte
-		receipt   string
-		res       sseResult
-		first     bool
-		capped    bool
-		seen      int
-	)
-	flush := func() {
-		switch eventType {
+	stream := tee.NewSSEStream(r)
+	var res sseResult
+	seen := 0
+	for {
+		frame, err := stream.Next()
+		if err != nil {
+			return res
+		}
+		switch frame.Type {
 		case "", "message":
-			if dataLines > 0 {
-				payload := []byte(data.String())
-				if !first {
-					res.firstByteAt = time.Now()
-					first = true
-				}
-				chunks = append(chunks, payload)
-				res.lastChunkAt = time.Now()
-				seen += len(payload)
-				if capBytes > 0 && seen >= capBytes {
-					capped = true
-				}
+			if !frame.HasData {
+				continue
+			}
+			payload := []byte(frame.Data)
+			if res.firstByteAt.IsZero() {
+				res.firstByteAt = time.Now()
+			}
+			res.chunks = append(res.chunks, payload)
+			res.lastChunkAt = time.Now()
+			seen += len(payload)
+			if capBytes > 0 && seen >= capBytes {
+				return res
 			}
 		case tee.EventStart:
 			// The response-start frame is control data, not a body chunk:
 			// dropping it keeps the timing samples honest without polluting
 			// the payload count.
 		case tee.EventReceipt:
-			receipt = data.String()
+			res.receiptB64 = frame.Data
 			res.receiptAt = time.Now()
-		}
-		eventType = ""
-		data.Reset()
-		dataLines = 0
-	}
-	for !capped {
-		line, err := reader.ReadString('\n')
-		trimmed := strings.TrimRight(line, "\r\n")
-		switch {
-		case trimmed == "":
-			flush()
-		case strings.HasPrefix(trimmed, "event:"):
-			eventType = strings.TrimSpace(strings.TrimPrefix(trimmed, "event:"))
-		case strings.HasPrefix(trimmed, "data:"):
-			if dataLines > 0 {
-				data.WriteByte('\n')
-			}
-			dataLines++
-			data.WriteString(strings.TrimPrefix(strings.TrimPrefix(trimmed, "data:"), " "))
-		}
-		if err != nil {
-			flush()
-			break
+		case tee.EventError:
+			res.teeErr = frame.Data
 		}
 	}
-	res.chunks = chunks
-	res.receiptB64 = receipt
-	return res
 }
 
 func totalLen(chunks [][]byte) int {
@@ -508,37 +495,4 @@ func percentile(vals []float64, p float64) float64 {
 		idx = len(vals) - 1
 	}
 	return vals[idx]
-}
-
-// buildSpec mirrors cmd/hub's buildSpec so the TEE sees the same JobSpec a real
-// Hub would send (same policy-matching fields).
-func buildSpec(host, query string, body []byte, maxBytes uint64) (jobs.Spec, error) {
-	jobID := make([]byte, jobs.JobIDLength)
-	if _, err := rand.Read(jobID); err != nil {
-		return jobs.Spec{}, err
-	}
-	nonce := make([]byte, 16)
-	if _, err := rand.Read(nonce); err != nil {
-		return jobs.Spec{}, err
-	}
-	return jobs.Spec{
-		Version:          jobs.VersionV1,
-		JobID:            jobID,
-		Provider:         "openai-sim",
-		Method:           "POST",
-		Host:             host,
-		Path:             "/v1/chat/completions",
-		Query:            query,
-		Headers:          map[string]string{"Content-Type": "application/json"},
-		BodyHash:         hashBodyBytes(body),
-		Nonce:            nonce,
-		ExpiresAt:        time.Now().Add(time.Hour).Unix(),
-		MaxResponseBytes: maxBytes,
-		Stream:           true,
-	}, nil
-}
-
-func hashBodyBytes(body []byte) []byte {
-	h := jobs.HashBody(body)
-	return h[:]
 }

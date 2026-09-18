@@ -20,7 +20,6 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
 	"crypto/tls"
 	"encoding/hex"
 	"errors"
@@ -36,10 +35,12 @@ import (
 
 	"github.com/gorilla/websocket"
 
+	rootShared "github.com/reclaimprotocol/reclaim-tee/shared"
 	"github.com/reclaimprotocol/reclaim-tee/tokenhive/attest"
 	"github.com/reclaimprotocol/reclaim-tee/tokenhive/cmd/internal/shared"
 	"github.com/reclaimprotocol/reclaim-tee/tokenhive/evidence"
 	"github.com/reclaimprotocol/reclaim-tee/tokenhive/hub"
+	"github.com/reclaimprotocol/reclaim-tee/tokenhive/internal/mtls"
 	"github.com/reclaimprotocol/reclaim-tee/tokenhive/jobs"
 	"github.com/reclaimprotocol/reclaim-tee/tokenhive/platform"
 	"github.com/reclaimprotocol/reclaim-tee/tokenhive/platform/alicloud"
@@ -54,13 +55,6 @@ import (
 // this binary prints. Only the display divides; every calculation stays in
 // integers.
 const microsPerUnit = 1_000_000
-
-// evidenceCache resolves full attestation evidence for hash-only receipts this
-// process has seen, layered on top of the restart-surviving evidence store the
-// TEE publishes. A receipt carrying only an evidence hash resolves against what
-// the Hub actually observed or the TEE recorded; the Hub never trusts an epoch
-// it has not seen evidence for.
-var evidenceCache attest.Cache
 
 // defaultTenantInflight is how many jobs one tenant may run at once unless the
 // operator says otherwise. Unlike the other tenant controls this one ships on:
@@ -100,29 +94,40 @@ func main() {
 	credential := flag.String("credential", "", "provider access token to register with the TEE before the request loop (simulation one-shot mode: the CLI holds the seller's token and delivers it sealed to -tee, as a dialing agent would through a resident Hub)")
 	audit := flag.Bool("audit", false, "audit the receipt store for gaps and verify signatures")
 	allowed := flag.String("allowed-platforms", "simulated", "comma-separated attestation platforms the Hub trusts (e.g. simulated,aws-sev-snp)")
-	expectedApp := flag.String("expected-app", "", "for aws-sev-snp: the attested application identity the deployment trusts (snp-app:<sha256 hex>)")
+	expectedApp := flag.String("expected-app", "", "for aws-sev-snp: the attested application identity the deployment trusts (snp-app:<sha256 hex>). Gates both the receipt verifier and, under -tee-verify=attestation, the Hub↔TEE handshake, so the two cannot disagree about which enclave is trusted")
 	policyHash := flag.String("policy-hash", "", "hex digest the enclave must have bound into its evidence; empty skips the deployment-binding assertion (the Hub pins the platform, not the exact policy digest, at runtime)")
 	// On an SNP bundle the deployment whitelist lives inside the measured tar at
 	// ./policy; point this there so the /v1/policies view (what buyers and sellers
 	// are told the enclave will accept) is the same bytes the enclave enforces.
 	policyDir := flag.String("policy-dir", "", "directory holding the deployment whitelist (policy.cbor); empty = the measured bundle's policy/ when it has one, else TOKENHIVE_SIM_DIR")
 	evFetchURL := flag.String("evidence-fetch", "", "base URL for remote evidence retrieval (e.g. https://tee:18090); empty = resolve EvidenceHash from the local evidence store only")
-	mtlsCA := flag.String("mtls-ca", "", "PEM file pinning the TEE's RA-TLS certificate (or the CA that signs it); the RA-TLS verification half of Hub↔TEE mTLS. Implies -tee is https://")
+	teeVerify := flag.String("tee-verify", teeVerifyPin, "how the Hub authenticates the TEE's RA-TLS certificate: pin (the leaf or CA named by -mtls-ca) or attestation (verify the SEV-SNP evidence the certificate embeds, pinned to -expected-app). Attestation mode needs nothing redistributed when the TEE rotates its epoch, which is what lets a long-lived TEE keep its evidence fresh")
+	mtlsCA := flag.String("mtls-ca", "", "PEM file pinning the TEE's RA-TLS certificate (or the CA that signs it); the RA-TLS verification half of Hub↔TEE mTLS under -tee-verify=pin. Implies -tee is https://")
 	mtlsCert := flag.String("mtls-cert", "", "client certificate the Hub presents to the TEE under mTLS; empty defaults to <simdir>/hub-client.pem")
 	mtlsKey := flag.String("mtls-key", "", "private key for -mtls-cert; empty defaults to <simdir>/hub-client-key.pem")
 	flag.Parse()
 
+	if err := validateTEEChannel(*teeVerify, *mtlsCA, *allowed, *audit); err != nil {
+		log.Fatal(err)
+	}
+
 	store := hub.NewReceiptStore(filepath.Join(shared.ConfigDir(), "receipts"))
 
-	teeTLS, err := buildTEEClientTLS(*mtlsCA, *mtlsCert, *mtlsKey)
+	teeTLS, err := buildTEEClientTLS(teeChannelConfig{
+		Mode:        *teeVerify,
+		CAFile:      *mtlsCA,
+		CertFile:    *mtlsCert,
+		KeyFile:     *mtlsKey,
+		ExpectedApp: *expectedApp,
+	})
 	if err != nil {
 		log.Fatalf("tee mtls: %v", err)
 	}
 	// -audit never talks to -tee, so the https:// constraint on the execute
 	// channel does not apply to it; the mTLS client is still built so remote
-	// evidence fetches trust the same pinned RA-TLS certificate.
+	// evidence fetches trust the same TEE certificate.
 	if teeTLS != nil && !strings.HasPrefix(*teeURL, "https://") && !*audit {
-		log.Fatalf("-mtls-ca pins the TEE certificate, so -tee must be an https:// URL (got %q)", *teeURL)
+		log.Fatalf("the Hub verifies the TEE's certificate, so -tee must be an https:// URL (got %q)", *teeURL)
 	}
 	var httpClient *http.Client
 	var teeDialer *websocket.Dialer
@@ -267,6 +272,12 @@ func main() {
 		log.Fatal(err)
 	}
 	if *serveAddr != "" {
+		if *drop != 0 {
+			log.Fatal("serve mode refuses -drop (withholding a settled receipt from the store is a test hook, not a deployment mode)")
+		}
+		if *tenantKeys == "" {
+			log.Printf("warning: serve mode without -tenant-keys runs open mode, where the presented key is the tenant: quota, inflight and budget limits then apply per self-chosen name, so set -tenant-keys in production")
+		}
 		runServe(h, serveCfg)
 		return
 	}
@@ -276,7 +287,7 @@ func main() {
 
 	for i := 1; i <= *n; i++ {
 		fmt.Printf("\n=== request %d/%d ===\n", i, *n)
-		spec, err := buildSpec(*provider, serveCfg.HostFor(*provider), "/v1/chat/completions", *query, body, *maxBytes)
+		spec, err := shared.BuildSpec(*provider, serveCfg.HostFor(*provider), "/v1/chat/completions", *query, body, *maxBytes)
 		if err != nil {
 			logf("build spec: %v", err)
 			continue
@@ -401,30 +412,165 @@ func auditProvider(store *hub.ReceiptStore, provider string, verifier *attest.Ve
 	return false
 }
 
+// The two ways the Hub can be told to trust the TEE's RA-TLS certificate. Both
+// demand the certificate and present the Hub's own client identity; they differ
+// in what makes the TEE's certificate acceptable.
+const (
+	// teeVerifyPin trusts a leaf the deployment distributed out of band: the
+	// certificate, or the CA that signs it, named by -mtls-ca. The trust
+	// statement is "this exact certificate", which is why it cannot survive the
+	// TEE rotating its epoch — the rotation produces a leaf the pin does not name.
+	teeVerifyPin = "pin"
+
+	// teeVerifyAttestation trusts the proof the handshake already carries: the
+	// certificate's embedded SEV-SNP evidence is verified against the AWS and AMD
+	// roots, bound to that certificate's own key so evidence cannot be spliced
+	// onto a key it did not attest, and narrowed to the measured application by
+	// -expected-app. Nothing is pinned, so a rotated epoch is accepted on its own
+	// evidence and the TEE can keep the proof fresh indefinitely.
+	teeVerifyAttestation = "attestation"
+)
+
+// teeChannelConfig says how the Hub is told to authenticate the TEE.
+type teeChannelConfig struct {
+	// Mode is teeVerifyPin (the default) or teeVerifyAttestation.
+	Mode string
+	// CAFile pins the TEE's certificate. It is the whole trust statement in pin
+	// mode, and in attestation mode it is refused rather than ignored: an
+	// operator who leaves it set would believe the leaf is still pinned.
+	CAFile string
+	// CertFile/KeyFile are the Hub's own client identity, which the TEE demands
+	// in either mode.
+	CertFile string
+	KeyFile  string
+	// ExpectedApp is the application pin attestation mode verifies the TEE
+	// against; see validateApplicationPin.
+	ExpectedApp string
+}
+
+// validateTEEChannel refuses a channel configuration that cannot survive the
+// peer it is aimed at. There is exactly one such case today: a pinned
+// certificate against a TEE that rotates its attested epoch.
+//
+// On aws-sev-snp the TEE replaces its RA-TLS leaf every few hours, so a pin
+// authenticates until the first rotation and then fails every re-dial — hours
+// into a run, and reading like an ordinary TLS problem. When aws-sev-snp is the
+// only platform the Hub trusts and a certificate is actually pinned, no peer
+// the pin could be for exists, so say so at startup rather than let it fail
+// later. A mixed allowlist is left alone: it exists so one Hub can face a
+// simulated peer (whose epoch is fixed, where a pin is right) beside a real one.
+// -audit never dials the TEE it names, so it keeps whatever configuration the
+// operator chose.
+func validateTEEChannel(mode, caFile, allowed string, audit bool) error {
+	if audit || mode != teeVerifyPin || caFile == "" {
+		return nil
+	}
+	platforms, err := splitCSV(allowed)
+	if err != nil {
+		return err
+	}
+	if len(platforms) == 1 && platforms[0] == platform.PlatformAWSSEVSNP {
+		return fmt.Errorf("-tee-verify=pin pins a certificate an aws-sev-snp TEE replaces every few hours, so it stops authenticating within one refresh interval; use -tee-verify=attestation with -expected-app=snp-app:<sha256> and drop -mtls-ca")
+	}
+	return nil
+}
+
 // buildTEEClientTLS assembles the Hub's client TLS config for the Hub↔TEE
-// channel. It pins the TEE's RA-TLS certificate (or its signing CA), which is
-// the deployment's out-of-band statement "this certificate is the attested
-// TEE"; and it presents the Hub's own client certificate so the TEE admits it.
-// Without -mtls-ca it returns nil (plain HTTP/WSS-less operation). The cert and
-// key default to the simulation identity so a local mTLS run needs no flags
-// beyond the pin.
-func buildTEEClientTLS(caFile, certFile, keyFile string) (*tls.Config, error) {
-	if caFile == "" {
-		if certFile != "" || keyFile != "" {
-			return nil, errors.New("-mtls-cert/-mtls-key require -mtls-ca")
+// channel. It returns nil when nothing pins or attests the TEE, which is how the
+// local simulation runs: plain HTTP, no certificate to check. The Hub's cert and
+// key default to the simulation identity, so a local mTLS run needs no flags
+// beyond the trust statement.
+func buildTEEClientTLS(opts teeChannelConfig) (*tls.Config, error) {
+	switch opts.Mode {
+	case teeVerifyPin:
+		if opts.CAFile == "" {
+			if opts.CertFile != "" || opts.KeyFile != "" {
+				return nil, errors.New("-mtls-cert/-mtls-key require -mtls-ca")
+			}
+			return nil, nil
 		}
-		return nil, nil
+		certFile, keyFile, err := hubClientIdentity(opts.CertFile, opts.KeyFile)
+		if err != nil {
+			return nil, err
+		}
+		return mtls.ClientMTLSConfig(opts.CAFile, certFile, keyFile)
+
+	case teeVerifyAttestation:
+		if opts.CAFile != "" {
+			return nil, errors.New("-mtls-ca pins a certificate the handshake no longer consults; drop it with -tee-verify=attestation")
+		}
+		if err := validateApplicationPin(opts.ExpectedApp); err != nil {
+			return nil, fmt.Errorf("-tee-verify=attestation: %w", err)
+		}
+		certFile, keyFile, err := hubClientIdentity(opts.CertFile, opts.KeyFile)
+		if err != nil {
+			return nil, err
+		}
+		// The attested key is the identity, exactly as in pin mode: RA-TLS
+		// certificates are not DNS names, so there is nothing to match against
+		// a hostname. Failing closed is the verifier's job, and it runs before
+		// the handshake completes.
+		return mtls.ClientTLSConfigWithVerifier(certFile, keyFile,
+			rootShared.VerifyRATLSPeer(rootShared.RATLSVerifyOptions{
+				ExpectedImageDigest: opts.ExpectedApp,
+				Logger:              rootShared.NewNopLogger(),
+			}))
 	}
-	if certFile == "" {
-		certFile = filepath.Join(shared.ConfigDir(), shared.MTLSClientCertPath)
-	}
-	if keyFile == "" {
-		keyFile = filepath.Join(shared.ConfigDir(), shared.MTLSClientKeyPath)
+	return nil, fmt.Errorf("-tee-verify %q is not a mode: want %s or %s", opts.Mode, teeVerifyPin, teeVerifyAttestation)
+}
+
+// hubClientIdentity resolves the Hub's own mTLS identity, materializing the
+// simulation fixtures when the operator named no files. The defaults come from
+// the same place EnsureMTLSCerts writes to (shared.HubIdentityPaths), so a
+// deployment cannot present a certificate from one location while the fixtures
+// were maintained at another. Both verification modes need this: the TEE demands
+// a client certificate either way.
+func hubClientIdentity(certFile, keyFile string) (string, string, error) {
+	if certFile != "" && keyFile != "" {
+		return certFile, keyFile, nil
 	}
 	if err := shared.EnsureMTLSCerts(); err != nil {
-		return nil, err
+		return "", "", err
 	}
-	return shared.ClientMTLSConfig(caFile, certFile, keyFile)
+	defaultCert, defaultKey := shared.HubIdentityPaths()
+	if certFile == "" {
+		certFile = defaultCert
+	}
+	if keyFile == "" {
+		keyFile = defaultKey
+	}
+	return certFile, keyFile, nil
+}
+
+// applicationPinPrefixSEVSNP spells an AWS SEV-SNP application identity the way
+// the verifier reports it: PCR 8's app hash, hex-encoded. sha256HexLength is the
+// hex length of the digest it names.
+const (
+	applicationPinPrefixSEVSNP = "snp-app:"
+	sha256HexLength            = 64
+)
+
+// validateApplicationPin checks the deployment's application pin. It is the one
+// definition of the pin's shape, shared by the two places that consume it — the
+// receipt verifier's allowlist and the Hub↔TEE handshake — so a deployment
+// cannot end up trusting receipts from one enclave and a TLS peer that attests
+// to another.
+//
+// An empty pin is an error rather than "no assertion": platform authenticity
+// alone would admit any hardware-valid SNP application, which is precisely the
+// gap the pin exists to close.
+func validateApplicationPin(pin string) error {
+	digest := strings.TrimPrefix(pin, applicationPinPrefixSEVSNP)
+	if digest == pin {
+		return fmt.Errorf("-expected-app must pin the attested application identity as %s<sha256 hex>", applicationPinPrefixSEVSNP)
+	}
+	if len(digest) != sha256HexLength {
+		return fmt.Errorf("-expected-app %q is not a valid %s<sha256 hex> pin", pin, applicationPinPrefixSEVSNP)
+	}
+	if _, err := hex.DecodeString(digest); err != nil {
+		return fmt.Errorf("-expected-app %q is not a valid %s<sha256 hex> pin", pin, applicationPinPrefixSEVSNP)
+	}
+	return nil
 }
 
 // buildVerifier assembles the attestation trust root from the operator's
@@ -443,15 +589,8 @@ func buildVerifier(allowed, expectedApp, policyHash, evFetchURL string, evClient
 		if p != platform.PlatformAWSSEVSNP {
 			continue
 		}
-		digest := strings.TrimPrefix(expectedApp, "snp-app:")
-		if digest == expectedApp {
-			return nil, fmt.Errorf("-allowed-platforms includes %q: -expected-app must pin the attested application identity as snp-app:<sha256 hex>", platform.PlatformAWSSEVSNP)
-		}
-		if len(digest) != 64 {
-			return nil, fmt.Errorf("-expected-app %q is not a valid snp-app:<sha256 hex> pin", expectedApp)
-		}
-		if _, err := hex.DecodeString(digest); err != nil {
-			return nil, fmt.Errorf("-expected-app %q is not a valid snp-app:<sha256 hex> pin", expectedApp)
+		if err := validateApplicationPin(expectedApp); err != nil {
+			return nil, fmt.Errorf("-allowed-platforms includes %q: %w", platform.PlatformAWSSEVSNP, err)
 		}
 	}
 	byPlatform := map[string]platform.EvidenceVerifier{
@@ -512,14 +651,19 @@ func splitCSV(s string) ([]string, error) {
 }
 
 // buildFetcher assembles the evidence retrieval path in resolution order: the
-// in-memory cache of epochs this process has verified, then the restart-surviving
-// local store, then an optional remote /v1/evidence endpoint. Each layer is
-// tried in turn until one holds the bytes. The remote layer reuses the Hub's
-// mTLS client so it trusts the same pinned RA-TLS certificate and presents the
-// same client certificate as the Hub↔TEE channel.
+// restart-surviving local store the TEE publishes, then an optional remote
+// /v1/evidence endpoint. Each layer is tried in turn until one holds the bytes.
+// The remote layer reuses the Hub's mTLS client so it trusts the same pinned
+// RA-TLS certificate and presents the same client certificate as the Hub↔TEE
+// channel.
+//
+// There is deliberately no in-memory layer here. The Hub sees an epoch's
+// evidence only inside the receipts it verifies, so every layer it could keep
+// one in would be empty forever; the two below are the sources that actually
+// hold bytes, and an inert layer in front of them would only replace the real
+// "no evidence stored" error with a lookup that cannot hit.
 func buildFetcher(evFetchURL string, evClient *http.Client) (attest.Fetcher, error) {
 	backend := &evidence.Chain{}
-	backend.Add(&evidenceCache)
 	if store, err := shared.LoadEvidenceStore(); err == nil {
 		backend.Add(store)
 	}
@@ -663,37 +807,6 @@ func parseTenantKeys(spec string) (map[string]string, error) {
 		keys[p[0]] = p[1]
 	}
 	return keys, nil
-}
-
-func buildSpec(provider, host, path, query string, body []byte, maxBytes uint64) (jobs.Spec, error) {
-	jobID := make([]byte, jobs.JobIDLength)
-	if _, err := rand.Read(jobID); err != nil {
-		return jobs.Spec{}, err
-	}
-	nonce := make([]byte, 16)
-	if _, err := rand.Read(nonce); err != nil {
-		return jobs.Spec{}, err
-	}
-	return jobs.Spec{
-		Version:          jobs.VersionV1,
-		JobID:            jobID,
-		Provider:         provider,
-		Method:           "POST",
-		Host:             host,
-		Path:             path,
-		Query:            query,
-		Headers:          map[string]string{"Content-Type": "application/json"},
-		BodyHash:         hashBodyBytes(body),
-		Nonce:            nonce,
-		ExpiresAt:        time.Now().Add(time.Hour).Unix(),
-		MaxResponseBytes: maxBytes,
-		Stream:           true,
-	}, nil
-}
-
-func hashBodyBytes(body []byte) []byte {
-	h := jobs.HashBody(body)
-	return h[:]
 }
 
 func logf(format string, args ...any) { fmt.Printf("[hub] "+format+"\n", args...) }

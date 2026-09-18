@@ -82,10 +82,21 @@ func AttestationCacheTTL() time.Duration {
 // hardcoded guess. For GCP/CS (no short-lived NitroTPM leaf) it falls back to
 // now + AttestationCacheTTL().
 func SNPAttestationExpiry(attestation []byte) time.Time {
+	deadline, _ := SNPAttestationExpiryFromLeaf(attestation)
+	return deadline
+}
+
+// SNPAttestationExpiryFromLeaf is SNPAttestationExpiry plus whether the deadline
+// came from the attestation's own NitroTPM leaf (AWS) rather than the fixed
+// cache-TTL fallback. A caller that schedules on the deadline uses the flag to
+// tell the adaptive cadence apart from the guess it silently degrades to — the
+// state that looks like a healthy two-hour schedule right up to the point the
+// three-hour leaf expires under it.
+func SNPAttestationExpiryFromLeaf(attestation []byte) (time.Time, bool) {
 	if notAfter, ok := SNPNitroLeafNotAfter(attestation); ok {
-		return notAfter.Add(-SNPRefreshMargin)
+		return notAfter.Add(-SNPRefreshMargin), true
 	}
-	return time.Now().Add(AttestationCacheTTL())
+	return time.Now().Add(AttestationCacheTTL()), false
 }
 
 // RunHeartbeats fires a heartbeat to the router every `interval` until
@@ -166,6 +177,14 @@ func RegisterWithRetry(ctx context.Context, register func(context.Context) error
 	}
 }
 
+// RATLSRefresher is the rotation surface RunRATLSRefresh drives. *RATLSManager
+// is the direct implementation; a platform adapter whose Refresh also
+// re-verifies the rotated epoch before publishing it satisfies this too, so
+// both callers share one cadence and one failure policy.
+type RATLSRefresher interface {
+	Refresh(context.Context) error
+}
+
 // RunRATLSRefresh rotates the RA-TLS cert on a fixed interval until ctx
 // is cancelled. Errors are logged; the loop continues so a transient
 // launcher-socket failure doesn't kill the goroutine.
@@ -180,7 +199,15 @@ func RegisterWithRetry(ctx context.Context, register func(context.Context) error
 // until the next one — letting SEV-SNP track the actual NitroTPM leaf expiry
 // (refresh SNPRefreshMargin before NotAfter) instead of a fixed cadence. A nil
 // callback (or a non-positive return) falls back to the fixed ratlsRefreshInterval().
-func RunRATLSRefresh(ctx context.Context, ratls *RATLSManager, postRefresh func() error, nextInterval func() time.Duration, health *AttestationHealth, logger *Logger) {
+//
+// skipInitial suppresses the one priming call postRefresh otherwise gets before
+// the loop starts. Callers whose postRefresh populates state that a reader
+// depends on from the first request (the TEEs' per-session attestation cache)
+// must not skip it. A caller whose postRefresh is instead a full publish of an
+// epoch it has already published during startup should: the priming call would
+// rewrite every artifact and rebuild the signer for a state that is already in
+// place, once per boot.
+func RunRATLSRefresh(ctx context.Context, ratls RATLSRefresher, postRefresh func() error, nextInterval func() time.Duration, health *AttestationHealth, logger *Logger, skipInitial bool) {
 	// Run postRefresh once immediately so the per-session attestation
 	// cache is populated before the server starts accepting traffic.
 	// Without this, the cache sits empty for the first RATLSRefreshInterval
@@ -190,7 +217,7 @@ func RunRATLSRefresh(ctx context.Context, ratls *RATLSManager, postRefresh func(
 	// which can't keep up and starts timing out. NewRATLSManager already
 	// generated the initial cert; we just need to prime the cached
 	// per-session attestation here.
-	if postRefresh != nil {
+	if postRefresh != nil && !skipInitial {
 		if err := postRefresh(); err != nil {
 			logger.Error("RA-TLS initial post-refresh failed", zap.Error(err))
 		}
@@ -222,6 +249,11 @@ func RunRATLSRefresh(ctx context.Context, ratls *RATLSManager, postRefresh func(
 				health.RecordFailure(err)
 				continue
 			}
+			// A rotation that succeeded clears the failure streak. RecordFailure
+			// increments it and nothing else in this loop decrements it, so without
+			// this a single transient failure keeps the TEE reporting unhealthy for
+			// the life of the process (or until the self-reset it triggers).
+			health.RecordSuccess()
 			if postRefresh != nil {
 				if err := postRefresh(); err != nil {
 					logger.Error("RA-TLS post-refresh hook failed", zap.Error(err))

@@ -15,17 +15,11 @@ package shared
 import (
 	"bytes"
 	"context"
-	"crypto/ecdsa"
-	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
-	"crypto/x509/pkix"
 	"encoding/json"
-	"encoding/pem"
 	"fmt"
-	"math/big"
-	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -35,6 +29,7 @@ import (
 	"github.com/reclaimprotocol/reclaim-tee/tokenhive/hub"
 	"github.com/reclaimprotocol/reclaim-tee/tokenhive/internal/canonical"
 	"github.com/reclaimprotocol/reclaim-tee/tokenhive/internal/mtls"
+	"github.com/reclaimprotocol/reclaim-tee/tokenhive/jobs"
 	"github.com/reclaimprotocol/reclaim-tee/tokenhive/platform"
 	"github.com/reclaimprotocol/reclaim-tee/tokenhive/policy"
 	"github.com/reclaimprotocol/reclaim-tee/tokenhive/tee"
@@ -244,6 +239,45 @@ func SealCredential(teeBase, provider string, secret tee.Secret) (tee.Envelope, 
 	return envelope, nil
 }
 
+// BuildSpec assembles the one-shot job spec the simulation tools send: every
+// field a real Hub's spec carries, filled with what the caller varies and the
+// defaults it does not. It lives here because more than one of those tools
+// (cmd/hub -n, cmd/hub's user API, cmd/bench) has to emit the same shape — a
+// bench whose spec differed from the Hub's would measure a different path than
+// the one the Hub drives.
+func BuildSpec(provider, host, path, query string, body []byte, maxBytes uint64) (jobs.Spec, error) {
+	jobID := make([]byte, jobs.JobIDLength)
+	if _, err := rand.Read(jobID); err != nil {
+		return jobs.Spec{}, err
+	}
+	nonce := make([]byte, 16)
+	if _, err := rand.Read(nonce); err != nil {
+		return jobs.Spec{}, err
+	}
+	return jobs.Spec{
+		Version:          jobs.VersionV1,
+		JobID:            jobID,
+		Provider:         provider,
+		Method:           "POST",
+		Host:             host,
+		Path:             path,
+		Query:            query,
+		Headers:          map[string]string{"Content-Type": "application/json"},
+		BodyHash:         BodyHash(body),
+		Nonce:            nonce,
+		ExpiresAt:        time.Now().Add(time.Hour).Unix(),
+		MaxResponseBytes: maxBytes,
+		Stream:           true,
+	}, nil
+}
+
+// BodyHash is the spec's body commitment in its wire form (a 32-byte array
+// sliced), which jobs.Spec records as bytes.
+func BodyHash(body []byte) []byte {
+	h := jobs.HashBody(body)
+	return h[:]
+}
+
 // writePolicy encodes and writes the deployment whitelist into dir as
 // policy.cbor. The policy is unsigned: pricing lives in the Hub's rates.json (a
 // commercial concern), and the whitelist itself is deployment config, whose
@@ -319,7 +353,9 @@ func EvidenceDir() string { return filepath.Join(ConfigDir(), "evidence") }
 
 // RecordTEEEvidence appends the given identity's full evidence to the local
 // store so a verifier pointed at the same directory can resolve its
-// EvidenceHash later. It is idempotent and cheap to call on every epoch build.
+// EvidenceHash later. It is idempotent and cheap to call on every epoch build,
+// and only a deployment that ships hash-only receipts needs it: an inline
+// receipt carries its evidence, so nothing ever resolves the hash.
 func RecordTEEEvidence(id platform.Identity) error {
 	store, err := evidence.NewStore(EvidenceDir())
 	if err != nil {
@@ -345,54 +381,101 @@ const (
 	// presented with -mtls-cert/-mtls-key.
 	MTLSClientCertPath = "hub-client.pem"
 	MTLSClientKeyPath  = "hub-client-key.pem"
-	// MTLSServerCertPath is the TEE's RA-TLS leaf cert, published so the Hub
-	// can pin it with -mtls-ca. In production this cert is attested (its SPKI
-	// is the receipt's KeyID) and is distributed out of band by the deployment.
+	// MTLSServerCertPath is the TEE's RA-TLS leaf cert, published (and
+	// re-published on every epoch rotation) so the listener's current identity
+	// can be read from outside. On sevsnp this cert is attested — its SPKI is
+	// the receipt's KeyID — and the Hub that verifies it should take the
+	// attestation, not this file: a Hub that pins the file instead has to be
+	// told about every rotation, which is exactly what -tee-verify=attestation
+	// removes. Pin mode is sound only where the epoch is fixed (the simulation
+	// and the harness), which is where this file is the whole trust statement.
 	MTLSServerCertPath = "tee-cert.pem"
 )
 
-// EnsureMTLSCerts writes the simulation's Hub mTLS identity if it is missing:
-// a throwaway CA (hub-ca.pem) and a client certificate it signs
-// (hub-client.pem/key). The TEE's -mtls-client-ca trusts the former, and the
-// Hub presents the latter with -mtls-cert/-mtls-key. Nothing here is
-// production material — it exists so the mTLS wiring can be exercised
-// end-to-end on a laptop.
+// HubIdentityPaths is where the simulation's Hub mTLS identity lives: the client
+// certificate the Hub presents on the Hub↔TEE channel and the key that goes with
+// it. EnsureMTLSCerts maintains exactly these two files under ConfigDir, so a
+// caller that has to resolve the same defaults must ask here rather than spell
+// the location out a second time — two spellings of one location is how a set
+// gets written in one place and read from another.
+func HubIdentityPaths() (certPath, keyPath string) {
+	dir := ConfigDir()
+	return filepath.Join(dir, MTLSClientCertPath), filepath.Join(dir, MTLSClientKeyPath)
+}
+
+// EnsureMTLSCerts writes the simulation's Hub mTLS identity when the working
+// directory does not already hold a usable one: a throwaway CA (hub-ca.pem) and
+// a client certificate it signs (hub-client.pem/key). The TEE's -mtls-client-ca
+// trusts the former, and the Hub presents the latter with -mtls-cert/-mtls-key.
+// Nothing here is production material — it exists so the mTLS wiring can be
+// exercised end-to-end on a laptop.
+//
+// The three files are one identity, not three independent fixtures: a client
+// certificate means nothing next to a CA that did not sign it or a key that is
+// not its own. So reuse is decided by asking whether the set still works as one
+// — see loadHubMTLSIdentity — and anything else is rebuilt whole. Deciding per
+// file (what this used to do, one writePEMIfAbsent per file) cannot see a
+// mismatch at all: it tops up the files that are absent and trusts the ones that
+// are there, so a directory that lost one file, or that two processes raced to
+// create, keeps a triple that never belonged together. The failure then lands
+// far from its cause — "tls: private key does not match public key" while the
+// Hub loads its own identity, or a peer refusing a chain that never existed.
 func EnsureMTLSCerts() error {
+	caPath := filepath.Join(ConfigDir(), MTLSClientCAPath)
+	certPath, keyPath := HubIdentityPaths()
+
+	if loadHubMTLSIdentity(caPath, certPath, keyPath) == nil {
+		return nil
+	}
 	caPEM, certPEM, keyPEM, err := mtls.GenHubClientCerts()
 	if err != nil {
 		return err
 	}
-	for path, v := range map[string][]byte{
-		MTLSClientCAPath:   caPEM,
-		MTLSClientCertPath: certPEM,
-		MTLSClientKeyPath:  keyPEM,
-	} {
-		if err := writePEMIfAbsent(filepath.Join(ConfigDir(), path), v); err != nil {
+	files := []struct {
+		path string
+		pem  []byte
+	}{
+		{caPath, caPEM},
+		{certPath, certPEM},
+		{keyPath, keyPEM},
+	}
+	for _, f := range files {
+		if err := os.WriteFile(f.path, f.pem, 0o644); err != nil {
 			return err
 		}
 	}
+	// Read back what was just written rather than assuming it is coherent: a
+	// concurrent writer interleaving here, or a directory that cannot take the
+	// files properly, has to surface now — as a startup failure — and not later
+	// as a handshake that fails for no visible reason.
+	return loadHubMTLSIdentity(caPath, certPath, keyPath)
+}
+
+// loadHubMTLSIdentity reads the simulation's Hub mTLS identity as one unit,
+// reporting nil only when the three files are usable together: the CA parses,
+// the key belongs to the certificate, and the certificate is a client
+// certificate that CA signed. It is the whole reuse decision for
+// EnsureMTLSCerts, so no partially replaced set can pass for a working one.
+func loadHubMTLSIdentity(caPath, certPath, keyPath string) error {
+	pool, err := mtls.LoadCAPath(caPath)
+	if err != nil {
+		return err
+	}
+	pair, err := tls.LoadX509KeyPair(certPath, keyPath)
+	if err != nil {
+		return err
+	}
+	leaf, err := x509.ParseCertificate(pair.Certificate[0])
+	if err != nil {
+		return err
+	}
+	if _, err := leaf.Verify(x509.VerifyOptions{
+		Roots:     pool,
+		KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	}); err != nil {
+		return fmt.Errorf("hub client certificate does not chain to %s: %w", caPath, err)
+	}
 	return nil
-}
-
-// LoadCAPath reads a PEM file into a certificate pool.
-func LoadCAPath(path string) (*x509.CertPool, error) {
-	return mtls.LoadCAPath(path)
-}
-
-// PlatformServerTLS returns the RA-TLS server configuration the platform epoch
-// provides, or nil when the platform has none.
-func PlatformServerTLS(epoch platform.Epoch) *tls.Config {
-	return mtls.PlatformServerTLS(epoch)
-}
-
-// ServerMTLSConfig assembles the TEE-side mTLS listener config.
-func ServerMTLSConfig(serverTLS *tls.Config, clientCAPath string) (*tls.Config, error) {
-	return mtls.ServerMTLSConfig(serverTLS, clientCAPath)
-}
-
-// ClientMTLSConfig assembles the Hub-side mTLS client config.
-func ClientMTLSConfig(caPEMPath, certPath, keyPath string) (*tls.Config, error) {
-	return mtls.ClientMTLSConfig(caPEMPath, certPath, keyPath)
 }
 
 // WriteTEECert publishes the leaf certificate a TEE listener presents.
@@ -400,84 +483,14 @@ func WriteTEECert(cfg *tls.Config) error {
 	return mtls.WriteTEECert(cfg, filepath.Join(ConfigDir(), MTLSServerCertPath))
 }
 
-// GenCerts generates a throwaway CA and a server certificate for the loopback
-// interface, returning a TLS config for the mock provider and the CA PEM for
-// the TEE to trust. No external tooling required.
-func GenCerts() (*tls.Config, []byte, error) {
-	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		return nil, nil, err
-	}
-	caTmpl := &x509.Certificate{
-		SerialNumber:          big.NewInt(1),
-		Subject:               pkix.Name{CommonName: "tokenhive-sim-ca"},
-		NotBefore:             time.Now().Add(-time.Hour),
-		NotAfter:              time.Now().Add(24 * time.Hour),
-		IsCA:                  true,
-		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature,
-		BasicConstraintsValid: true,
-	}
-	caDER, err := x509.CreateCertificate(rand.Reader, caTmpl, caTmpl, &caKey.PublicKey, caKey)
-	if err != nil {
-		return nil, nil, err
-	}
-	caCert, err := x509.ParseCertificate(caDER)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	srvKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		return nil, nil, err
-	}
-	srvTmpl := &x509.Certificate{
-		SerialNumber: big.NewInt(2),
-		Subject:      pkix.Name{CommonName: "127.0.0.1"},
-		NotBefore:    time.Now().Add(-time.Hour),
-		NotAfter:     time.Now().Add(24 * time.Hour),
-		KeyUsage:     x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-		DNSNames:     []string{"localhost"},
-		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1"), net.ParseIP("::1")},
-	}
-	srvDER, err := x509.CreateCertificate(rand.Reader, srvTmpl, caCert, &srvKey.PublicKey, caKey)
-	if err != nil {
-		return nil, nil, err
-	}
-	srvCert, err := tls.X509KeyPair(pemEncode("CERTIFICATE", srvDER), pemEncode("EC PRIVATE KEY",
-		mustMarshalEC(srvKey)))
-	if err != nil {
-		return nil, nil, err
-	}
-
-	caPEM := pemEncode("CERTIFICATE", caDER)
-	return &tls.Config{Certificates: []tls.Certificate{srvCert}, MinVersion: tls.VersionTLS12}, caPEM, nil
-}
-
 // LoadCAPool reads the CA certificate mockprovider wrote, for the TEE's TLS
 // trust roots.
 func LoadCAPool() (*x509.CertPool, error) {
-	pemBytes, err := os.ReadFile(CAPEMPath())
+	pool, err := mtls.LoadCAPath(CAPEMPath())
 	if err != nil {
-		return nil, fmt.Errorf("read CA %s: %w (did mockprovider start with TLS?)", CAPEMPath(), err)
-	}
-	pool := x509.NewCertPool()
-	if !pool.AppendCertsFromPEM(pemBytes) {
-		return nil, fmt.Errorf("no certificates parsed from %s", CAPEMPath())
+		return nil, fmt.Errorf("%w (did mockprovider start with TLS?)", err)
 	}
 	return pool, nil
-}
-
-func pemEncode(typ string, der []byte) []byte {
-	return pem.EncodeToMemory(&pem.Block{Type: typ, Bytes: der})
-}
-
-func mustMarshalEC(k *ecdsa.PrivateKey) []byte {
-	b, err := x509.MarshalECPrivateKey(k)
-	if err != nil {
-		panic(err)
-	}
-	return b
 }
 
 func writeIfAbsent(path string, v any) error {
@@ -487,22 +500,19 @@ func writeIfAbsent(path string, v any) error {
 	return writeJSON(path, v)
 }
 
-// writePEMIfAbsent writes raw PEM bytes — unlike writeIfAbsent, it must NOT
-// JSON-escape the payload (a quoted, \n-escaped string is not a parseable
-// certificate).
-func writePEMIfAbsent(path string, b []byte) error {
-	if _, err := os.Stat(path); err == nil {
-		return nil
-	}
-	return os.WriteFile(path, b, 0o644)
-}
-
 func writeJSON(path string, v any) error {
 	b, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, b, 0o644)
+	// Write-then-rename so a crash cannot leave a truncated file that later
+	// reads back as a valid document describing nothing — the same reason the
+	// evidence store stages and renames its entries.
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }
 
 func readJSON(path string, v any) error {

@@ -27,20 +27,24 @@ import (
 const launcherSocketPath = "/run/container_launcher/teeserver.sock"
 
 // RATLSManager owns an ephemeral ECDSA P-256 keypair and a self-signed
-// X.509 certificate that embeds a GCP attestation report as an extension.
+// X.509 certificate that embeds a platform attestation report as an extension.
 //
-// The keypair is generated once at NewRATLSManager and never rotated; the
-// SPKI hash that the attestation binds to is therefore stable for the
-// lifetime of the manager. The cert + its embedded attestation, however,
-// must be rotated periodically — GCP attestations have a TTL of ~5 minutes,
-// after which new TLS handshakes verifying via `VerifyRATLSPeer` will fail
-// the `exp` check on the embedded JWT. Callers should arrange to call
-// Refresh on a ticker (e.g. every 4 minutes, matching the existing
-// per-TEE attestation refresh cadence).
+// The keypair rotates on every Refresh, and the certificate that binds it is
+// rebuilt with it, so the SPKI hash — what the attestation covers, and what a
+// receipt names as its KeyID — changes at each rotation rather than being
+// stable for the manager's lifetime (see the mu field below). The cert and its
+// embedded attestation must be rotated for as long as the process serves: a
+// GCP attestation expires in ~5 minutes and an AWS NitroTPM chain in hours,
+// after which new TLS handshakes verifying via `VerifyRATLSPeer` fail on the
+// evidence itself. Callers pick the cadence — RunRATLSRefresh on the timer the
+// platform needs (RATLSRefreshInterval, or the SEV-SNP cadence that tracks the
+// NitroTPM leaf).
 //
 // All accessors are safe for concurrent use; Refresh atomically swaps the
-// cert without disrupting in-flight handshakes (Go's TLS stack reads
-// GetCertificate per-handshake, so existing sessions are unaffected).
+// keypair, the SPKI hash and the cert as one unit, without disrupting in-flight
+// handshakes (Go's TLS stack reads GetCertificate per-handshake, so existing
+// sessions are unaffected), and a snapshot taken before a rotation keeps
+// signing with the key its own evidence attests.
 type RATLSManager struct {
 	role        string
 	extraNonces []string
@@ -107,11 +111,19 @@ func (m *RATLSManager) Refresh(ctx context.Context) error {
 	tmpl := &x509.Certificate{
 		SerialNumber: serial,
 		Subject:      pkix.Name{CommonName: m.role},
-		// Cert time bounds are formality only — RA-TLS verification doesn't
-		// check them. Set a 1-day window so any consumer doing strict checks
-		// catches stale certs and prompts a Refresh.
+		// Cert time bounds are a formality for a self-signed attested leaf:
+		// RA-TLS verification checks the *evidence* inside the certificate, not
+		// this window. They are set long anyway, because a consumer that does
+		// strict chain checks (the Hub's certificate pin, a standard TLS client
+		// validating a pinned leaf) is bounded by them alone — and a
+		// day-long window turns every such deployment that is not running a
+		// refresher into one that stops authenticating a day after it boots,
+		// which says nothing useful about the evidence. Freshness is the
+		// evidence's job (hours, on AWS) and the refresh cadence's
+		// (RATLSRefreshIntervalSNP, or RATLSRefreshInterval on Confidential
+		// Space), never this window's.
 		NotBefore:             time.Now().Add(-1 * time.Hour),
-		NotAfter:              time.Now().Add(24 * time.Hour),
+		NotAfter:              time.Now().Add(5 * 365 * 24 * time.Hour),
 		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
 		BasicConstraintsValid: true,

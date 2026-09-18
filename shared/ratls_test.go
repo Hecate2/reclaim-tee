@@ -190,3 +190,26 @@ func TestIsEnclaveMode_LocalDev(t *testing.T) {
 		t.Skip("running on a machine with the Confidential Space launcher socket present — unusual for local dev")
 	}
 }
+
+// TestRATLSLeafWindowIsLongLived pins why the attested leaf's own time window
+// is long. It is not the freshness mechanism: freshness lives in the evidence
+// (hours, on AWS) and in the refresher that re-signs on the platform cadence.
+// The window is consulted only by consumers that do strict chain checks — among
+// them a pin on this exact certificate — so a window on the order of a day
+// makes every such consumer stop authenticating a TEE whose evidence is
+// perfectly fresh, exactly one boot-and-forget interval later. The unit is not
+// the point; "years" is.
+func TestRATLSLeafWindowIsLongLived(t *testing.T) {
+	m, err := NewRATLSManager(t.Context(), "tee_k", nil)
+	if err != nil {
+		t.Fatalf("new manager: %v", err)
+	}
+	leaf, err := x509.ParseCertificate(m.CertificateRaw())
+	if err != nil {
+		t.Fatalf("parse leaf: %v", err)
+	}
+	if leaf.NotAfter.Before(leaf.NotBefore.AddDate(1, 0, 0)) {
+		t.Fatalf("RA-TLS leaf window is %v; a strict chain check would reject this TEE long before its evidence is stale",
+			leaf.NotAfter.Sub(leaf.NotBefore))
+	}
+}
