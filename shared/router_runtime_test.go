@@ -197,6 +197,41 @@ func TestRunHeartbeats_ContextCancelStops(t *testing.T) {
 	})
 }
 
+// noopRATLSRefresher satisfies the rotation surface without touching a device:
+// these tests only count how often the loop calls its post-refresh hook.
+type noopRATLSRefresher struct{}
+
+func (noopRATLSRefresher) Refresh(context.Context) error { return nil }
+
+// TestRunRATLSRefreshPrimingIsOptional pins the one behavior callers differ on:
+// postRefresh runs once before the loop unless the caller says its startup
+// already did that work. A cancelled context makes the loop exit immediately
+// after the priming call, so the count is deterministic.
+func TestRunRATLSRefreshPrimingIsOptional(t *testing.T) {
+	tests := []struct {
+		name        string
+		skipInitial bool
+		wantCalls   int
+	}{
+		{name: "a caller that needs priming gets it", skipInitial: false, wantCalls: 1},
+		{name: "a caller that already published is not primed again", skipInitial: true, wantCalls: 0},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			calls := 0
+			RunRATLSRefresh(ctx, noopRATLSRefresher{}, func() error {
+				calls++
+				return nil
+			}, nil, nil, NewNopLogger(), test.skipInitial)
+			if calls != test.wantCalls {
+				t.Fatalf("postRefresh called %d times, want %d", calls, test.wantCalls)
+			}
+		})
+	}
+}
+
 func TestExtractIdentityFromRATLS_StandaloneMode(t *testing.T) {
 	// Local dev: no launcher socket → RATLSManager produces a cert without
 	// the attestation extension. ExtractIdentityFromRATLS must fail clearly,

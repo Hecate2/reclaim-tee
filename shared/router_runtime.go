@@ -199,7 +199,15 @@ type RATLSRefresher interface {
 // until the next one — letting SEV-SNP track the actual NitroTPM leaf expiry
 // (refresh SNPRefreshMargin before NotAfter) instead of a fixed cadence. A nil
 // callback (or a non-positive return) falls back to the fixed ratlsRefreshInterval().
-func RunRATLSRefresh(ctx context.Context, ratls RATLSRefresher, postRefresh func() error, nextInterval func() time.Duration, health *AttestationHealth, logger *Logger) {
+//
+// skipInitial suppresses the one priming call postRefresh otherwise gets before
+// the loop starts. Callers whose postRefresh populates state that a reader
+// depends on from the first request (the TEEs' per-session attestation cache)
+// must not skip it. A caller whose postRefresh is instead a full publish of an
+// epoch it has already published during startup should: the priming call would
+// rewrite every artifact and rebuild the signer for a state that is already in
+// place, once per boot.
+func RunRATLSRefresh(ctx context.Context, ratls RATLSRefresher, postRefresh func() error, nextInterval func() time.Duration, health *AttestationHealth, logger *Logger, skipInitial bool) {
 	// Run postRefresh once immediately so the per-session attestation
 	// cache is populated before the server starts accepting traffic.
 	// Without this, the cache sits empty for the first RATLSRefreshInterval
@@ -209,7 +217,7 @@ func RunRATLSRefresh(ctx context.Context, ratls RATLSRefresher, postRefresh func
 	// which can't keep up and starts timing out. NewRATLSManager already
 	// generated the initial cert; we just need to prime the cached
 	// per-session attestation here.
-	if postRefresh != nil {
+	if postRefresh != nil && !skipInitial {
 		if err := postRefresh(); err != nil {
 			logger.Error("RA-TLS initial post-refresh failed", zap.Error(err))
 		}
