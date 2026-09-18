@@ -107,11 +107,19 @@ func (m *RATLSManager) Refresh(ctx context.Context) error {
 	tmpl := &x509.Certificate{
 		SerialNumber: serial,
 		Subject:      pkix.Name{CommonName: m.role},
-		// Cert time bounds are formality only — RA-TLS verification doesn't
-		// check them. Set a 1-day window so any consumer doing strict checks
-		// catches stale certs and prompts a Refresh.
+		// Cert time bounds are a formality for a self-signed attested leaf:
+		// RA-TLS verification checks the *evidence* inside the certificate, not
+		// this window. They are set long anyway, because a consumer that does
+		// strict chain checks (the Hub's certificate pin, a standard TLS client
+		// validating a pinned leaf) is bounded by them alone — and a
+		// day-long window turns every such deployment that is not running a
+		// refresher into one that stops authenticating a day after it boots,
+		// which says nothing useful about the evidence. Freshness is the
+		// evidence's job (hours, on AWS) and the refresh cadence's
+		// (RATLSRefreshIntervalSNP, or RATLSRefreshInterval on Confidential
+		// Space), never this window's.
 		NotBefore:             time.Now().Add(-1 * time.Hour),
-		NotAfter:              time.Now().Add(24 * time.Hour),
+		NotAfter:              time.Now().Add(5 * 365 * 24 * time.Hour),
 		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
 		BasicConstraintsValid: true,
