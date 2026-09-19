@@ -335,12 +335,12 @@ func (c *userHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if req.Provider != "" {
 		outcome, err = c.h.ExecuteForProvider(r.Context(), tenant, req.Model, req.Provider, body,
 			func(provider string) (jobs.Spec, error) {
-				return shared.BuildSpec(provider, c.cfg.HostFor(provider), c.route.Path, c.cfg.Query, body, c.cfg.Max)
+				return shared.BuildSpec(provider, req.Model, c.cfg.HostFor(provider), c.route.Path, c.cfg.Query, body, c.cfg.Max)
 			}, onChunk, commit)
 	} else {
 		outcome, err = c.h.ExecuteForModel(r.Context(), tenant, req.Model, body,
 			func(provider string) (jobs.Spec, error) {
-				return shared.BuildSpec(provider, c.cfg.HostFor(provider), c.route.Path, c.cfg.Query, body, c.cfg.Max)
+				return shared.BuildSpec(provider, req.Model, c.cfg.HostFor(provider), c.route.Path, c.cfg.Query, body, c.cfg.Max)
 			}, onChunk, commit)
 	}
 	if !started {
@@ -649,11 +649,12 @@ func (c *sessionHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	build := func(provider string) (jobs.Spec, error) { return c.buildSession(req.Model, provider) }
 	var outcome hub.SessionOutcome
 	if req.Provider != "" {
-		outcome, err = c.h.RunRealtimeForProvider(r.Context(), tenant, req.Model, req.Provider, c.buildSession, &sessionLink{conn: conn, first: first})
+		outcome, err = c.h.RunRealtimeForProvider(r.Context(), tenant, req.Model, req.Provider, build, &sessionLink{conn: conn, first: first})
 	} else {
-		outcome, err = c.h.RunRealtime(r.Context(), tenant, req.Model, c.buildSession, &sessionLink{conn: conn, first: first})
+		outcome, err = c.h.RunRealtime(r.Context(), tenant, req.Model, build, &sessionLink{conn: conn, first: first})
 	}
 	log.Printf("session model=%q tenant=%q provider=%q uplink=%d downlink=%d charged=%.2f commission=%.2f buyer=%.2f err=%v",
 		req.Model, tenant, outcome.Provider, outcome.UplinkBytes, outcome.DownlinkBytes,
@@ -662,8 +663,10 @@ func (c *sessionHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // buildSession frames the session spec for a provider. Identical across providers
-// except the provider name, exactly as buildSpec frames request specs.
-func (c *sessionHandler) buildSession(provider string) (jobs.Spec, error) {
+// except the provider name, exactly as buildSpec frames request specs. The model
+// is the one the Hub read out of the user's first frame and routed and priced
+// on, and it is carried into the spec so the session receipt attests it.
+func (c *sessionHandler) buildSession(model, provider string) (jobs.Spec, error) {
 	jobID := make([]byte, jobs.JobIDLength)
 	if _, err := rand.Read(jobID); err != nil {
 		return jobs.Spec{}, err
@@ -676,6 +679,7 @@ func (c *sessionHandler) buildSession(provider string) (jobs.Spec, error) {
 		Version:          jobs.VersionV1,
 		JobID:            jobID,
 		Provider:         provider,
+		Model:            model,
 		Method:           "GET",
 		Host:             c.cfg.HostFor(provider),
 		Path:             realtimePath,

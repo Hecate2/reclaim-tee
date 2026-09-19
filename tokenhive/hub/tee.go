@@ -246,9 +246,12 @@ var ErrResponseTooLarge = errors.New("tee response exceeds the job's response ca
 var ErrReceiptSpecMismatch = errors.New("receipt does not describe the dispatched job")
 
 // bindReceipt checks that a receipt names the request the Hub actually sent:
-// the same spec hash, provider, host and path. The Hub authors the spec and
-// signs nothing, so the receipt's own JobSpecHash is the only thing tying the
-// attested response back to the request; nothing else compares it.
+// the same spec hash, provider, host, path and declared model. The Hub authors
+// the spec and signs nothing, so the receipt's own JobSpecHash is the only
+// thing tying the attested response back to the request; nothing else compares
+// it. The model is compared alongside the rest because it is the key the charge
+// is computed from, and a receipt that names another one would settle a job
+// against a price nobody quoted.
 func bindReceipt(spec jobs.Spec, r proof.Receipt) error {
 	want, err := spec.Hash()
 	if err != nil {
@@ -261,6 +264,8 @@ func bindReceipt(spec jobs.Spec, r proof.Receipt) error {
 		return fmt.Errorf("%w: receipt host %q, dispatched %q", ErrReceiptSpecMismatch, r.Host, spec.Host)
 	case r.Path != spec.Path:
 		return fmt.Errorf("%w: receipt path %q, dispatched %q", ErrReceiptSpecMismatch, r.Path, spec.Path)
+	case r.Model != spec.Model:
+		return fmt.Errorf("%w: receipt model %q, dispatched %q", ErrReceiptSpecMismatch, r.Model, spec.Model)
 	case !streamHashEq(r.JobSpecHash, want[:]):
 		return fmt.Errorf("%w: spec hash %x, dispatched %x", ErrReceiptSpecMismatch, r.JobSpecHash, want)
 	}

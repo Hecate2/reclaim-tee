@@ -588,6 +588,10 @@ func (s *Service) perform(
 		// exchange produced a response, which is also exactly when the Hub can
 		// hold this receipt against the status and headers it relayed.
 		ResponseHeadersHash: headerHash,
+
+		// The model the Hub declared, echoed verbatim so the receipt names the
+		// key its charge was computed from rather than leaving it out of band.
+		Model: spec.Model,
 	}
 
 	signed, err := signer.Sign(receipt)
@@ -868,6 +872,7 @@ func (s *Session) Receipt() (*Result, error) {
 		PolicyHash:    s.decision.PolicyHash,
 		RequestBytes:  s.requestBytes,
 		ProviderSeq:   s.seq,
+		Model:         s.spec.Model,
 	}
 	// The session may have outlived the rotation it opened under: sign with
 	// whatever the process serves now, so a long session still finishes under
