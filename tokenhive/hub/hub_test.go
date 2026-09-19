@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -88,6 +89,18 @@ func testSpec(provider, model string) jobs.Spec {
 		Path:     "/v1/chat/completions",
 		Stream:   true,
 	}
+}
+
+// boundToSpec fills a receipt's request binding the way the real TEE does, so a
+// test double's receipt survives the receipt-to-spec check (bindReceipt).
+func boundToSpec(spec jobs.Spec, r proof.Receipt) proof.Receipt {
+	hash, err := spec.Hash()
+	if err != nil {
+		panic("bind receipt to spec: " + err.Error())
+	}
+	r.Provider, r.Host, r.Path = spec.Provider, spec.Host, spec.Path
+	r.JobSpecHash = hash[:]
+	return r
 }
 
 func mustHub(t *testing.T, cfg Config) *Hub {
@@ -682,7 +695,8 @@ func sseServer(t *testing.T, body string) *httptest.Server {
 
 func TestHTTPTEERoundTrip(t *testing.T) {
 	stream := chunks("hello ", "world")
-	signed := makeReceipt(3, stream, nil)
+	spec := testSpec(testProvider, "m")
+	signed := makeReceipt(3, stream, func(r *proof.Receipt) { *r = boundToSpec(spec, *r) })
 	encoded, err := signed.EncodeCanonical()
 	if err != nil {
 		t.Fatalf("encode receipt: %v", err)
@@ -698,7 +712,7 @@ func TestHTTPTEERoundTrip(t *testing.T) {
 		started   bool
 		startResp tee.Response
 	)
-	res, err := client.Execute(context.Background(), testSpec(testProvider, "m"), []byte("{}"),
+	res, err := client.Execute(context.Background(), spec, []byte("{}"),
 		func(chunk []byte) error {
 			if !started {
 				t.Error("a chunk arrived before the response start")
@@ -735,6 +749,51 @@ func TestHTTPTEERoundTrip(t *testing.T) {
 	}
 	if res.Status != 200 || len(res.Headers["content-type"]) != 1 {
 		t.Errorf("result status/headers = %d %v", res.Status, res.Headers)
+	}
+}
+
+// TestHTTPTEERejectsAReceiptThatNamesAnotherJob pins the receipt-to-spec
+// binding: a receipt that is internally consistent but describes a different
+// request must not be accepted, or the Hub would price and attribute one
+// exchange against another.
+func TestHTTPTEERejectsAReceiptThatNamesAnotherJob(t *testing.T) {
+	stream := chunks("hi")
+	signed := makeReceipt(1, stream, func(r *proof.Receipt) { r.Provider = "someone-else" })
+	encoded, err := signed.EncodeCanonical()
+	if err != nil {
+		t.Fatalf("encode receipt: %v", err)
+	}
+	server := sseServer(t, "data: hi\n\nevent: receipt\ndata: "+
+		base64.StdEncoding.EncodeToString(encoded)+"\n\n")
+	defer server.Close()
+
+	_, err = (&HTTPTEE{URL: server.URL + "/v1/execute"}).
+		Execute(context.Background(), testSpec(testProvider, "m"), nil, nil)
+	if !errors.Is(err, ErrReceiptSpecMismatch) {
+		t.Fatalf("error = %v, want ErrReceiptSpecMismatch", err)
+	}
+}
+
+// TestBindConnectionRequiresTheCertificateKey pins the binding that ties a
+// receipt to the TLS connection that carried it: the signing key must be the
+// key the peer certificate presented. Plain HTTP has no peer identity, so the
+// check is skipped rather than failed.
+func TestBindConnectionRequiresTheCertificateKey(t *testing.T) {
+	cert := sha256.Sum256([]byte("peer certificate spki"))
+	same := sha256.Sum256([]byte("peer certificate spki"))
+	other := sha256.Sum256([]byte("another key"))
+
+	if err := bindConnection(cert[:], proof.Receipt{Attestation: &proof.AttestationRef{KeyID: same[:]}}); err != nil {
+		t.Fatalf("matching key refused: %v", err)
+	}
+	if err := bindConnection(cert[:], proof.Receipt{Attestation: &proof.AttestationRef{KeyID: other[:]}}); !errors.Is(err, ErrReceiptNotBoundToConnection) {
+		t.Fatalf("error = %v, want ErrReceiptNotBoundToConnection", err)
+	}
+	if err := bindConnection(cert[:], proof.Receipt{}); !errors.Is(err, ErrReceiptNotBoundToConnection) {
+		t.Fatalf("error = %v, want ErrReceiptNotBoundToConnection for a receipt with no attestation", err)
+	}
+	if err := bindConnection(nil, proof.Receipt{}); err != nil {
+		t.Fatalf("plain HTTP must skip the check, got %v", err)
 	}
 }
 

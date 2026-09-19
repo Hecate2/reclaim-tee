@@ -63,7 +63,7 @@ func (t *HTTPTEE) OpenSession(ctx context.Context, spec jobs.Spec) (SessionConn,
 		return nil, fmt.Errorf("%w: TEE refused session: %s", ErrTEERefused, ack)
 	}
 
-	return &sessionTunnel{conn: conn}, nil
+	return &sessionTunnel{conn: conn, spec: spec}, nil
 }
 
 // sessionTunnel is the concrete SessionConn behind HTTPTEE.OpenSession.
@@ -81,6 +81,10 @@ func (t *HTTPTEE) OpenSession(ctx context.Context, spec jobs.Spec) (SessionConn,
 // next Read yields io.EOF. Write forwards uplink bytes verbatim.
 type sessionTunnel struct {
 	conn *websocket.Conn
+
+	// spec is the job this tunnel was opened for, kept so the terminal receipt
+	// can be bound back to it (see bindReceipt).
+	spec jobs.Spec
 
 	readMu  sync.Mutex // serializes the downlink reader (one reader only)
 	writeMu sync.Mutex // serializes the uplink writer (one writer only)
@@ -149,6 +153,15 @@ func (s *sessionTunnel) Read(p []byte) (int, error) {
 				s.readErr = fmt.Errorf("decode session receipt: %w", derr)
 				s.mu.Unlock()
 				return 0, s.readErr
+			}
+			// The session receipt must describe the session the Hub opened. A
+			// mismatched one settles nothing, so it is refused here rather than
+			// handed on as if it accounted for this transcript.
+			if berr := bindReceipt(s.spec, signed.Receipt); berr != nil {
+				s.mu.Lock()
+				s.readErr = berr
+				s.mu.Unlock()
+				return 0, berr
 			}
 			s.mu.Lock()
 			s.receipt = signed

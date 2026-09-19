@@ -3,11 +3,15 @@ package hub
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/http/httptrace"
 	"strings"
 	"sync"
 
@@ -169,6 +173,21 @@ func (t *HTTPTEE) Execute(ctx context.Context, spec jobs.Spec, body []byte, onCh
 	if client == nil {
 		client = http.DefaultClient
 	}
+	// Capture the certificate of the connection that will carry the answer, so
+	// the receipt can be bound to it once it arrives (see bindConnection).
+	var (
+		spkiMu   sync.Mutex
+		peerSPKI []byte
+	)
+	req = req.WithContext(httptrace.WithClientTrace(req.Context(), &httptrace.ClientTrace{
+		GotConn: func(info httptrace.GotConnInfo) {
+			spki := tlsPeerSPKI(info.Conn)
+			spkiMu.Lock()
+			peerSPKI = spki
+			spkiMu.Unlock()
+		},
+	}))
+
 	resp, err := client.Do(req)
 	if err != nil {
 		return Result{}, err
@@ -179,7 +198,92 @@ func (t *HTTPTEE) Execute(ctx context.Context, spec jobs.Spec, body []byte, onCh
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return Result{}, fmt.Errorf("tee http %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
 	}
-	return readSSE(resp.Body, onChunk, onStart...)
+	res, err := readSSE(resp.Body, onChunk, onStart...)
+	if err != nil {
+		return res, err
+	}
+	// The receipt must describe the job the Hub asked for, and be signed by the
+	// key the connection that carried it presented.
+	if err := bindReceipt(spec, res.Receipt.Receipt); err != nil {
+		return res, err
+	}
+	spkiMu.Lock()
+	spki := peerSPKI
+	spkiMu.Unlock()
+	if err := bindConnection(spki, res.Receipt.Receipt); err != nil {
+		return res, err
+	}
+	return res, nil
+}
+
+// ErrReceiptSpecMismatch means a receipt does not describe the job the Hub
+// dispatched. The signature and attestation can both be genuine — the TEE is
+// real — while the receipt names a different request; pricing, attribution and
+// the provider's audit all assume the receipt proves *this* exchange, so such a
+// receipt must never settle.
+var ErrReceiptSpecMismatch = errors.New("receipt does not describe the dispatched job")
+
+// bindReceipt checks that a receipt names the request the Hub actually sent:
+// the same spec hash, provider, host and path. The Hub authors the spec and
+// signs nothing, so the receipt's own JobSpecHash is the only thing tying the
+// attested response back to the request; nothing else compares it.
+func bindReceipt(spec jobs.Spec, r proof.Receipt) error {
+	want, err := spec.Hash()
+	if err != nil {
+		return fmt.Errorf("hash dispatched spec: %w", err)
+	}
+	switch {
+	case r.Provider != spec.Provider:
+		return fmt.Errorf("%w: receipt provider %q, dispatched %q", ErrReceiptSpecMismatch, r.Provider, spec.Provider)
+	case r.Host != spec.Host:
+		return fmt.Errorf("%w: receipt host %q, dispatched %q", ErrReceiptSpecMismatch, r.Host, spec.Host)
+	case r.Path != spec.Path:
+		return fmt.Errorf("%w: receipt path %q, dispatched %q", ErrReceiptSpecMismatch, r.Path, spec.Path)
+	case !streamHashEq(r.JobSpecHash, want[:]):
+		return fmt.Errorf("%w: spec hash %x, dispatched %x", ErrReceiptSpecMismatch, r.JobSpecHash, want)
+	}
+	return nil
+}
+
+// ErrReceiptNotBoundToConnection means the receipt was signed by a key other
+// than the one the connection that carried it presented. RA-TLS exists so a
+// receipt and the certificate it arrived over are the same attested epoch;
+// without this check a rotated or forged key could sign a receipt the Hub would
+// accept on evidence it never saw on that connection.
+var ErrReceiptNotBoundToConnection = errors.New("receipt signing key is not the certificate the connection presented")
+
+// bindConnection checks that a receipt's signing key is the key the connection
+// that carried it presented. peerSPKI is nil when the peer presented no
+// certificate — plain HTTP, the local simulation — and then there is no peer
+// identity to bind and nothing to assert; a deployment that needs the binding
+// configures the TEE channel (mTLS or attestation).
+func bindConnection(peerSPKI []byte, r proof.Receipt) error {
+	if len(peerSPKI) == 0 {
+		return nil
+	}
+	if r.Attestation == nil {
+		return fmt.Errorf("%w: receipt carries no attestation", ErrReceiptNotBoundToConnection)
+	}
+	if !bytes.Equal(peerSPKI, r.Attestation.KeyID) {
+		return fmt.Errorf("%w: connection SPKI %x, receipt key %x", ErrReceiptNotBoundToConnection, peerSPKI, r.Attestation.KeyID)
+	}
+	return nil
+}
+
+// tlsPeerSPKI returns SHA-256 over the peer certificate's SPKI, which is the
+// receipt KeyID for an RA-TLS peer, or nil when conn is not a TLS connection
+// or presented no certificate.
+func tlsPeerSPKI(conn net.Conn) []byte {
+	tc, ok := conn.(*tls.Conn)
+	if !ok {
+		return nil
+	}
+	certs := tc.ConnectionState().PeerCertificates
+	if len(certs) == 0 {
+		return nil
+	}
+	sum := sha256.Sum256(certs[0].RawSubjectPublicKeyInfo)
+	return sum[:]
 }
 
 // CredentialKey implements CredentialService.

@@ -25,6 +25,7 @@ import (
 
 func TestSessionTunnelFullDuplexNoDeadlock(t *testing.T) {
 	const downFrames = 200
+	spec := testSpec(testProvider, "m")
 
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -46,7 +47,7 @@ func TestSessionTunnelFullDuplexNoDeadlock(t *testing.T) {
 				return
 			}
 		}
-		signed := proof.SignedReceipt{Receipt: proof.Receipt{Version: proof.VersionV1}}
+		signed := proof.SignedReceipt{Receipt: boundToSpec(spec, proof.Receipt{Version: proof.VersionV1})}
 		raw, err := canonical.Marshal(signed)
 		if err != nil {
 			return
@@ -64,7 +65,7 @@ func TestSessionTunnelFullDuplexNoDeadlock(t *testing.T) {
 		t.Fatalf("dial: %v", err)
 	}
 	defer conn.Close()
-	tun := &sessionTunnel{conn: conn}
+	tun := &sessionTunnel{conn: conn, spec: testSpec(testProvider, "m")}
 
 	// Upstream writer pushes frames while the downstream reader consumes them.
 	var wg sync.WaitGroup
