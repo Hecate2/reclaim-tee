@@ -15,7 +15,6 @@ package main
 import (
 	"context"
 	"crypto/rand"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -90,12 +89,8 @@ func main() {
 	if mt != websocket.TextMessage {
 		fail("session ack was not text (type %d)", mt)
 	}
-	var ackJSON map[string]any
-	if err := json.Unmarshal(ack, &ackJSON); err != nil {
-		fail("decode session ack %q: %v", ack, err)
-	}
-	if saysError(ackJSON) {
-		fail("TEE refused session: %s", ack)
+	if err := tee.ParseSessionAck(ack); err != nil {
+		fail("session ack: %v", err)
 	}
 
 	// 透传段 (uplink): a real masked client text frame carrying the marker.
@@ -313,11 +308,6 @@ func parseServerFrames(data []byte) ([]serverFrame, error) {
 		i += int(n)
 	}
 	return frames, nil
-}
-
-func saysError(m map[string]any) bool {
-	_, ok := m["error"]
-	return ok
 }
 
 func contains(hay, needle []byte) bool {

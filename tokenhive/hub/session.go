@@ -2,7 +2,6 @@ package hub
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"sync"
@@ -52,14 +51,9 @@ func (t *HTTPTEE) OpenSession(ctx context.Context, spec jobs.Spec) (SessionConn,
 		_ = conn.Close()
 		return nil, fmt.Errorf("session ack was not text (type %d)", mt)
 	}
-	var ackJSON map[string]any
-	if err := json.Unmarshal(ack, &ackJSON); err != nil {
+	if err := tee.ParseSessionAck(ack); err != nil {
 		_ = conn.Close()
-		return nil, fmt.Errorf("decode session ack %q: %w", ack, err)
-	}
-	if _, refused := ackJSON["error"]; refused {
-		_ = conn.Close()
-		return nil, fmt.Errorf("%w: TEE refused session: %s", ErrTEERefused, ack)
+		return nil, fmt.Errorf("%w: %v", ErrTEERefused, err)
 	}
 
 	return &sessionTunnel{conn: conn, spec: spec}, nil

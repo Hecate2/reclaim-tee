@@ -28,6 +28,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"sync/atomic"
@@ -47,8 +48,32 @@ import (
 // wedging the tunnel forever.
 const SessionIdleTimeout = 5 * time.Minute
 
-// SessionAck is the success reply to a SessionRequest.
+// SessionAck is the success reply to a session request.
 const SessionAck = `{"ok":true}`
+
+// sessionAck is the JSON shape of a session reply: {"ok":true} once the tunnel
+// is up, or {"error":"..."} when the TEE refused it before opening anything.
+type sessionAck struct {
+	OK    bool   `json:"ok"`
+	Error string `json:"error"`
+}
+
+// ParseSessionAck reports whether a session reply accepted the session, and the
+// TEE's reason when it did not. It lives beside the ack it reads so the Hub and
+// the session drivers cannot drift apart about the shape.
+func ParseSessionAck(reply []byte) error {
+	var ack sessionAck
+	if err := json.Unmarshal(reply, &ack); err != nil {
+		return fmt.Errorf("decode session ack %q: %w", reply, err)
+	}
+	if ack.Error != "" {
+		return errors.New(ack.Error)
+	}
+	if !ack.OK {
+		return fmt.Errorf("session ack %q is neither ok nor an error", reply)
+	}
+	return nil
+}
 
 // sessionUpgrader accepts the Hub's WebSocket. No origin restriction: the Hub
 // and the TEE are both ours, and origin checks only matter for browsers.
