@@ -15,20 +15,24 @@
 //     freshness margin (see Config.SignerCell)
 //  1. submitter identity (optional, see Config.SubmitterVerifier)
 //  2. spec structure and expiry
-//  3. body binding — the body must hash to the spec's committed digest
-//  4. policy authorisation
-//  5. body size against the policy cap
-//  6. credential resolution
-//  7. sequence allocation (see Config.Seq)
+//  3. replay identity — a job ID the enclave has already seen inside its own
+//     window is refused, since a spec is signed by nobody and a captured
+//     request is otherwise replayable until it expires (see replay.go)
+//  4. body binding — the body must hash to the spec's committed digest
+//  5. policy authorisation
+//  6. body size against the policy cap
+//  7. credential resolution
+//  8. sequence allocation (see Config.Seq)
 //
 // Steps 2 and 3 establish that the job is internally consistent; only then is
 // it meaningful to ask whether it is permitted. Authorising a request whose
 // body does not match its own description would spend a credential on a
 // question nobody asked.
 //
-// Step 7 is last because it is the only step that mutates state. Every check
-// that can refuse a job runs first, so a refused job never consumes a sequence
-// number and never leaves a hole in the provider's series.
+// Step 8 is last because it is the only step that mutates state outside the
+// replay table. Every check that can refuse a job runs first, so a refused job
+// never consumes a sequence number and never leaves a hole in the provider's
+// series.
 //
 // # When a receipt exists
 //
@@ -79,6 +83,14 @@ var (
 // concurrent executions having their payloads crossed, and against a body
 // truncated in transit being sent under a spec that described the whole thing.
 var ErrBodyMismatch = errors.New("request body does not match the hash committed in the job spec")
+
+// ErrJobReplayed means this job ID has already been submitted inside the
+// window its own spec was valid for. The spec carries no submitter signature,
+// so the bytes of a captured job are a valid job; the enclave refusing to run
+// one twice is what keeps a lift off the wire from spending a provider's quota
+// a second time. A caller that wants the same work done again must ask for a
+// new job.
+var ErrJobReplayed = errors.New("job ID has already been submitted")
 
 // ErrNoSessionSupport means the configured transport can run request/response
 // exchanges but not streaming sessions. It is a wiring mismatch surfaced lazily
@@ -213,6 +225,7 @@ type Service struct {
 	requestTimeout  time.Duration
 	submitterVerify func(ctx context.Context, spec jobs.Spec) error
 	inbox           *InboxKey
+	replay          *replayGuard
 }
 
 // NewService validates a configuration and returns a ready service.
@@ -246,6 +259,7 @@ func NewService(cfg Config) (*Service, error) {
 		requestTimeout:  cfg.RequestTimeout,
 		submitterVerify: cfg.SubmitterVerifier,
 		inbox:           cfg.InboxKey,
+		replay:          newReplayGuard(),
 	}, nil
 }
 
@@ -323,6 +337,12 @@ func (s *Service) Execute(ctx context.Context, job Job, onChunk ChunkFunc, onSta
 	// Structure and freshness first: an unusable spec is not worth authorising.
 	if err := job.Spec.ValidateAt(now); err != nil {
 		return nil, err
+	}
+
+	// Then replay: a job ID already seen inside its own window is refused
+	// before a credential is touched or a sequence number is spent.
+	if !s.replay.spend(job.Spec.JobID, now, time.Unix(job.Spec.ExpiresAt, 0)) {
+		return nil, fmt.Errorf("%w: %x", ErrJobReplayed, job.Spec.JobID)
 	}
 
 	// The body must be the body the spec describes. This is what catches two
@@ -687,6 +707,9 @@ func (s *Service) OpenSession(ctx context.Context, job Job) (*Session, error) {
 	}
 	if err := job.Spec.ValidateAt(now); err != nil {
 		return nil, err
+	}
+	if !s.replay.spend(job.Spec.JobID, now, time.Unix(job.Spec.ExpiresAt, 0)) {
+		return nil, fmt.Errorf("%w: %x", ErrJobReplayed, job.Spec.JobID)
 	}
 	if !job.Spec.MatchesBody(job.Body) {
 		return nil, ErrBodyMismatch
