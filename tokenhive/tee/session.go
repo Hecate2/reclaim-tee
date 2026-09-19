@@ -67,7 +67,9 @@ func ParseSessionAck(reply []byte) error {
 		return fmt.Errorf("decode session ack %q: %w", reply, err)
 	}
 	if ack.Error != "" {
-		return errors.New(ack.Error)
+		// Quoted, not raw: the reason crosses a trust boundary and ends up in
+		// the Hub's log line, so it must not be able to forge a line of its own.
+		return fmt.Errorf("TEE refused session: %q", ack.Error)
 	}
 	if !ack.OK {
 		return fmt.Errorf("session ack %q is neither ok nor an error", reply)

@@ -58,6 +58,11 @@ func (h *Hub) price(card RateCard, model string, relayedBytes uint64, r proof.Re
 // withheld is the test seam for a Hub that hides an execution: the receipt is
 // settled but deliberately never stored, so the provider can prove the gap.
 // The returned flag reports whether the receipt reached the store.
+//
+// It is checked before the ceiling because it is an instruction about the store
+// rather than a pricing decision: a job that is both over the ceiling and named
+// as hidden must still not reach the store, or the seam would stop being able
+// to hide the one receipt a test asked it to hide.
 func (h *Hub) book(tenant, provider string, receipt proof.SignedReceipt, amt amounts, withheld bool) (bool, error) {
 	stored := !withheld
 	switch {

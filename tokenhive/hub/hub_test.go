@@ -84,6 +84,7 @@ func testSpec(provider, model string) jobs.Spec {
 	return jobs.Spec{
 		Version:  jobs.VersionV1,
 		Provider: provider,
+		Model:    model,
 		Method:   "POST",
 		Host:     "provider.test:443",
 		Path:     "/v1/chat/completions",
@@ -99,6 +100,7 @@ func boundToSpec(spec jobs.Spec, r proof.Receipt) proof.Receipt {
 		panic("bind receipt to spec: " + err.Error())
 	}
 	r.Provider, r.Host, r.Path = spec.Provider, spec.Host, spec.Path
+	r.Model = spec.Model
 	r.JobSpecHash = hash[:]
 	return r
 }
@@ -757,20 +759,35 @@ func TestHTTPTEERoundTrip(t *testing.T) {
 // request must not be accepted, or the Hub would price and attribute one
 // exchange against another.
 func TestHTTPTEERejectsAReceiptThatNamesAnotherJob(t *testing.T) {
-	stream := chunks("hi")
-	signed := makeReceipt(1, stream, func(r *proof.Receipt) { r.Provider = "someone-else" })
-	encoded, err := signed.EncodeCanonical()
-	if err != nil {
-		t.Fatalf("encode receipt: %v", err)
-	}
-	server := sseServer(t, "data: hi\n\nevent: receipt\ndata: "+
-		base64.StdEncoding.EncodeToString(encoded)+"\n\n")
-	defer server.Close()
+	// Each case is a receipt that is internally consistent and signed, but that
+	// does not describe the dispatch: another provider's, another host's, and —
+	// the one the rate card prices on — another model's.
+	for _, tc := range []struct {
+		name   string
+		mutate func(*proof.Receipt)
+	}{
+		{"another provider", func(r *proof.Receipt) { r.Provider = "someone-else" }},
+		{"another host", func(r *proof.Receipt) { r.Host = "elsewhere.test:443" }},
+		{"another model", func(r *proof.Receipt) { r.Model = "a-cheaper-one" }},
+	} {
+		stream := chunks("hi")
+		signed := makeReceipt(1, stream, func(r *proof.Receipt) {
+			*r = boundToSpec(testSpec(testProvider, "m"), *r)
+			tc.mutate(r)
+		})
+		encoded, err := signed.EncodeCanonical()
+		if err != nil {
+			t.Fatalf("encode receipt: %v", err)
+		}
+		server := sseServer(t, "data: hi\n\nevent: receipt\ndata: "+
+			base64.StdEncoding.EncodeToString(encoded)+"\n\n")
 
-	_, err = (&HTTPTEE{URL: server.URL + "/v1/execute"}).
-		Execute(context.Background(), testSpec(testProvider, "m"), nil, nil)
-	if !errors.Is(err, ErrReceiptSpecMismatch) {
-		t.Fatalf("error = %v, want ErrReceiptSpecMismatch", err)
+		_, err = (&HTTPTEE{URL: server.URL + "/v1/execute"}).
+			Execute(context.Background(), testSpec(testProvider, "m"), nil, nil)
+		server.Close()
+		if !errors.Is(err, ErrReceiptSpecMismatch) {
+			t.Errorf("%s: error = %v, want ErrReceiptSpecMismatch", tc.name, err)
+		}
 	}
 }
 

@@ -119,8 +119,8 @@ var ErrAttestationStale = errors.New("attested epoch past its freshness margin; 
 // is hashed and cited in receipts while the body may be large and is only ever
 // needed at execution time. Spec.BodyHash is what ties them together.
 type Job struct {
-	Spec jobs.Spec
-	Body []byte
+	Spec jobs.Spec `cbor:"1,keyasint"`
+	Body []byte    `cbor:"2,keyasint"`
 }
 
 // EncodeCanonical returns the deterministic CBOR encoding of the job. It is the

@@ -1,6 +1,7 @@
 package tee
 
 import (
+	"sort"
 	"sync"
 	"time"
 
@@ -83,6 +84,13 @@ func (g *replayGuard) spend(jobID []byte, now, expiry time.Time) bool {
 
 // makeRoomLocked keeps the table inside its bound: expired entries first, then
 // the entries expiring soonest. Callers must hold mu.
+//
+// It is consulted once per job past the bound, and every pass over the map here
+// is O(n), so it empties the table down to a low-water mark instead of dropping
+// one entry: dropping one per job would make each of those jobs pay two full
+// scans under the lock. A batch happens once per quarter of the table, and the
+// entries it drops are the ones closest to expiring — the ones a replay is
+// least likely to still want.
 func (g *replayGuard) makeRoomLocked(now int64) {
 	if len(g.seen) < maxReplayEntries {
 		return
@@ -92,20 +100,20 @@ func (g *replayGuard) makeRoomLocked(now int64) {
 			delete(g.seen, id)
 		}
 	}
-	for len(g.seen) >= maxReplayEntries {
-		var (
-			oldest [jobs.JobIDLength]byte
-			until  int64
-			found  bool
-		)
-		for id, at := range g.seen {
-			if !found || at < until {
-				oldest, until, found = id, at, true
-			}
-		}
-		if !found {
-			return
-		}
-		delete(g.seen, oldest)
+	drop := len(g.seen) - maxReplayEntries*3/4
+	if drop <= 0 {
+		return
+	}
+	type entry struct {
+		id    [jobs.JobIDLength]byte
+		until int64
+	}
+	entries := make([]entry, 0, len(g.seen))
+	for id, until := range g.seen {
+		entries = append(entries, entry{id: id, until: until})
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].until < entries[j].until })
+	for _, e := range entries[:drop] {
+		delete(g.seen, e.id)
 	}
 }
