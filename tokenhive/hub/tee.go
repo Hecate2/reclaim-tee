@@ -198,7 +198,23 @@ func (t *HTTPTEE) Execute(ctx context.Context, spec jobs.Spec, body []byte, onCh
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return Result{}, fmt.Errorf("tee http %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
 	}
-	res, err := readSSE(resp.Body, onChunk, onStart...)
+	// A backstop on what one response may cost this Hub in memory. The TEE
+	// enforces MaxResponseBytes itself, so an honest peer never trips this; a
+	// peer that ignores its own spec would otherwise stream until the attempt
+	// times out, with every chunk retained for settlement.
+	limit := spec.MaxResponseBytes
+	var total uint64
+	guard := func(chunk []byte) error {
+		total += uint64(len(chunk))
+		if limit > 0 && total > limit {
+			return fmt.Errorf("%w: read %d bytes, cap %d", ErrResponseTooLarge, total, limit)
+		}
+		if onChunk != nil {
+			return onChunk(chunk)
+		}
+		return nil
+	}
+	res, err := readSSE(resp.Body, guard, onStart...)
 	if err != nil {
 		return res, err
 	}
@@ -215,6 +231,12 @@ func (t *HTTPTEE) Execute(ctx context.Context, spec jobs.Spec, body []byte, onCh
 	}
 	return res, nil
 }
+
+// ErrResponseTooLarge means the TEE streamed more response bytes than the job's
+// spec allowed. The TEE bounds a response itself, so this is the Hub's backstop
+// against a peer that does not: without it the Hub would buffer an unbounded
+// body, because the chunks are retained to settle against.
+var ErrResponseTooLarge = errors.New("tee response exceeds the job's response cap")
 
 // ErrReceiptSpecMismatch means a receipt does not describe the job the Hub
 // dispatched. The signature and attestation can both be genuine — the TEE is

@@ -774,6 +774,21 @@ func TestHTTPTEERejectsAReceiptThatNamesAnotherJob(t *testing.T) {
 	}
 }
 
+// TestHTTPTEEStopsAtTheResponseCap pins the Hub's own byte backstop. The TEE
+// bounds a response itself; a peer that does not must not be able to make the
+// Hub buffer without limit, since every chunk is retained to settle against.
+func TestHTTPTEEStopsAtTheResponseCap(t *testing.T) {
+	spec := testSpec(testProvider, "m")
+	spec.MaxResponseBytes = 8
+	server := sseServer(t, "data: 12345\n\ndata: 67890\n\n")
+	defer server.Close()
+
+	_, err := (&HTTPTEE{URL: server.URL + "/v1/execute"}).Execute(context.Background(), spec, nil, nil)
+	if !errors.Is(err, ErrResponseTooLarge) {
+		t.Fatalf("error = %v, want ErrResponseTooLarge", err)
+	}
+}
+
 // TestBindConnectionRequiresTheCertificateKey pins the binding that ties a
 // receipt to the TLS connection that carried it: the signing key must be the
 // key the peer certificate presented. Plain HTTP has no peer identity, so the
