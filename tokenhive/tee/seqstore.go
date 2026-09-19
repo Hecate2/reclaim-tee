@@ -86,9 +86,10 @@ func (s *memorySeqStore) Close() error { return nil }
 // and honest: a job costs one small write and one fsync, never a rewrite of
 // every provider's counter, and the number is on disk before it is returned.
 //
-// The file is loaded once at startup and rewritten only when it has grown far
-// past one line per provider (see compact). One process per file: the counters
-// live in memory as well as on disk.
+// The log is bounded, not linear: once it holds well past one record per
+// provider it is rewritten in place (see compact), so its size tracks the size
+// of the market rather than the number of jobs ever run. One process per file:
+// the counters live in memory as well as on disk.
 type fileSeqStore struct {
 	mu    sync.Mutex
 	path  string
@@ -114,30 +115,50 @@ func NewFileSeqStore(path string) (SeqStore, error) {
 		return nil, err
 	}
 
-	compacted := false
-	if s.lines > 4*len(s.data)+seqLogCompactFloor {
-		if err := s.compact(); err != nil {
-			return nil, err
-		}
-		compacted = true
-	}
-
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("seqstore: open %s: %w", path, err)
 	}
-	if torn && !compacted {
+	s.file = file
+
+	if torn {
 		// A crash can leave a partial record behind. The number it was writing
 		// was never returned to anyone, so the fragment is dropped — and cut
 		// off the file, because leaving it there would splice it onto the next
 		// append and invent a record naming a provider that never wrote it.
 		if err := file.Truncate(whole); err != nil {
-			file.Close()
+			s.Close()
 			return nil, fmt.Errorf("seqstore: truncate %s: %w", path, err)
 		}
 	}
-	s.file = file
+	if s.compactNeededLocked() {
+		if err := s.compact(); err != nil {
+			s.Close()
+			return nil, err
+		}
+	}
 	return s, nil
+}
+
+// compactNeededLocked reports whether the log has grown past the point where a
+// rewrite costs less than carrying it: one record per provider plus slack.
+// Callers hold mu.
+func (s *fileSeqStore) compactNeededLocked() bool {
+	return s.lines > 4*len(s.data)+seqLogCompactFloor
+}
+
+// handleLocked returns the append handle, reopening the file when a compaction
+// had to drop it. Callers hold mu.
+func (s *fileSeqStore) handleLocked() (*os.File, error) {
+	if s.file != nil {
+		return s.file, nil
+	}
+	file, err := os.OpenFile(s.path, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("seqstore: open %s: %w", s.path, err)
+	}
+	s.file = file
+	return file, nil
 }
 
 // Next appends the new number and fsyncs it before returning, so a number that
@@ -153,14 +174,26 @@ func (s *fileSeqStore) Next(providerID []byte) (uint64, error) {
 	if err != nil {
 		return 0, err
 	}
-	if _, err := s.file.Write(record); err != nil {
+	file, err := s.handleLocked()
+	if err != nil {
+		return 0, err
+	}
+	if _, err := file.Write(record); err != nil {
 		return 0, fmt.Errorf("seqstore: append %s: %w", s.path, err)
 	}
-	if err := s.file.Sync(); err != nil {
+	if err := file.Sync(); err != nil {
 		return 0, fmt.Errorf("seqstore: sync %s: %w", s.path, err)
 	}
 	s.data[key] = next
 	s.lines++
+
+	if s.compactNeededLocked() {
+		// The number just issued is already durable, so a failed rewrite must
+		// not fail the request: the log stays valid and the next append sees
+		// the same condition and tries again. A rewrite that keeps failing
+		// means a full disk, which the append itself will report.
+		_ = s.compact()
+	}
 	return next, nil
 }
 
@@ -182,9 +215,11 @@ func (s *fileSeqStore) Close() error {
 	return err
 }
 
-// seqLogCompactFloor keeps a small market from being rewritten on every start:
-// below this many records the log is left alone however many providers it has.
-const seqLogCompactFloor = 64
+// seqLogCompactFloor keeps the log from being rewritten every few jobs: below
+// this many records it is left alone however many providers it has. It is the
+// slack above one-record-per-provider, so the file stays under a few kilobytes
+// for a small market and a rewrite costs a fraction of the appends it covers.
+const seqLogCompactFloor = 256
 
 // load reads the log into memory and reports the offset of the end of the last
 // whole record, plus whether a trailing fragment was found.
@@ -216,9 +251,8 @@ func (s *fileSeqStore) load() (int64, bool, error) {
 	return int64(len(raw)), torn, nil
 }
 
-// compact rewrites the log as one record per provider. It runs at startup, not
-// on the hot path: Next stays a single append, and a rewrite that fails does so
-// before the enclave accepts work rather than in the middle of a request.
+// compact rewrites the log as one record per provider, at startup and whenever
+// Next finds it grown past compactNeededLocked. Callers hold mu.
 func (s *fileSeqStore) compact() error {
 	var buf bytes.Buffer
 	for key, seq := range s.data {
@@ -256,6 +290,20 @@ func (s *fileSeqStore) compact() error {
 		dir.Sync()
 		dir.Close()
 	}
+
+	// The rename replaced the file the append handle points at: that handle now
+	// names an unlinked inode, and appends to it would be written where nothing
+	// will ever read them. Swap the handle over before anything appends again,
+	// and drop it if the swap fails so the next call reopens rather than
+	// writing to the void.
+	reopened, err := os.OpenFile(s.path, os.O_RDWR|os.O_APPEND, 0o600)
+	if err != nil {
+		s.file.Close()
+		s.file = nil
+		return fmt.Errorf("seqstore: reopen %s: %w", s.path, err)
+	}
+	s.file.Close()
+	s.file = reopened
 	s.lines = len(s.data)
 	return nil
 }

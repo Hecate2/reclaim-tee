@@ -142,8 +142,25 @@ func TestFileSeqStoreRefusesAnUnrepresentableProviderID(t *testing.T) {
 	}
 }
 
-// TestFileSeqStoreCompactsAGrownLog checks the bound: the log is rewritten to
-// one record per provider at startup, and the counters survive the rewrite.
+// assertLogBounded checks the log is not growing with the number of jobs: one
+// record per provider plus the floor's slack, and no more.
+func assertLogBounded(t *testing.T, path string) {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lines, max := strings.Count(string(raw), "\n"), 4*1+seqLogCompactFloor; lines > max {
+		t.Fatalf("log holds %d records, want at most %d", lines, max)
+	}
+}
+
+// TestFileSeqStoreCompactsAGrownLog checks the bound holds while the service is
+// running, not only at startup: issuing enough numbers rewrites the log back to
+// one record per provider. The rewrite replaces the file the append handle
+// points at, so this also pins that the numbers issued after it are not written
+// to the unlinked inode the old handle names — they have to be readable by the
+// next process.
 func TestFileSeqStoreCompactsAGrownLog(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "seqstore.log")
 
@@ -152,6 +169,7 @@ func TestFileSeqStoreCompactsAGrownLog(t *testing.T) {
 	for i := 0; i < 2*seqLogCompactFloor; i++ {
 		last = nextValue(t, store, "prov-a")
 	}
+	assertLogBounded(t, path)
 	closeTestStore(t, store)
 
 	reopened := openTestStore(t, path)
@@ -159,16 +177,10 @@ func TestFileSeqStoreCompactsAGrownLog(t *testing.T) {
 	if got, err := reopened.Peek([]byte("prov-a")); err != nil || got != last {
 		t.Fatalf("Peek after compaction = %d, %v, want %d, nil", got, err, last)
 	}
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if lines := strings.Count(string(raw), "\n"); lines > 4*1+seqLogCompactFloor {
-		t.Fatalf("log still has %d records after compaction", lines)
-	}
 	if got := nextValue(t, reopened, "prov-a"); got != last+1 {
 		t.Fatalf("Next after compaction = %d, want %d", got, last+1)
 	}
+	assertLogBounded(t, path)
 }
 
 // TestFileSeqStoreConcurrentNext checks the append is serialised: concurrent
