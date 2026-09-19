@@ -313,52 +313,27 @@ func (h *Hub) runRealtime(ctx context.Context, tenant, model, provider string,
 	// exactly what was relayed — and the mismatch check above bound it to the
 	// Hub's own relayed count. Pass the relayed count so pricing needs no cap
 	// special case.
-	charged, err := Price(card, model, down, rec)
+	amt, err := h.price(card, model, down, rec)
 	if err != nil {
 		return SessionOutcome{}, fmt.Errorf("price session: %w", err)
-	}
-	commission, err := h.commission.CommissionOn(charged)
-	if err != nil {
-		return SessionOutcome{}, err
-	}
-	buyer, ok := addChecked(charged, commission)
-	if !ok {
-		return SessionOutcome{}, fmt.Errorf("%w: charged %d plus commission %d", ErrPriceOverflow, charged, commission)
 	}
 	outcome := SessionOutcome{
 		Receipt:       receipt,
 		Provider:      spec.Provider,
 		UplinkBytes:   up,
 		DownlinkBytes: down,
-		Charged:       charged,
-		Commission:    commission,
-		Buyer:         buyer,
+		Charged:       amt.provider,
+		Commission:    amt.commission,
+		Buyer:         amt.buyer,
 	}
-	if h.maxJob > 0 && buyer > h.maxJob {
-		// Same policy as the request path: the exchange really happened, so
-		// the receipt is kept for the provider's audit, but a session priced
-		// above the Hub's per-job ceiling settles nothing.
-		if serr := h.store.Put(spec.Provider, receipt); serr != nil {
-			return outcome, fmt.Errorf("store session receipt: %w", serr)
-		}
-		outcome.Stored = true
-		return outcome, fmt.Errorf("%w: buyer %d exceeds %d", ErrJobPriceExceeded, buyer, h.maxJob)
+	// A session settles through the same book as a request: a session priced
+	// over the Hub's ceiling or whose receipt is not durable moves no money,
+	// and neither is booked twice. The difference is only in what report the
+	// caller is owed, so the relay error rides alongside a settled session.
+	outcome.Stored, err = h.book(tenant, spec.Provider, receipt, amt, false)
+	if err != nil {
+		return outcome, err
 	}
-	if err := h.store.Put(spec.Provider, receipt); err != nil {
-		// Same rule as the request path: the receipt is not durable, so the
-		// ledger records no money. The caller still gets the priced outcome
-		// to report what would have been charged.
-		return outcome, fmt.Errorf("store session receipt: %w", err)
-	}
-	// Store first, then settle: the ledger is in-memory and cannot fail, so
-	// once Put has succeeded the settlement is guaranteed to be recorded.
-	outcome.Stored = true
-	if !h.claimSettlement(receipt.Receipt.JobID) {
-		return outcome, fmt.Errorf("%w: job %x", ErrDuplicateSettlement, receipt.Receipt.JobID)
-	}
-	h.ledger.NoteSettled(spec.Provider, charged)
-	h.ledger.NoteCommission(spec.Provider, commission)
-	h.chargeTenant(tenant, buyer)
 	return outcome, relErr
 }
 
