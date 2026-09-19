@@ -254,7 +254,13 @@ func readSSE(r io.Reader, onChunk func([]byte) error, onStart ...func(tee.Respon
 				// handed without being able to alter the evidence.
 				result.Chunks = append(result.Chunks, []byte(frame.Data))
 				if onChunk != nil {
-					_ = onChunk([]byte(frame.Data))
+					// A consumer that stopped taking bytes — a client that will not
+					// read, a link that broke — ends the exchange here. Ignoring the
+					// error instead leaves the Hub pulling a body nobody receives,
+					// which is how a stalled reader becomes unbounded buffering.
+					if cerr := onChunk([]byte(frame.Data)); cerr != nil {
+						return result, cerr
+					}
 				}
 			}
 		case tee.EventStart:
