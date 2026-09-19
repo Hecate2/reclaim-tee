@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/reclaimprotocol/reclaim-tee/tokenhive/internal/canonical"
+	"github.com/reclaimprotocol/reclaim-tee/tokenhive/jobs"
 	"github.com/reclaimprotocol/reclaim-tee/tokenhive/platform"
 )
 
@@ -32,10 +33,6 @@ const (
 	EvidenceHashLength   = 32
 	PolicyHashLength     = 32
 	MaxApplicationIDSize = 256
-	// MaxModelLength bounds the model a receipt names. It mirrors
-	// jobs.MaxModelLength: the receipt and the spec it describes have to agree
-	// on what a model identifier may look like.
-	MaxModelLength = 64
 )
 
 // CompletionState tells the verifier whether the response is whole.
@@ -212,8 +209,11 @@ func (r Receipt) Validate() error {
 	if len(r.ResponseHeadersHash) != 0 && len(r.ResponseHeadersHash) != StreamHashLength {
 		return fmt.Errorf("%w: length %d, want %d", ErrInvalidHeaderHash, len(r.ResponseHeadersHash), StreamHashLength)
 	}
-	if len(r.Model) > MaxModelLength {
-		return fmt.Errorf("%w: %q exceeds %d bytes", ErrInvalidModel, r.Model, MaxModelLength)
+	// The bound is jobs', not a copy of it: the receipt and the spec it
+	// describes have to agree on what a model identifier may look like, and two
+	// constants that agree by convention eventually do not.
+	if len(r.Model) > jobs.MaxModelLength {
+		return fmt.Errorf("%w: %q exceeds %d bytes", ErrInvalidModel, r.Model, jobs.MaxModelLength)
 	}
 	for _, ch := range r.Model {
 		if ch <= ' ' || ch == '\x7f' {

@@ -64,8 +64,7 @@ func main() {
 	spec := buildSpec(*provider, *host, *path)
 	spec.Credential = cred
 
-	req := tee.SessionRequest{Spec: spec}
-	first, err := req.EncodeCanonical()
+	first, err := tee.Job{Spec: spec}.EncodeCanonical()
 	if err != nil {
 		fail("encode session request: %v", err)
 	}
@@ -78,7 +77,7 @@ func main() {
 	}
 	defer conn.Close()
 
-	// 建连段: one Binary message holding the canonical SessionRequest.
+	// 建连段: one Binary message holding the canonical job.
 	if err := conn.WriteMessage(websocket.BinaryMessage, first); err != nil {
 		fail("send session request: %v", err)
 	}

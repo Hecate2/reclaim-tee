@@ -3,8 +3,10 @@
 // plan:
 //
 //  1. 建连段 — the Hub dials /v1/session as a WebSocket and sends one Binary
-//     message holding a canonical SessionRequest (a JobSpec with Session set,
-//     plus its empty body). The TEE runs the same refusal checks as Execute,
+//     message holding a canonical Job (a JobSpec with Session set, plus its
+//     empty body — the same object /v1/execute carries, so the two endpoints
+//     cannot drift about what a submitted job is). It runs the same refusal
+//     checks as Execute,
 //     performs the Upgrade handshake to the provider, and replies with a Text
 //     ack: {"ok":true} or {"error":"..."}.
 //  2. 透传段 — after the ack every Binary message the Hub writes is forwarded
@@ -34,7 +36,6 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/reclaimprotocol/reclaim-tee/tokenhive/internal/canonical"
-	"github.com/reclaimprotocol/reclaim-tee/tokenhive/jobs"
 	"github.com/reclaimprotocol/reclaim-tee/tokenhive/proof"
 )
 
@@ -48,27 +49,6 @@ const SessionIdleTimeout = 5 * time.Minute
 
 // SessionAck is the success reply to a SessionRequest.
 const SessionAck = `{"ok":true}`
-
-// SessionRequest is the payload of the first Hub→TEE frame of a session: a
-// JobSpec with Spec.Session set, bound to an empty body. The body-hash binding
-// still applies, so the writer must commit to a digest of zero bytes exactly as
-// a normal job commits to its payload.
-type SessionRequest struct {
-	Spec jobs.Spec `cbor:"1,keyasint"`
-	Body []byte    `cbor:"2,keyasint"`
-}
-
-// EncodeCanonical returns the deterministic CBOR encoding of the request.
-func (r SessionRequest) EncodeCanonical() ([]byte, error) { return canonical.Marshal(r) }
-
-// DecodeSessionRequest parses a canonical-CBOR SessionRequest.
-func DecodeSessionRequest(data []byte) (SessionRequest, error) {
-	var r SessionRequest
-	if err := canonical.Unmarshal(data, &r); err != nil {
-		return SessionRequest{}, err
-	}
-	return r, nil
-}
 
 // sessionUpgrader accepts the Hub's WebSocket. No origin restriction: the Hub
 // and the TEE are both ours, and origin checks only matter for browsers.
@@ -109,13 +89,13 @@ func ServeSession(svc *Service, w http.ResponseWriter, r *http.Request) {
 		writeSessionReply(conn, `{"error":"first frame must be binary"}`)
 		return
 	}
-	req, err := DecodeSessionRequest(first)
+	job, err := DecodeJob(first)
 	if err != nil {
 		writeSessionReply(conn, `{"error":"decode session request: `+jsonErr(err)+`"}`)
 		return
 	}
 
-	ss, err := svc.OpenSession(r.Context(), Job{Spec: req.Spec, Body: req.Body})
+	ss, err := svc.OpenSession(r.Context(), job)
 	if err != nil {
 		writeSessionReply(conn, `{"error":"`+jsonErr(err)+`"}`)
 		return

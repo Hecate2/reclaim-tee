@@ -680,7 +680,7 @@ func sseServer(t *testing.T, body string) *httptest.Server {
 		if err != nil {
 			t.Errorf("read body: %v", err)
 		}
-		var req tee.ExecuteRequest
+		var req tee.Job
 		if err := canonical.Unmarshal(raw, &req); err != nil {
 			t.Errorf("decode request: %v", err)
 		}

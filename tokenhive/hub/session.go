@@ -24,8 +24,7 @@ func (t *HTTPTEE) OpenSession(ctx context.Context, spec jobs.Spec) (SessionConn,
 	if t.SessionURL == "" {
 		return nil, ErrSessionUnsupported
 	}
-	req := tee.SessionRequest{Spec: spec}
-	first, err := req.EncodeCanonical()
+	first, err := tee.Job{Spec: spec}.EncodeCanonical()
 	if err != nil {
 		return nil, fmt.Errorf("encode session request: %w", err)
 	}

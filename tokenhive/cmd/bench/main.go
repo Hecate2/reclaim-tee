@@ -248,7 +248,7 @@ func runTEE(n int, model, host, query string, maxBytes uint64, body []byte, teeU
 }
 
 func oneTEE(client *http.Client, teeURL string, spec jobs.Spec, body []byte) (sample, error) {
-	reqBody, err := tee.ExecuteRequest{Spec: spec, Body: body}.EncodeCanonical()
+	reqBody, err := tee.Job{Spec: spec, Body: body}.EncodeCanonical()
 	if err != nil {
 		return sample{}, err
 	}

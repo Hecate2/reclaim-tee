@@ -159,7 +159,7 @@ func (t *HTTPTEE) Execute(ctx context.Context, spec jobs.Spec, body []byte, onCh
 	if t.URL == "" {
 		return Result{}, errors.New("hub: TEE URL is empty")
 	}
-	enc, err := tee.ExecuteRequest{Spec: spec, Body: body}.EncodeCanonical()
+	enc, err := tee.Job{Spec: spec, Body: body}.EncodeCanonical()
 	if err != nil {
 		return Result{}, fmt.Errorf("encode execute request: %w", err)
 	}
