@@ -809,23 +809,47 @@ func TestHTTPTEEStopsAtTheResponseCap(t *testing.T) {
 // TestBindConnectionRequiresTheCertificateKey pins the binding that ties a
 // receipt to the TLS connection that carried it: the signing key must be the
 // key the peer certificate presented. Plain HTTP has no peer identity, so the
-// check is skipped rather than failed.
+// check is skipped there rather than failed — but a TLS channel that yielded no
+// certificate is refused, because that means the capture did not run rather than
+// that there was nothing to bind.
 func TestBindConnectionRequiresTheCertificateKey(t *testing.T) {
 	cert := sha256.Sum256([]byte("peer certificate spki"))
 	same := sha256.Sum256([]byte("peer certificate spki"))
 	other := sha256.Sum256([]byte("another key"))
 
-	if err := bindConnection(cert[:], proof.Receipt{Attestation: &proof.AttestationRef{KeyID: same[:]}}); err != nil {
+	if err := bindConnection(cert[:], true, proof.Receipt{Attestation: &proof.AttestationRef{KeyID: same[:]}}); err != nil {
 		t.Fatalf("matching key refused: %v", err)
 	}
-	if err := bindConnection(cert[:], proof.Receipt{Attestation: &proof.AttestationRef{KeyID: other[:]}}); !errors.Is(err, ErrReceiptNotBoundToConnection) {
+	if err := bindConnection(cert[:], true, proof.Receipt{Attestation: &proof.AttestationRef{KeyID: other[:]}}); !errors.Is(err, ErrReceiptNotBoundToConnection) {
 		t.Fatalf("error = %v, want ErrReceiptNotBoundToConnection", err)
 	}
-	if err := bindConnection(cert[:], proof.Receipt{}); !errors.Is(err, ErrReceiptNotBoundToConnection) {
+	if err := bindConnection(cert[:], true, proof.Receipt{}); !errors.Is(err, ErrReceiptNotBoundToConnection) {
 		t.Fatalf("error = %v, want ErrReceiptNotBoundToConnection for a receipt with no attestation", err)
 	}
-	if err := bindConnection(nil, proof.Receipt{}); err != nil {
+	if err := bindConnection(nil, false, proof.Receipt{}); err != nil {
 		t.Fatalf("plain HTTP must skip the check, got %v", err)
+	}
+	if err := bindConnection(nil, true, proof.Receipt{Attestation: &proof.AttestationRef{KeyID: same[:]}}); !errors.Is(err, ErrReceiptNotBoundToConnection) {
+		t.Fatalf("error = %v, want a refusal: a TLS channel always presents a certificate", err)
+	}
+}
+
+// TestSecureChannelFollowsTheURL pins where the requirement comes from: the
+// scheme the Hub was configured with, so a transport that never reveals a
+// connection cannot switch the binding off.
+func TestSecureChannelFollowsTheURL(t *testing.T) {
+	for _, tc := range []struct {
+		url  string
+		want bool
+	}{
+		{"https://tee.example/v1/execute", true},
+		{"wss://tee.example/v1/session", true},
+		{"http://127.0.0.1:18090/v1/execute", false},
+		{"ws://127.0.0.1:18090/v1/session", false},
+	} {
+		if got := secureChannel(tc.url); got != tc.want {
+			t.Errorf("secureChannel(%q) = %t, want %t", tc.url, got, tc.want)
+		}
 	}
 }
 

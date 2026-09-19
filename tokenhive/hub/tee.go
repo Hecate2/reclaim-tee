@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -226,7 +227,7 @@ func (t *HTTPTEE) Execute(ctx context.Context, spec jobs.Spec, body []byte, onCh
 	spkiMu.Lock()
 	spki := peerSPKI
 	spkiMu.Unlock()
-	if err := bindConnection(spki, res.Receipt.Receipt); err != nil {
+	if err := bindConnection(spki, secureChannel(t.URL), res.Receipt.Receipt); err != nil {
 		return res, err
 	}
 	return res, nil
@@ -280,12 +281,19 @@ func bindReceipt(spec jobs.Spec, r proof.Receipt) error {
 var ErrReceiptNotBoundToConnection = errors.New("receipt signing key is not the certificate the connection presented")
 
 // bindConnection checks that a receipt's signing key is the key the connection
-// that carried it presented. peerSPKI is nil when the peer presented no
-// certificate — plain HTTP, the local simulation — and then there is no peer
-// identity to bind and nothing to assert; a deployment that needs the binding
-// configures the TEE channel (mTLS or attestation).
-func bindConnection(peerSPKI []byte, r proof.Receipt) error {
+// that carried it presented. peerSPKI is empty on a plaintext channel — the
+// local simulation — and there is then no peer identity to bind and nothing to
+// assert.
+//
+// requirePeer is what keeps that skip from being a way out: it says the channel
+// is TLS, so a certificate was presented and read. An empty peerSPKI there means
+// the capture failed, not that there was nothing to bind, and the receipt is
+// refused rather than accepted on a check that did not run.
+func bindConnection(peerSPKI []byte, requirePeer bool, r proof.Receipt) error {
 	if len(peerSPKI) == 0 {
+		if requirePeer {
+			return fmt.Errorf("%w: TLS channel presented no certificate to bind", ErrReceiptNotBoundToConnection)
+		}
 		return nil
 	}
 	if r.Attestation == nil {
@@ -297,9 +305,28 @@ func bindConnection(peerSPKI []byte, r proof.Receipt) error {
 	return nil
 }
 
-// tlsPeerSPKI returns SHA-256 over the peer certificate's SPKI, which is the
-// receipt KeyID for an RA-TLS peer, or nil when conn is not a TLS connection
-// or presented no certificate.
+// secureChannel reports whether a Hub↔TEE URL carries TLS, and therefore
+// whether a receipt arriving over it must be bound to the certificate that
+// carried it. It reads the scheme the Hub was configured with rather than what
+// a dial happened to reveal, so a transport that hides its connection cannot
+// turn the binding off.
+func secureChannel(url string) bool {
+	return strings.HasPrefix(url, "https://") || strings.HasPrefix(url, "wss://")
+}
+
+// spkiDigest is the identity of a certificate: SHA-256 over its
+// SubjectPublicKeyInfo, which is exactly the receipt's Attestation.KeyID (see
+// proof.AttestationRef and platform.Identity, both over the same DER).
+func spkiDigest(cert *x509.Certificate) []byte {
+	if cert == nil {
+		return nil
+	}
+	sum := sha256.Sum256(cert.RawSubjectPublicKeyInfo)
+	return sum[:]
+}
+
+// tlsPeerSPKI returns the SPKI digest of the certificate a connection
+// presented, or nil when conn is not a TLS connection or presented none.
 func tlsPeerSPKI(conn net.Conn) []byte {
 	tc, ok := conn.(*tls.Conn)
 	if !ok {
@@ -309,8 +336,28 @@ func tlsPeerSPKI(conn net.Conn) []byte {
 	if len(certs) == 0 {
 		return nil
 	}
-	sum := sha256.Sum256(certs[0].RawSubjectPublicKeyInfo)
-	return sum[:]
+	return spkiDigest(certs[0])
+}
+
+// spkiCapture records the SPKI digest of the certificate a dialer's handshake
+// accepted. The handshake may complete on a different goroutine than the one
+// that asked for the connection, so the two sides are ordered rather than left
+// to luck.
+type spkiCapture struct {
+	mu     sync.Mutex
+	digest []byte
+}
+
+func (c *spkiCapture) set(digest []byte) {
+	c.mu.Lock()
+	c.digest = digest
+	c.mu.Unlock()
+}
+
+func (c *spkiCapture) get() []byte {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.digest
 }
 
 // CredentialKey implements CredentialService.
