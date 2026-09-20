@@ -386,7 +386,7 @@ cd tokenhive/cloudtest/snp
 
 ### 9.3 机密实例的配置注入与信任建立
 
-机密实例没有 sshd，其运行配置完全由 loader 从 EC2 user-data 注入为环境变量：`TEE_ADDR`（mTLS 请求面监听地址）、`TEE_RELAY`（双机模式的反向隧道地址）、`TEE_PLATFORM=sevsnp`（强制真实 attestation，非 SNP 环境直接失败）、`TEE_MTLS=1`（RA-TLS + 要求 hub 客户端证书）、`TEE_CA=/run/bundle/mtls/mp-ca.pem`（mock provider 的 CA 打进被测 bundle，tee 据此校验上游 TLS 端点，机密实例无系统信任库可依）。策略目录**不在**这份 user-data 里：tee 的 `-policy-dir`/`TEE_POLICY_DIR` 留空，于是按默认规则直接取被测 bundle 的 `./policy` 本体（sevsnp 下该文件必须存在，否则拒绝启动）。tee 的每个命令行 flag 都支持从同名环境变量回退取值，因此被测 bundle 保持字节一致，运行时路由完全由 VM metadata 决定。
+机密实例没有 sshd，其运行配置完全由 loader 从 EC2 user-data 注入为环境变量：`TEE_ADDR`（mTLS 请求面监听地址）、`TEE_RELAY`（双机模式的反向隧道地址）、`TEE_PLATFORM=sevsnp`（强制真实 attestation，非 SNP 环境直接失败）、`TEE_MTLS=1`（RA-TLS + 要求 hub 客户端证书）、`TEE_CA=/run/bundle/mtls/mp-ca.pem`（mock provider 的 CA 打进被测 bundle，**追加**在平台自身的信任根之上，而不是取而代之：sevsnp 的平台根正是被度量 bundle 里的 `./etc/ssl/certs/ca-certificates.crt`，由 loader 经 `SSL_CERT_FILE` 指给飞地，见 9.6 的信任库条目）。策略目录**不在**这份 user-data 里：tee 的 `-policy-dir`/`TEE_POLICY_DIR` 留空，于是按默认规则直接取被测 bundle 的 `./policy` 本体（sevsnp 下该文件必须存在，否则拒绝启动）。tee 的每个命令行 flag 都支持从同名环境变量回退取值，因此被测 bundle 保持字节一致，运行时路由完全由 VM metadata 决定。
 
 mockprovider 也改用固定身份：`-ca/-cert/-key` 三个 flag 让它加载并复现 bundle 内 `mtls/mp-*.pem` 的身份，并把 CA 复写到 `TOKENHIVE_SIM_DIR/ca.pem`（供 agent 拉取模型列表时信任该模拟提供商）。这正是真实闭环的必要条件——tee 与 mockprovider 分处不同主机，CA 必须随被测 bundle 度量进 TEE，而非运行时从无 sshd 的机密实例经不可信路径传递。
 
@@ -422,6 +422,8 @@ mockprovider 也改用固定身份：`-ca/-cert/-key` 三个 flag 让它加载�
 **PYTHONHOME/PYTHONPATH 被宿主工具污染导致 Python 崩溃**：本机某些工具会注入这两个环境变量，令 venv 的 python3 与裸 `python3`/aws CLI 报 `No module named 'encodings'`。`crosshost.sh` 顶部已统一 `unset` 二者，子步骤不再需要逐个 `env -u`。
 
 **单机 AMI 启动后自动关机**：单机 bundle 需要 `./mtls/mp-ca.pem`（`pack.sh build` 经 `SNP_MP_CA/SNP_MP_CERT/SNP_MP_KEY` 或 `.certs/` 注入）。缺失时 tee 在 attestation 成功（控制台已打印 `policy hash bound into attestation evidence`）之后，因读不到该 CA 而 `log.Fatalf("upstream TLS config")` 退出，从未开始监听；supervisor 的拨号探针满 4 分钟超时后返回错误，loader 随即 powerOff 关机。诊断特征为控制台出现 `[tee] upstream TLS config: read CA /run/bundle/mtls/mp-ca.pem: no such file or directory` 与 `[loader] FATAL: TEE app exited`；mockprovider 同样加载这份身份，缺失时也会先于它退出。修复是先在 `.certs/` 生成齐全（`gencerts` 输出 `mp-ca/cert/key`）后再执行 `crosshost.sh build-single`，让 supervisor bundle 确实带上三个 `mp-*` 文件。
+
+**上游 TLS 只发出一个 ClientHello 就断开（信任库被 `-ca` 替换掉了）**：`-ca`/`TEE_CA` 是**追加**到平台根，而不是替换——`tls.Config.RootCAs` 一旦非 nil 就整个接管系统信任库，所以把它实现成替换时，`TEE_CA=/run/bundle/mtls/mp-ca.pem` 会让飞地里一个公共根都不剩，任何真实上游（chatgpt.com、api.anthropic.com）都在证书校验处断掉。观测特征极不直观：hub 侧只有 `relay stream to "chatgpt.com:443" closed after Xms: sent 1560 bytes toward Bee, received 3870 bytes`。上行 1560 字节只够 ClientHello（该账号的 `Authorization` 头单独就要 1880 字节），下行 3870 字节正好是 ServerHello + 证书链——即飞地收到证书链后一个应用字节都没发出就断了。判据是 tee 启动日志里那一行 `upstream TLS trust: <source> -> N anchors`：`N` 为 0 说明根没进来（在 Linux 上 `SSL_CERT_FILE` 指向的文件不存在时，`x509.SystemCertPool()` 返回 **0 个 anchor 且 `err == nil`**，是一个静默的空池）。注意「烘焙进 bundle 的 CA」与「`TEE_CA`」是两件事：前者进系统根，后者只是追加项，所以看到 `[loader] SSL_CERT_FILE=/run/bundle/etc/ssl/certs/ca-certificates.crt` 与控制台正常启动，**并不能**说明 tee 实际用的就是它。核对 bundle 里到底有没有某个根时不要 `grep` PEM 文本（内容 base64 编码，明文 CN 不会出现），用 `openssl crl2pkcs7 -nocrl -certfile <bundle-ca> | openssl pkcs7 -print_certs -noout` 读 subject，或数 `BEGIN CERTIFICATE` 条数。
 
 **hub 拒绝 tee 证明（app hash 不匹配）**：`up` 记录的是所启动镜像自带的 `snp-app` 标签，正常情况下与实例里 loader 度量的摘要一致。若仍不一致（AMI 由别的机器/检出构建，或 `crosshost.json` 被手改过），hub 会报 `verify receipt: attestation does not match the signing key`。对齐方法：从机密实例控制台的 `[loader] app_sha256 = <hash>` 读实际摘要，把 `crosshost.json` 的 `tee.app_hash` 与 hub 的 `-expected-app` 都调成该值。
 
