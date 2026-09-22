@@ -727,7 +727,7 @@ Hub 无法结算（收据是计费前提，`hub/hub.go` 的 `Execute` 注释）�
   第一次重拨就失败（`internal/mtls/mtls.go:133-139` 有专门文案提示这两种原因需要相反的处置）。
   线上证据支持生产用的是 attestation：§10 的黑窗在没有任何重新分发的情况下自愈。
 - 换 TEE（新 AMI / 新 digest）与**轮换**是两回事：前者要同步 `HIVE_TEE_EXPECTED_APP` 并让 provider 重新注册；
-  后者什么都不用做。
+  后者什么都不用做。逐步流程与两个已知的静默坑见 **§15**。
 
 ## 12. 实施记录（七）：交易所的硬边界，与"轮换还能伤到谁"的复查（2026-09-22）
 
@@ -1061,3 +1061,75 @@ context」实现，只能**从外面把它切断**。
 2. **F5**：`MaxJobMicros` 改派发前拒绝。
 3. **止损可观测性**：`dispatched/settled` 变成指标 + 熔断阈值（对付 TEE 卡死）。
 4. 轮换侧：无需再动。
+
+## 15. 换 TEE 的标准流程（双机拓扑实测，2026-09-22）
+
+滚动记录，不是提案。拓扑：TEE 是 `tokenhive/cloudtest` 起的 SEV-SNP 实例（无 sshd），Hub 在**另一台普通主机**
+上跑 `tokhive-mvp` 的 `bin/hive`（tmux 会话 `tokhive`）。Hub 侧**不改代码**，只改 `/etc/tokhive/hive.env`。
+
+```bash
+# 0. 前提：Docker daemon 要在跑（AMI 构建用）
+docker info >/dev/null || open -a Docker
+
+# 1. 从当前工作树重建 AMI（约 13–17 分钟）
+cd tokenhive/cloudtest/snp && ./crosshost.sh build
+
+# 2. 读新 digest —— 必须每次重新读，不能沿用上一次的值
+grep SNP_T_DIGEST ../../../deploy/snp-digests.env
+
+# 3. 核对待部署的代码真的进了包（digest 变了不代表代码进去了）
+tar -xf ../bin/tokenhive-app-bundle.tar -C /tmp/chk app
+strings /tmp/chk/app | grep -o '<本次改动引入的符号名>' | sort -u
+
+# 4. 终止旧 TEE，并**等它真正 terminated**
+./crosshost.sh down --tee-only
+
+# 5. 起新 TEE（--host-ip 是 Hub 的私网地址，即 TEE 眼中 relay 的目标）
+./crosshost.sh up --tee-only --host-ip 10.0.1.151
+cat ../crosshost.json          # 取 private_ip 与 app_hash
+
+# 6. 确认 enclave 起来了（TEE 无 sshd，唯一通道是串口，必须带 Latest=True）
+#    aws ec2 get-console-output --instance-id <id> --latest
+#    期望：policy hash bound / 146 anchors / listening on https://0.0.0.0:18090 / next refresh in 2h
+
+# 7. 改 Hub 的三项并重启（见下）
+ssh -i ssh-key.pem ubuntu@52.215.235.214 'sudo -e /etc/tokhive/hive.env'   # 只改这三行
+#   HIVE_TEE_ENDPOINT=https://<新私网 IP>:18090/v1/execute
+#   HIVE_TEE_EXPECTED_APP=snp-app:<新 digest>
+#   HIVE_RELAY_ALLOWED_CIDRS=<新私网 IP>/32      ← 收窄到 TEE，换 TEE 必改，否则 relay 拒绝拨入
+kill $(pgrep -x hive)                          # Ctrl-C 无效
+tmux send-keys -t tokhive:0.0 "set -a; . /etc/tokhive/hive.env; set +a; HIVE_DEBUG=1 ./hive" Enter
+```
+
+**启动成功的判据（三行齐 = mTLS 通且 attestation 校验通过）**：
+
+```
+INFO TEE deployment configured endpoint=… expected_app=snp-app:<新 digest>
+INFO TEE inbox key key_id=<新 key id>            ← 出现这行就说明 RA-TLS 握手 + 证据校验都过了
+WARN Relay serves plaintext address=…:18085 sources=<新私网 IP>/32
+```
+
+若第二行变成 `WARN TEE inbox key unavailable … tls: internal error`，见 §10 / §11.3 C 档。
+
+### 15.1 本次踩到的两个坑（都会静默产出错误状态）
+
+1. **`crosshost.sh down` 之后必须等实例真的 `terminated` 才能 `up`。** 在 `shutting-down` 期间跑的 `up`
+   会把它判成「可复用」，于是**不启动新实例**，而是把**新 digest 盖到死实例的记录上**并打印一行看起来
+   完全正常的 `reusing confidential tee i-…`（本次实测）。后果是 `crosshost.json` 里留着死实例 id + 新 digest。
+   处置：`down --tee-only` → 轮询到 `terminated`（本次约 4 分钟）→ `up`；若已经中招，先备份并把
+   `crosshost.json` 里的 `tee` 键删掉（变成 `{}`）再 `up`，强制走启动路径。
+2. **`deploy/snp-digests.env` 里的 `COMMIT=` 在 crosshost 流程里不可信。** `crosshost.sh build` 是先用
+   `pack.sh` 从**工作树**打出 bundle，再以 `SNP_EXTERNAL_BUNDLE` 交给 `deploy/snp-build.sh` 原样采用；
+   而 `snp-build.sh` 的 `record_digest_env` 记的是它自己认定的 `BUILD_COMMIT`（来自
+   `deploy/image-history.json` 里最后一条 `app_images`），在 crosshost 路径下与产出 bundle 的工作树
+   **无关**（本次它写着 `COMMIT=cfe3720`，而 bundle 里明明是 `cfe3720` 之后 7 个提交的代码）。
+   ⇒ **判断"代码有没有进包"只能靠 `strings <bundle>/app | grep <符号名>`**，digest 与 COMMIT 都不行。
+   （`SNP_T_DIGEST` 本身是可信的：它是从 AMI 的 `snp-app` tag 读回来的。）
+
+### 15.2 换 TEE 的连带影响（必读）
+
+- **inbox key 会换**（进程启动时生成一次，见 §11.1）⇒ 所有 **provider agent 必须重新注册凭据**；
+  Hub 里那些封给旧 key 的信封对新 TEE 无法打开。agent 每次重连都会经 Hub 重新拉 inbox key
+  （`hub/tee.go` 的 `CredentialKey` 每次现取不缓存），所以**等它自然重连即可**，不必手工干预。
+- 换 TEE **不是**轮换：轮换什么都不用做（§11.5）。
+- 换 TEE 期间 Hub 处于 fail-closed（连不上 TEE）⇒ 无服务、无收入，但**也不漏 token**（§14.4）。
