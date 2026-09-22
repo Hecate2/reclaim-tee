@@ -1215,3 +1215,96 @@ WARN Relay serves plaintext address=…:18085 sources=<新私网 IP>/32
 
 **尚未在真实 AWS 上验证**：`--new` 走完真实 `run_instances`、以及 `down --superseded` 打到真实实例。
 两者都是纯参数/权限路径的第一次实战，下次换 TEE 时按 §15 走一遍即可覆盖。
+
+## 17. 决策记录：「只在对话结束时证明」能达成什么，不能达成什么（2026-09-22）
+
+> 本节是**复核记录，未改代码**。它回答的是"能不能撤掉请求侧的证明，只在收尾时签名"，以及这样做的
+> 代价落在哪里。四条判据都对着代码查过，行号写本节时是准的。
+
+### 17.1 先把"证明"分四处，它们撤掉的后果完全不同
+
+| # | 落在哪 | 代码 | 撤掉会怎样 |
+| --- | --- | --- | --- |
+| ① | 连接建立 | Hub 侧 `VerifyRATLSPeer`（`cmd/hub/main.go:513`），握手完成**前**校验叶证据 + `-expected-app` | **不能撤**：`ExecuteRequest.Body` 就是买家 prompt 明文，而 `h.verify` 在字节交付**之后**（`hub.go:508→513`，chunk 经 `onChunk` 边收边转）⇒ 冒充者可交付内容却签不出收据 |
+| ② | 请求受理 | `service.go:426` `signerStaleAt` + `:445-452` `budget<=0`/`context.WithTimeout`；`OpenSession` 同款 | 撤掉能让健康轮换零感知，但打开 17.4 的洞 |
+| ③ | 请求落在已退役连接 | `epochConnections.guard` 503 + `EpochRetiredHeader` | 撤掉**不改善买家感知**：Hub 已在这个标记上重试一次（`hub/tee.go:180`），且受理时会 pin 那条连接的 epoch（`rotated_connections.go:44-48`）|
+| ④ | 响应开头 | `EventStart` + `ResponseHeadersHash` + `receiptMatchesStart`（`hub.go:530`） | **不能撤**：Hub 在拿到收据**之前**就把买家的 HTTP 状态提交了（`schedule.go`，`serve.go:352`），撤掉"给买家看的 200"与"计费依据的状态"不再可证同源 |
+
+### 17.2 「不一致」到底是哪两半不一致
+
+不是"开头的证明"与"结尾的证明"，而是 **收据上署名的 epoch** 与 **承载这份收据的那条 TLS 连接在握手时证明的 epoch**。
+连接一直都在，不会因为你不在开头检查就消失。今天交换路径上这两半是**一致的**，而且不是靠 ②，是靠：
+
+1. `epochConnections.guard`（`rotated_connections.go:95`）比较"连接盖的 epoch 计数器"与 `current`，所以通过它的请求，
+   其连接 epoch 必等于 `current`；
+2. `Service.Execute`（`service.go:422`）pin 的 `signer := s.activeSigner()` 于是必然就是那个 epoch 的 signer。
+
+`identity.KeyID` 与连接证书的 SPKI 是同一个值：`buildEpoch` 断言 `sha256(PublicKeyDER) == snapshot.SPKIHash()`
+（`adapter.go:255-263`），而 SPKI 就是 `RATLSManager` 每次 `Refresh` 现生成、写进证书的那把钥匙（`ratls_manager.go:94-98`）。
+
+### 17.3 两端各自压着一条要求，而它们会在跨轮换时打架
+
+- **收据可结算** ⇒ 署名 epoch 的叶在 **Hub 验证时**仍未过期。`verifyNitroChain` 的 `leaf.Verify`
+  （`shared/snp_combined_aws.go:380`）没传 `CurrentTime`，Go 用 `time.Now()`。
+- **配对成立** ⇒ 署名 epoch 必须等于连接握手时的那个 epoch。
+
+一个跨过轮换的在途请求同时压着这两条：**不换手**（用旧 epoch 签）⇒ 旧叶可能已过期 ⇒ Hub 拒收 ⇒ 免费；
+**换手**（用 `activeSigner()`）⇒ 新叶有效 ⇒ 可结算，但配对为假。这就是今天的二选一，也是 §12 的
+`signingBudget` 与 §13 的会话切断存在的原因——它们把"两条都不满足"变成"提前截断、按已交付字节可结算"。
+
+### 17.4 「只在结尾证明」字面上的结果
+
+| 目标 | 结论 |
+| --- | --- |
+| 健康轮换下买家无感 | **达成**——但对"把轮换瞄准点挪到重签窗口"（§B-1）的边际收益为 **0**：门限读的是 `activeSigner()`，轮换在重签窗口内落地后，那道门永远不会触发 |
+| 不出现"开头与结尾证书不一致" | **不达成**，而且这正是制造不一致的那个动作（见 17.2 的图） |
+| 轮换失败时"某些对话免费 + 发不起新对话" | **不达成**：得到的是**无限期免费服务**，理由见下 |
+
+最后一条的三个代码事实：
+
+1. `guard` 只比 **epoch 计数器**（`rotated_connections.go:95`），而 `current` 只在 `rotate()`（`:159`）里 +1；
+2. `rotate()` 只从 `serviceRuntime.adopt`（`ratls_refresh.go:179`）调用，而 `adopt` 只在平台给出**更新**的
+   epoch 时才会走到（`adapter.go:217` 的 `supersedes`）；
+3. ⇒ **轮换一直失败 ⇒ `rotate()` 从不调用 ⇒ 门恒开**；而 `Adapter.ServerTLSConfig().GetCertificate`
+   （`adapter.go:147-157`）的 `ErrNotReady` **只在新握手时生效**，已建立的连接不再经过它。Hub 的传输层是
+   `&http.Transport{TLSClientConfig: teeTLS}`（`cmd/hub/main.go:135`），**没设 `IdleConnTimeout`**，Go 零值语义是
+   "no limit" ⇒ 池里那条连接不会被空闲回收。
+
+于是"后续买家无法发起新对话"恰好不成立：新握手确实失败，但 Hub 手上那条老连接继续被服务，
+**每一条都是完整交付、永不结算**，条数与时长都不封顶。
+
+### 17.5 三个附带洞（与钱无关，但都是真实的）
+
+1. **"已交付但未签名"在线上没有类型。** 它只能靠 `ErrTEERefused` 之类的字符串匹配被识别；任何验签回归都会
+   静默变成赠送。顺带一个独立缺陷：`serve.go:352-378` 的 `truncated` 判定要求 `err == nil`，所以 `h.verify`
+   失败时反而会走到 `:368` 补一个 `data: [DONE]`——**错误帧之后还有终止符**，只看 `[DONE]` 的客户端会把半截
+   答案当成完整答案。
+2. **provider 的序号账本。** `service.go:436-438` 自陈：一个领了号却从未执行的作业，是 provider **无法与
+   "Hub 隐藏了一次执行"区分**的缺口。撤掉 ② 之后，整个故障期都是这种缺口。
+3. **provider 白干。** 收款以收据为凭，所以不结算的损失落在 provider 与 Hub 应收上，买家的预付余额并不减少。
+
+另外会话不能顺手一起撤：会话无自然结束点（`SessionIdleTimeout` 是看门狗不是时长上限），撤掉
+`watchSigningDeadline` 之后故障期会话可免费跑到任意长，且没有止损点。
+
+### 17.6 要同时达成三件事的形态
+
+方向是对的，落点要换：**不要撤"受理时的证明"，要撤"签名侧的新鲜度门限"，把那唯一的一道门放到连接上。**
+
+- **方案 S（不改 Hub）**
+  1. 退役条件从"轮换成功"改成"**证据过期**"（按 `epoch.admissibleUntil`，且只在连接空闲时关——`track` 已经是
+     这个形状）。这一条同时买下"轮换失败 ⇒ 新对话发不起来"与"没有无限期免费服务"。
+  2. 收据用**承载它的那条连接的 epoch** 签（`accept` 已经把 epoch 盖进连接上下文，现在只存了计数器，
+     改成存 epoch 本身）；`pin` 从"受理时的 `activeSigner()`"换成"连接 stamp 的 epoch"，配对由构造保证。
+  3. 轮换瞄准 `SNPAdmissionDeadline − 重签窗口`（`ratls_refresh.go:287`），否则 `[D, N]` 这 5 分钟内签出的收据
+     注定过旧 ⇒ **每周期 5 分钟固定免费**。
+  4. 删掉请求级 `signerStaleAt` / `signingBudget` / `:450` 那个把 deadline 装在 `D−1s` 的 `context.WithTimeout`。
+  - 残余：跨过 NotAfter 的在途交换会产出 Hub 拒收的收据 ⇒ 免费。有界（只在途、只在跨线那批），这正是
+    "允许不计费"能买到的边界。健康轮换下它接近于零（轮换落在重签窗口后，在服务的 epoch 总有 ≳9m 的余量）。
+- **方案 C（= S + 改 Hub）**：Hub 比对 `receipt.AttestationRef.KeyID` 与**连接证书的 SPKI**，并且不再对收据里的叶
+  按 `now` 判（新鲜度只在握手判 + 连接寿命上限）。于是 17.6 的残余也消失。
+  注意今天 `hub.Hub.verify` 的签名是 `func(proof.SignedReceipt) error`（`hub.go:232`）——**结构上拿不到连接**，
+  所以配对不是"没人想查"，是"没人能查"。
+- **方案 C 的代价**：收据不再能脱离连接自证（第三方要查配对，本来也需要保留连接证据）；需要给 Hub 的连接
+  加寿命上限，让"多久重新证明一次"重新有个节拍。
+
+结论：**如果短期不动 Hub，就做 S；S 删掉的机制比它加的多，而且三条目标都达成。C 是终局形态。**
