@@ -1308,3 +1308,104 @@ WARN Relay serves plaintext address=…:18085 sources=<新私网 IP>/32
   加寿命上限，让"多久重新证明一次"重新有个节拍。
 
 结论：**如果短期不动 Hub，就做 S；S 删掉的机制比它加的多，而且三条目标都达成。C 是终局形态。**
+
+## 18. 决策记录：Hub 自己计费，能否取代 TEE 的受理证明（2026-09-22）
+
+> 复核记录，**未改代码**。问题：「Hub 是我自己部署的，我把 Hub 的计费规则改成'TEE 证明缺失时也照常计费'，
+> 这时能撤掉请求受理（交换开始）的证明吗？」
+
+### 18.1 结论
+
+**能，而且只有当你同时放弃"按次计费"时才自洽。** 真正的分界线不是签名，而是收据里的 `Completion`——
+它是唯一一个 Hub 无论怎么观察自己都得不到的字段（18.3）。因此：
+
+| 形态 | 收据是否必需 | ② 能否撤 |
+| --- | --- | --- |
+| 保价目（flat fee + premium 仍在） | **必需**（`Completion` 只此一处） | 不能 |
+| 纯字节计价（只算 volume） | 不需要 | 能，且 `guard`/`rotate`/Hub 重试一族也可一并撤 |
+
+撤 ② 单独做、不改计费口径，则回到 §17.4 的判词（无界免费 + 唯一健康信号消失）。
+
+### 18.2 今天的结算链是"收据形状"的
+
+`Hub.Execute`（`hub/hub.go:508-600`）依次做六件事，**没有一步可以跳过收据**：
+
+| 步骤 | 位置 | 输入 |
+| --- | --- | --- |
+| 验签 + 度量 pin | `:513` `h.verify(res.Receipt)` | `proof.SignedReceipt` |
+| 字节绑定 | `:518` `MatchesStream(res.Chunks)` | 收据的 `StreamHash` |
+| 响应头绑定 | `:530` `receiptMatchesStart(...)` | 收据的 `ResponseHeadersHash` + `StatusCode` |
+| 定价 | `:544` `Price(card, model, relayed, receipt)` | 见 18.3 |
+| 落库（provider 的对账凭据） | `:587` `store.Put(provider, receipt)` | `ProviderSeq` |
+| 幂等结算 | `:597` `claimSettlement(receipt.JobID)` | 收据的 `JobID` |
+
+而 `readSSE` 的收尾（`hub/tee.go:315-322`）已经把"没有收据"当成硬错误：`receipt == ""` ⇒ `ErrNoReceipt`。
+所以「允许证明缺失时计费」不是改一条规则，是**再建一条结算通路**。
+
+### 18.3 定价的四个量里，Hub 手里有三个
+
+`Price`（`hub/pricing.go:79-121`）只用四个量，前三个 Hub 都能自己观测：
+
+| 量 | 收据里的来源 | Hub 能否自证 |
+| --- | --- | --- |
+| `relayed`（交付的响应字节） | —（收据不提供） | **能**：Hub 自己累加收到的 chunk（`hub.go:540-543`），并用它给 `Price` |
+| `RequestBytes` | 收据字段 | **能**：body 就是 Hub 自己构造并发出去的（`len(body)`），`MatchesBody` 已在校验它 |
+| `StatusCode` | 收据字段 | **能**：`res.Status` 来自 start 帧，Hub 已经用它提交了自己的响应（`receiptMatchesStart` 就是拿它去对） |
+| `ResponseBytes` | 收据字段 | **能**（近似）：真值是 `min(ResponseBytes, relayed)`（`:90-93`），而 TEE 会整块丢弃越过 `MaxResponseBytes` 的 chunk ⇒ `relayed ≤ ResponseBytes` 常态成立 |
+| **`Completion`** | 收据字段 | **不能** |
+| `AttestationRef` / `PolicyHash` / `ProviderSeq` | 收据字段 | **不能**、**不能**、**不能** |
+
+#### 为什么 `Completion` 不可自证（这是本节的落点）
+
+`Completion` 是 TEE 自己的裁决（`tee/service.go:683-689`）：
+
+- `CompletionFailed`（`err != nil && !started && 零字节`）——Hub 也能看出（没 start 帧、没字节）；
+- **`CompletionTruncated`（`err != nil` 或 relay 侧被截断）**——provider 已经答了 200、body 中途死掉；
+- `CompletionComplete`。
+
+关键在于：**provider 中途死亡时，`Service.Execute` 返回的是 `err == nil` 的 Result + 一份
+`CompletionTruncated` 的收据**（`:761-776`）。也就是说，在线上**没有 error 帧**，Hub 的 `readSSE` 只看到流结束。
+"答了 200 然后死在 body 中间"与"正常完成"在 Hub 眼里完全同形，**唯一能区分它们的证人就是收据里那一个字段**
+——`cmd/hub/serve.go:352-353` 正是这么用的，`Billable`（`pricing.go:34-42`）与 `Price` 的 flat fee/premium
+（`:111-120`）也都以它为门。
+
+反过来，**轮换造成的切断在线上是可见的**：`ErrAttestationStale` 是 `Execute` 明确记录的例外
+（`service.go:407-412`），`ServeExecute` 会写出 `event: error` 帧（`rpc.go:182-185`），Hub 收到
+`ErrTEERefused`（`hub/tee.go:318`）。所以——
+
+> **「按观察计费」的过度收费风险并不来自轮换，而来自你扔掉了 `body 中途截断` 的唯一证人。**
+
+这条很重要，因为它把"撤 ② 的代价"和"改成观察计费的代价"彻底分开了：前者是止损问题（§17.4），后者是
+**计费正确性**问题，且与轮换无关，今天就在。
+
+唯一朴素的绕法是让 Hub 嗅 SSE 终止符（比如 OpenAI 的 `data: [DONE]`）。三个理由说它不行：三种 wire format
+各要一份解析；mock upstream 本来就不发 `[DONE]`（`serve.go:369-370` 的注释自己写着）；而且这恰恰是收据
+存在的目的——用**被执行方签署的裁决**取代**客户端启发式**。
+
+### 18.4 两种自洽形态
+
+**形态 1（保价目）**：`Price` 的 `PerRequestMicros` + `Premium` 需要 `CompletionComplete` 才成立 ⇒ 必须有收据
+⇒ ② 必须留。**今天的形态，无需改动。**
+
+**形态 2（纯字节计价）**：只保留 `volumes × PerMegabyteMicros`（`pricing.go:101-109`），停用 flat fee/premium。
+此时定价只用 `relayed` 与 `RequestBytes`，两者 Hub 都有 ⇒ **收据可以完全不要** ⇒ ② 可撤，
+`guard`/`rotate`/Hub 重试一族（§11–§13 那批）也可一并撤，因为不再有任何东西要求"签名时的新鲜度"。
+
+形态 2 必须显式接受的代价：
+
+1. **provider 失去对账锚。** `ProviderSeq` 的全部价值就是让 provider 发现"Hub 藏了一次执行"
+   （`hub/store.go:130-139` 的注释：持有 1 与 3 就知道至少被用了三次）。不收据 ⇒ 这个能力消失，
+   provider 只能信 Hub 的账本。
+2. **买家失去"这次交付来自被度量镜像"的可查证性。** 注意**本仓库里买家本来也拿不到收据**：`cmd/hub/serve.go`
+   全文没有暴露收据的出口，收据只出现在 Hub 内部与 provider 侧的 `-audit`（`cmd/hub/main.go:95,139,363-395`）。
+   所以对买家而言，这次改动只是把"Hub 能证明"降级为"Hub 这么说"。
+3. **每周期固定损失 flat fee/premium**（轮换窗口内那批），这与 §12 已记录的情况相同。
+
+### 18.5 建议
+
+- **只想让买家无感** ⇒ 做 B-1（把轮换瞄准重签窗口）。② 读的是 `activeSigner()`，届时永不触发；
+  收据仍有效、配对不破、产品不变。这是最省的一条。
+- **真想不再要求 TEE 证明** ⇒ 走形态 2，但要显式承认"计费 = 运营方自己的仪表，证明是尽力而为的证据"，
+  并把收据 store/audit 的故事一并收掉。留着一套不再被任何东西信任的机器，是 §17.5 说的守一半。
+- **不要做的**：留着收据、又允许缺收据时计费。那是两边的成本都付——既要维护签名/证明链，又已经放弃了
+  它要买的东西（计费正确性与可对账性）。
