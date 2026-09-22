@@ -727,7 +727,7 @@ Hub 无法结算（收据是计费前提，`hub/hub.go` 的 `Execute` 注释）�
   第一次重拨就失败（`internal/mtls/mtls.go:133-139` 有专门文案提示这两种原因需要相反的处置）。
   线上证据支持生产用的是 attestation：§10 的黑窗在没有任何重新分发的情况下自愈。
 - 换 TEE（新 AMI / 新 digest）与**轮换**是两回事：前者要同步 `HIVE_TEE_EXPECTED_APP` 并让 provider 重新注册；
-  后者什么都不用做。逐步流程与两个已知的静默坑见 **§15**。
+  后者什么都不用做。逐步流程见 **§15**（先建、再切、最后删，不必等旧机终止），两个已知的静默坑与修法见 **§15.1 / §16**。
 
 ## 12. 实施记录（七）：交易所的硬边界，与"轮换还能伤到谁"的复查（2026-09-22）
 
@@ -1081,25 +1081,36 @@ grep SNP_T_DIGEST ../../../deploy/snp-digests.env
 tar -xf ../bin/tokenhive-app-bundle.tar -C /tmp/chk app
 strings /tmp/chk/app | grep -o '<本次改动引入的符号名>' | sort -u
 
-# 4. 终止旧 TEE，并**等它真正 terminated**
-./crosshost.sh down --tee-only
+# 4. 起新 TEE（--host-ip 是 Hub 的私网地址，即 TEE 眼中 relay 的目标）
+#    --new = 另起一台，旧的那台**继续跑**，只把它的记录挪到 `superseded`
+./crosshost.sh up --tee-only --host-ip 10.0.1.151 --new
+cat ../crosshost.json          # 取新 private_ip 与 app_hash（tee 键始终是新的那台）
 
-# 5. 起新 TEE（--host-ip 是 Hub 的私网地址，即 TEE 眼中 relay 的目标）
-./crosshost.sh up --tee-only --host-ip 10.0.1.151
-cat ../crosshost.json          # 取 private_ip 与 app_hash
+# 5. 等新 enclave 起来（旧 TEE 此时仍在服务，这段等待不占停机窗口）
+./crosshost.sh verify          # dump 记录里那台 tee 的串口（已带 Latest=True）
+#    期望：policy hash bound / 146 anchors / listening on https://0.0.0.0:18090
+#          / next refresh in 2h
 
-# 6. 确认 enclave 起来了（TEE 无 sshd，唯一通道是串口，必须带 Latest=True）
-#    aws ec2 get-console-output --instance-id <id> --latest
-#    期望：policy hash bound / 146 anchors / listening on https://0.0.0.0:18090 / next refresh in 2h
-
-# 7. 改 Hub 的三项并重启（见下）
+# 6. 改 Hub 的三项并重启（见下）—— 到这里服务才切过去，旧 TEE 全程活着
 ssh -i ssh-key.pem ubuntu@52.215.235.214 'sudo -e /etc/tokhive/hive.env'   # 只改这三行
 #   HIVE_TEE_ENDPOINT=https://<新私网 IP>:18090/v1/execute
 #   HIVE_TEE_EXPECTED_APP=snp-app:<新 digest>
 #   HIVE_RELAY_ALLOWED_CIDRS=<新私网 IP>/32      ← 收窄到 TEE，换 TEE 必改，否则 relay 拒绝拨入
 kill $(pgrep -x hive)                          # Ctrl-C 无效
 tmux send-keys -t tokhive:0.0 "set -a; . /etc/tokhive/hive.env; set +a; HIVE_DEBUG=1 ./hive" Enter
+
+# 7. 启动判据三行齐（下一步）之后，才退役旧 TEE
+./crosshost.sh down --superseded --dry-run     # 只列，不删
+./crosshost.sh down --superseded               # 只删 `superseded` 里记录的那几台
 ```
+
+**为什么不再需要「先 down、等 terminated、再 up」**：`up --new` 从不终止任何实例，只把旧的记录
+从 `tee` 挪到 `superseded`（见 §16）。所以新 TEE 的启动（约 2–3 分钟 attest）和旧 TEE 的退役之间
+没有任何耦合，操作者也不必等 EC2 的 termination（实测约 4 分钟）——那 4 分钟是纯等待，现在并进了
+新机的启动时间里。旧 TEE 在 Hub 被重指之前一直能服务，因此**不存在两台都不可用的窗口**。
+
+严格说这不是「请求零中断」：重启 Hub 那一瞬仍在飞行中的请求会断（§14.4 fail-closed，不漏 token），
+且在旧 TEE 上尚未结束的会话也不会迁到新 TEE。被消除的是**操作者的等待**与**无 TEE 可用的窗口**。
 
 **启动成功的判据（三行齐 = mTLS 通且 attestation 校验通过）**：
 
@@ -1118,6 +1129,9 @@ WARN Relay serves plaintext address=…:18085 sources=<新私网 IP>/32
    完全正常的 `reusing confidential tee i-…`（本次实测）。后果是 `crosshost.json` 里留着死实例 id + 新 digest。
    处置：`down --tee-only` → 轮询到 `terminated`（本次约 4 分钟）→ `up`；若已经中招，先备份并把
    `crosshost.json` 里的 `tee` 键删掉（变成 `{}`）再 `up`，强制走启动路径。
+   **已由 §16 修掉**：可复用状态收窄为 `pending`/`running`，`shutting-down`/`stopping`/`stopped`
+   一律不采纳（会打印实际状态并另起一台）。同时 §16 的 `--new` 让「先 down 再 up」这个顺序本身
+   不再是必需动作。
 2. **`deploy/snp-digests.env` 里的 `COMMIT=` 在 crosshost 流程里不可信。** `crosshost.sh build` 是先用
    `pack.sh` 从**工作树**打出 bundle，再以 `SNP_EXTERNAL_BUNDLE` 交给 `deploy/snp-build.sh` 原样采用；
    而 `snp-build.sh` 的 `record_digest_env` 记的是它自己认定的 `BUILD_COMMIT`（来自
@@ -1133,3 +1147,71 @@ WARN Relay serves plaintext address=…:18085 sources=<新私网 IP>/32
   （`hub/tee.go` 的 `CredentialKey` 每次现取不缓存），所以**等它自然重连即可**，不必手工干预。
 - 换 TEE **不是**轮换：轮换什么都不用做（§11.5）。
 - 换 TEE 期间 Hub 处于 fail-closed（连不上 TEE）⇒ 无服务、无收入，但**也不漏 token**（§14.4）。
+  这段窗口现在只剩「重启 Hub 到它连上新 TEE」这一小段：旧 TEE 在退役前一直可用（§16）。
+
+## 16. 实施记录（九）：换 TEE 不必等旧机终止（2026-09-22）
+
+§15 的旧流程是「`down --tee-only` → 轮询到 `terminated`（实测约 4 分钟）→ `up`」。那 4 分钟是纯等待：
+它既不提供服务，也不提供新代码，只是 AWS 回收网卡的时间；而 §15.1 那个「在 `shutting-down` 期间 `up`
+会被判成可复用」的坑，正是这种「先删后建」顺序逼出来的。本次把顺序反过来：**先建、再切、最后删**。
+
+### 16.1 改动清单
+
+| 位置 | 改动 |
+| --- | --- |
+| `snp/crosshost.py` | 新增 `--new`：即使 `tee` 记录里的实例仍在跑，也另起一台，并把旧记录**移**到 `state["superseded"]`（附 `superseded_at`），旧实例保持运行。 |
+| `snp/crosshost.py` | 可复用状态从「`!= terminated`」收窄为 `REUSABLE_STATES = ("pending","running")`，决策函数 `adoptable(record, state)` / `recorded_state(ec2, record)` 独立出来，可离线单测。 |
+| `snp/crosshost.py` | `describe()` 现在吸收 `InvalidInstanceID.NotFound/Malformed` 为 `{}`（超过 AWS 保留窗口的实例不是「空结果」而是报错），其余错误照旧上抛。 |
+| `snp/retire.py`（新增） | 只终止 `superseded` 记录的实例。`down --superseded` 调它。 |
+| `snp/crosshost.sh` | `up --new` 透传；新增 `down --superseded [--dry-run]`（与 `--tee-only` 互斥）；`dump_tee_console` 补 `Latest=True`（§15 第 5 步的串口检查此前拿的是旧缓冲，会把「起来后没日志」误判成「启动失败」）。 |
+| `cloudtest/tests/test_unit.py` | +4 组（`OwnershipTest`/`DescribeAbsenceTest`/`SupersedeTest`/`RetireSafetyTest`）；cloudtest 套件 30→34 个测试。 |
+| `snp/tests/test_crosshost.py` | +`SwapWiringTest`：`up --new` 真的把标志透传下去、`down --superseded` 走 `retire.py` 且那条路径上不可达 `delete.py`、串口 dump 带 `Latest=True`；snp 套件 27→31 个测试。 |
+
+### 16.2 两条不变量（这是「不会误删机器」的落点）
+
+1. **`crosshost.py` 永不终止任何实例。** 它只 `run_instances` 与写状态文件；`from aws import` 里没有
+   `terminate`。有一条测试直接读源码断言这一点，所以这不是承诺，是被 CI 钉住的形状。
+   推论：任何 `up`（含 `--new`）都不可能毁掉它正在替换的那台机器。
+2. **`retire.py` 的目标集合只能来自 `superseded` 记录。** 它不按 tag 枚举、不把 `tee`/`host` 当候选，
+   因此坏掉的状态文件只能让它**少删**，不能让它多删。逐个候选再查一遍：实例存在 → 同时带两个
+   cloudtest tag → 不等于当前 tee / 当前 host；任一不满足就 `Refused` 并**整体停下**。`--dry-run`
+   与真实运行走同一组门（所以 dry-run 能提前暴露拒绝理由），只是不删也不清记录。
+
+### 16.3 退役的前置条件：先有活着的接替者
+
+`down --superseded` 要求当前 `tee` 有记录**且状态为 `running`**，否则拒绝执行。这是把
+「新 TEE 正常启动完成、Hub 指向新 TEE 之后再删旧 TEE」从口头纪律变成机器检查——否则「新机悄悄死了，
+操作者照样退役旧机」会以「一台 TEE 都不剩」收场。
+
+能看见的部分到此为止：**Hub 是否真的重指过，这一侧看不见**（Hub 在别人的机器上，接口在
+`crosshost.sh` 之外），所以程序在输出里明说这一点，而不是假装检查过。仍未消除的残余风险只有
+「Hub 还指着旧 TEE 就把旧 TEE 删了」——那是可用性事故，不是数据事故：Hub 立刻 fail-closed，不漏 token
+（§14.4），重新 `up --new` 一次即可。
+
+### 16.4 换机失败时怎么退回去
+
+顺序换过来之后，回退也是对称的：Hub 不重指（或指回旧私网 IP），然后删掉新那台——
+
+```bash
+./crosshost.sh down --tee-only     # 删的是 crosshost.json 里的 tee，也就是新那台
+```
+
+`down --tee-only` 只按记录删当前 tee，不碰 `superseded`，所以仍存活的旧 TEE 不受影响、继续服务。
+代价是状态文件里「正在服务的那台」此刻被记在 `superseded` 下（名字确实反了）：把它手工挪回
+`tee` 键（顺手删掉 `superseded_at`）即可。这只是让下一次 `up` 的判断准确，不影响正在跑的机器。
+
+### 16.5 实测（本机，无 AWS）
+
+`tests/test_unit.py` 34 个测试全绿。另外用一个假 EC2 客户端把状态机整条走了一遍
+（脚本在 /tmp，未入库）：
+
+- 连续两次 `--new`：`superseded` = `[i-new1, i-new2]`，两台都仍 `running`，`tee` = 最新那台；
+- 记录里的实例处于 `shutting-down` 时 `up`（无 `--new`）：打印
+  `recorded tee i-new3 is shutting-down; not adoptable, launching fresh` 并**另起一台**，
+  §15.1 那个静默坑不再成立；
+- `retire.py`：dry-run 只列不删；真实运行只把 `i-new1`/`i-new2` 置为 `terminated`，
+  当前 tee 与另一个 operator 的实例（tag 的 user 不同）都保持 `running`，随后把两条记录清掉
+  → 再跑一次是空操作。
+
+**尚未在真实 AWS 上验证**：`--new` 走完真实 `run_instances`、以及 `down --superseded` 打到真实实例。
+两者都是纯参数/权限路径的第一次实战，下次换 TEE 时按 §15 走一遍即可覆盖。
