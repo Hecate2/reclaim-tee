@@ -703,3 +703,114 @@ Hub 无法结算（收据是计费前提，`hub/hub.go` 的 `Execute` 注释）�
   线上证据支持生产用的是 attestation：§10 的黑窗在没有任何重新分发的情况下自愈。
 - 换 TEE（新 AMI / 新 digest）与**轮换**是两回事：前者要同步 `HIVE_TEE_EXPECTED_APP` 并让 provider 重新注册；
   后者什么都不用做。
+
+## 12. 实施记录（七）：交易所的硬边界，与"轮换还能伤到谁"的复查（2026-09-22）
+
+§11 把轮换的影响面按买家/卖家列了一遍，并指出**唯一可能被买家看见的失败**是"复用了一条刚被退役的连接"那个
+503。当时留了一句话没兑现：那不是唯一的窗口。这一节把第二个窗口关掉，并把"还有没有第三个"照着代码查完。
+
+### 12.1 第二个窗口：在 deadline 之前开始、在它之后结束
+
+`perform` 会把收据签名者**钉在**请求到达时的那一个（这是必要的：收据里的 KeyID 必须与承载它的连接所呈现的
+epoch 一致），而入口处的 `signerStaleAt` 只在**请求开始时**判一次新鲜度。于是：
+
+- `RequestTimeout`（`-request-timeout`，默认 2m，**设 0 就是无界**）是**从交易所自己的起点**算的窗口，
+  不是"必须在签名 deadline 前结束"的约束；
+- 一个在 `[deadline − RequestTimeout, deadline)` 之间被受理的请求，会在 `deadline` 之后才走到签名。
+
+后果不是"收据不好看"，而是**结算失败**：收据 cite 的是已经在签名 margin 之外的叶，Hub 在入库前验收据
+（`hub/hub.go` 的 `Execute` → `attest.Verifier.Check` → 链校验末端 `shared/snp_combined_aws.go:380` 的
+`leaf.Verify`，**没设 `CurrentTime`**）⇒ `x509: certificate has expired` ⇒ 买家 5xx，而 provider 已经跑完、
+Hub 无法结算。按 170 分钟的轮换周期、`RequestTimeout` 非零时有流量的情况下约 1% 以上的轮换会命中一次；
+设 0 则没有上界。
+
+### 12.2 修复（提交 `d4d8fb2`）：把签名截止变成交易所的硬边界
+
+| 机制 | 位置 | 作用 |
+|---|---|---|
+| `signingHandoff = 1s` | `tee/service.go:283` | 交易所结束点到签名 deadline 之间留的余量。签名本身是微秒级，这 1s 是给调度抖动与秒级时钟粒度的地板，不是要花掉的预算 |
+| `signingDeadline` / `signingBudget` | `tee/service.go:295`、`:314` | 从钉住的 signer 读出 `SNPSigningDeadline`；budget = 剩余时间 − `signingHandoff`。**没有可读叶的证据（模拟、测试假件）返回 bounded=false**，否则钉住的测试钟会被当成故障 |
+| 受理时的拒绝 | `tee/service.go:393` | budget ≤ 0（余量不足 `signingHandoff`）⇒ 直接 `ErrAttestationStale`。**与"epoch 已 stale"同一位置、同一代价**：在分配 `ProviderSeq`、解开凭据之前拒绝，不给 provider 的序列打洞 |
+| 交易所的硬边界 | 同上 | 否则给整个执行套一个 `context.WithTimeout(ctx, budget)`。被切断的交易所产出的是 **truncated 收据**：`Price` 对这种收据只按已交付字节收 volume（`hub/pricing.go:69-72`），于是 **provider 拿到它已做的那部分钱**，而不是整单结算不了 |
+| 签名前复查（fail-safe） | `tee/service.go:701` | deadline 不是保证：忽略 context 的 transport、或跳变的时钟，仍然会走到签名。这时**拒绝而不是签**。这是唯一"provider 已经干了活却什么都结算不了"的路径，所以它的存在本身就意味着上面那条边界失效了 |
+
+两点需要写清楚：
+
+1. **拒绝放在受理处而不是交易所里**，是为了不产生 ProviderSeq 空洞（一个花掉却没收据的序号，provider
+   无法与"被隐藏的执行"区分——见 `hub` 里那段关于 gap 的注释）。
+2. **bound 总是取更紧的那一个**。它由受理时的 signer 算出，而 `perform` 钉住的 signer 在中间发生轮换时
+   只会换成**更晚到期**的叶，所以这个 bound 永远不会比实际的更松；`Request.Timeout` 仍然原样传给 transport，
+   两者取 min。就实际影响范围而言，需要它起作用时（`deadline − now < RequestTimeout`）切点一定落在 Hub
+   `-attempt-timeout`（默认 3m）之内，所以收据总能被 Hub 读到。
+
+### 12.3 复查发现的同类缺陷：同一个 listener 上的另外两条路径
+
+`epochConnections.guard` 挂在 `mux` 外层，**覆盖该 listener 的所有路由**（`cmd/tee/main.go` 的
+`Handler: svcRuntime.conns.guard(mux)`）。因此'退役连接 503'不只 `/v1/execute` 会遇到。逐一查过：
+
+| 路径 | 谁在用 | 后果 | 处置 |
+|---|---|---|---|
+| `POST /v1/execute` | Hub 派发任务 | 买家可见的失败 | 已修（上一节，`f774d23`）：带标记的 503 重试一次 |
+| `GET /v1/credential-key` | **每个** provider agent 每次重连都拉一次（经 Hub 转发） | 卖家侧：agent 注册失败，且失败原因对它完全不可见 | 已修（`865cd2c`）：把拒绝收敛成协议包里唯一的 `tee.ErrEpochRetired`，由两边共用的客户端 helper 重试一次 |
+| `GET /v1/evidence/<hash>` | Hub 验收据时解析 `EvidenceHash`（**生产是 hash-only 收据**，且 `attest.Verifier` 不缓存，**每张收据都取一次**） | 三者中最重：任务跑完了、provider 付过上游了、TEE 也签了收据，Hub 却因为读不到收据自己点的证词而**把整单丢掉** | 已修（`0be5771`）：重试一次。这条不需要标记就安全——取回的是按自身哈希寻址的只读字节，且下面还会比对哈希，重试能重复的东西为零；对端真不可用则两次都失败，如实报错 |
+| `GET /v1/session`（WebSocket 升级） | Hub 开流式会话 | 见 12.4 | 不加代码，理由写在 12.4 |
+
+三条修复的**安全论证是同一个**：`guard` 在 handler 之前返回，所以那次拒绝没有分配序号、没有花凭据、没有碰
+provider。差别只在"能不能证明这一点"：`/v1/execute` 上必须靠标记（无标记的 503 可能是在任务已执行之后才
+回的，重试会重复执行并重复计费），`/v1/evidence` 上请求本身就是只读，规则自然满足。
+
+### 12.4 仍未修：会话的终端收据（需要你拍板）
+
+会话是**故意无界**的（`rotated_connections.go` 里 `track` 对 `StateHijacked` 的解释），终端收据用**结束那一刻
+的 live signer** 签（`tee/service.go:989`）。如果那时 live signer 已经进了签名 margin，`Receipt()` 直接返回
+`ErrAttestationStale` ⇒ `relaySession` 回一条 `{"error":...}` ⇒ Hub 侧 `sessionTunnel` 拿到的不是收据 ⇒
+`ErrNoReceiptForSession`。**整个会话的字节全部无证、不可结算**，而 provider 已经把它们转发完了。
+
+什么时候会发生：需要在**会话结束**那一刻 live signer 已过期，也就是"轮换连续失败到过了 deadline"。健康的
+轮换会提前约 4m48s（AWS 在叶到期前 9m48s 重签，而 signature deadline 只提前 5m）就把新 epoch 换上，所以正常
+情况下不会命中——这一条只由 AWS 侧故障触发，但**每次命中的损失是一整个会话**，不像 §11 B 档那样有 5 分钟上界。
+
+为什么 A/B 覆盖不了它：B 的形态是"在 deadline 之前把交易所切断"，而会话的问题是**它结束的时刻由 provider
+决定**，那一刻已经不能签了。唯一修法是在 live signer 距 deadline 还有 `signingHandoff` 时就**主动切断隧道**，
+让收据在 margin 内签出（收据照样按已转发字节计费）。代价是这个 deadline 必须**跟着轮换走**（不能用会话开始
+时那一张），需要在 relay 循环里按当前 signer 判一次——不是一行，但也不大。
+
+三种选择：(i) 按上面实现；(ii) 接受并只留记录（它只在 AWS 已故障时出现）；(iii) 会话也加绝对长度上限
+（但那会改掉"unbounded work"的设计意图，与其它部分不一致）。我倾向 (i)，但它不属于"毫秒级窗口"这一类，
+所以先摆出来。
+
+### 12.5 已确认不受影响 / 不值得改的
+
+- **WebSocket 会话拨号（`/v1/session`）**：`hub/session.go:37` 用 `websocket.Dialer` 直拨，
+  gorilla 每次自己建 TCP 连接，**不走 `http.Client` 的连接池**。所以"退役连接被复用"这个前提不成立，
+  只剩 accept→请求 之间的微秒级竞态（`guard` 在轮换落在这一瞬时会拒升级，Hub 的会话循环会 `continue`
+  到下一个候选后整体失败）。概率约 1e-8/天量级，低于值得加代码的门槛。**如果将来把 `Dialer.NetDial`
+  指到共享 transport，这条会立刻变成真问题。**
+- **空转 tick 不产生 churn**：`publishEpoch` 对已在服务的 KeyID 早返回，`adapter` 的 `supersedes` 也挡一层；
+  `conns.rotate()` 只在**真的换 epoch** 时被调用一次（`ratls_refresh.go:179`，只在 `adopt` 里）。
+- **Hub 候选循环的空转**：一个 stale epoch / 余量不足的拒绝会让**每个候选各打一次**（它们都指向同一个 TEE），
+  N 次往返后 5xx。只是浪费，不重复计费：拒发都在分配序号之前或（fail-safe 那条）根本不出收据。
+- **凭据面与轮换解耦**：inbox key 进程启动生成一次、轮换不换（`ratls_refresh.go` 的注释）；provider 的在线
+  通道是 agent↔Hub 的 WS，不经 TEE TLS。真正要卖家重新注册的是**重启 TEE**，与轮换无关。
+- **账务不会错**：截断收据只按已交付字节计 volume；拒发不产生收据因而无计费；`CompletionFailed` 计 0
+  （`hub/pricing.go:80`）。异常期只会少收。
+
+### 12.6 相邻但不属于轮换的两点（记录，不改）
+
+- **TEE 侧时钟没有自检**。enclave 用的是宿主提供的 `time.Now`，而 signing deadline 来自 AWS 签发的叶的
+  `NotAfter`。宿主钟若落后 AWS，TEE 会按自己的钟继续签、Hub 用真钟拒收（`certificate has expired`）——
+  这是唯一**系统性**而非边界性的失效面。真要做，可以在刷新循环里用新叶的 `NotBefore` 与本地钟做一致性检查
+  （AWS 只在旧叶最后几分钟才重签，所以"刚签发的叶的 NotBefore 应该接近现在"是个可判据）。
+- **evidence store 是单实例磁盘、append-only**（`evidence/store.go` 的包注释）。轮换只是往里加文件（每
+  ~2h 一个，几 KB）；真正会丢历史的是**换 TEE 实例**，那时 hash-only 收据的证词只能靠别处的副本解析。
+  与轮换无关，与"换机/重新部署"有关。
+
+### 12.7 验证
+
+- `go vet ./shared/... ./tokenhive/...`：无输出。`go test ./shared/... ./tokenhive/...`：全绿。
+- harness A/B（`/tmp` 干净 worktree，基线 `f774d23`）：`d4d8fb2` 与 `865cd2c` 都是
+  **18 场景 / 31 OK / 0 FAIL，断言逐行相同**。
+- 新增测试：`tee/exchange_bound_test.go` 5 个（bound 的取值与 `RequestTimeout` 并存；被切断仍出可结算的
+  truncated 收据；余量不足时在 transport 与序号之前就拒；逃出 bound 的交易所不签名；无可读叶时不设 bound）；
+  `hub/tee_test.go` 2 个（credential-key 的标记重试一次 + 不循环）；`evidence/store_test.go` 2 个
+  （evidence 抓取重试一次 + 持续拒绝则报错）。
