@@ -28,6 +28,10 @@
 | §12 | 交易所的硬边界（在签名截止前切断）+ 同 listener 上另外两条路径的同类缺陷 |
 | §13 | 会话终端收据：在还有余量可签时主动切断隧道 |
 | §14 | 恶意买家能否借轮换白嫖 token；AWS 故障时的止损现状 |
+| §15 | 换 TEE 的标准流程（含两个会静默产出错误状态的坑）；§16 把它改成"先建 → 再切 → 最后删" |
+| §17 | 决策记录：「只在结尾证明」能达成什么、不能达成什么 |
+| §18 | 决策记录：Hub 自己计费能否取代 TEE 的受理证明（分界线是收据的 `Completion`） |
+| §19 | **实施记录：方案 B** —— 轮换瞄准重签窗口 + 签名处换手，消掉 §11 的四个掐断点 |
 
 ---
 
@@ -1409,3 +1413,138 @@ WARN Relay serves plaintext address=…:18085 sources=<新私网 IP>/32
   并把收据 store/audit 的故事一并收掉。留着一套不再被任何东西信任的机器，是 §17.5 说的守一半。
 - **不要做的**：留着收据、又允许缺收据时计费。那是两边的成本都付——既要维护签名/证明链，又已经放弃了
   它要买的东西（计费正确性与可对账性）。
+
+## 19. 实施记录（十）：方案 B —— 把轮换挪进重签窗口，并在签名处换手（2026-09-22）
+
+> 本节是**实施记录**，对应提交见 `git log` 本条消息。改动只落在两个文件：
+> `tokenhive/cmd/tee/ratls_refresh.go`（节奏）与 `tokenhive/tee/service.go`（受理门与签名）。
+> 计费口径、Hub、Policy 一律未动。
+
+### 19.1 三条改动
+
+| # | 改动 | 位置 | 消掉 §11 的哪一格 |
+| --- | --- | --- | --- |
+| **B-1** | 轮换瞄准点从 `SNPSigningDeadline`（= NotAfter − 5m，记为 D）移到 `SNPAdmissionDeadline − snpRotationLead`（NotAfter − 9m） | `nextRefreshDelay` | ③ 洞期新请求 502、④ 会话被切 |
+| **B-2** | `perform` 末尾的复查从"越线即拒签"改成"越线则换手到 `activeSigner()`，两个都越线才拒" | `Service.perform` | ① 在途交换被切断、② 该交换结算不到 |
+| **B-3** | 删掉 `Execute` 里贯穿整个交换的 `context.WithTimeout(budget)`（受理处的 `budget <= 0` 拒绝保留） | `Service.Execute` | ① 的那把刀本身 |
+
+同时把 `snpReissueWindow = 9m48s` 抽成一个具名常量：它原来只在 `minRefreshFloor` 的注释里以散文形式出现，
+现在 `snpRotationLead`、`minRefreshFloor` 两条不变量与一条测试都以它为参照，写一次而不是抄三遍。
+
+### 19.2 为什么 B-1 让 ③④ **消失**，而不是只变窄
+
+关键在于这两个判定读的都是**当前活着的** signer，而不是启动时固化的常数：
+
+- `signingBudget` = `signingDeadline(activeSigner()) − now − signingHandoff`；
+- `activeSigner()` 读 `signerCell`，而 `serviceRuntime.adopt` 的顺序是**先写 cell、再换 service 指针、最后 `conns.rotate()`**。
+
+所以"一次轮换落地"等于这两个判定用的坐标系整体后移一个叶寿命。轮换若落在 D **之前**，D 到来时活着的 signer
+已经是新的，`budget ≈ 2h50m` ⇒ **③ 那个洞根本没有形成**。
+
+④ 更直接：`watchSigningDeadline` 每轮醒来都**重读 `activeSigner()` 并按新的 budget 重新睡**（它的注释自己写明了
+这个意图）。旧代码之所以会切会话，唯一原因是 `nextRefreshDelay` **故意把轮换排在 D 那一刻**——比 watcher 的
+唤醒（D−1s）晚一秒。B-1 取消的是这个错误排序，`watchSigningDeadline` 一行没动。
+
+**为什么旧方案必然给自己挖这个洞**：AWS 的 NitroTPM 叶由平台按自己的节拍重签。实测周期恒定 2h50m13s、叶寿命 3h
+⇒ 重签时刻落在 `NotAfter − ~9m47s`，我们只能在"平台已经换过"之后才拿得到新叶。旧方案偏偏在 `D = NotAfter − 5m`
+才去问——**它把自己唯一的轮换机会排在了平台重签点之后 4m47s**，而新的 epoch 落地必然还要一个 attestation 往返，
+于是每周期稳定出现一段"活着的 signer 已越线"的时间。瞄准 9m 之后，第一次尝试落在平台重签点之后约 47 秒（即
+`9m48s` 这个窗口的内侧 ~48s 处），**余量正是留给测量本身的秒级粒度**；2m 的 floor 让重试落在 N−7m、N−5m，
+其中前两次在 D 之前，后一次刚好压在 D 上。
+
+### 19.3 为什么 ①② 必须靠换手（提前解决不了）
+
+在窗口左端之前受理的请求，它的 pinned signer 的余量天生就短（受理于 `N−12m` ⇒ 只有约 6m59s），这一点**不随瞄准
+点改变**。所以即使 B-1 落地，"跨过 D 的在途交换"依然存在——只是从"每个周期都有"变成"轮换失败时才有"。
+于是两条改动缺一不可：只删 timeout ⇒ 末端的复查仍然拒签；只换手 ⇒ 那把刀仍然会在 D−1s 把交换切成半截。
+
+换手不能解决的那条硬约束是：**收据必须能被 Hub 接受**，而 Hub 的叶链校验按**验证者自己的时钟**判
+（`verifyNitroChain` 的 `leaf.Verify` 不传 `CurrentTime`，Go 用 `time.Now()`）。换手挑的是"尚未越线"的 signer，
+即其叶至少还有 `SNPSigningMargin` 有效期，所以这条约束自动满足。
+
+"两个都越线才拒"保留下来，正是**轮换失败**的情形：pinned 与 live 是同一把 key，fail-closed 与旧行为一致。
+
+### 19.4 代价：跨轮换那一批收据的配对失效（唯一一条）
+
+跨过轮换的交换，其 **`AttestationRef.KeyID` 与承载它的那条 TLS 连接证书不再是同一把 key**。
+
+**为什么今天没有任何验证方会因此拒收**（这三条都是对码复核过的）：
+
+1. `hub.Hub.verify` 的类型是 `func(proof.SignedReceipt) error`（`hub/hub.go:232` 的字段、`:91` 的 `Config.Verify`）
+   ——**结构上拿不到连接**，所以"配对"不是没人想查，是没人能查。
+2. Hub 对**握手**与**收据**用的是同一个 `-expected-app` pin（`cmd/hub/main.go` 的 `buildTEEClientTLS` 与
+   `buildVerifier`）：比的是"这是不是那个被度量的镜像"，不是"这与连接是不是同一个 epoch"。
+3. `tokenhive/hub/` 与 `tokenhive/cmd/hub/` 全目录里**没有一处**出现 `KeyID`、`PeerCertificates`、
+   `ConnectionState` 或 `SPKI`（`grep -rniE` 复核，唯一命中的 `epoch` 是 `ErrEpochRetired` 与 `-tee-verify` 的
+   帮助文本，都与配对无关）。
+
+⇒ **"Hub 不要求一次对话开始与结束使用同一张 TEE 证书"是已经成立的现状，Plan B 不需要改 Hub。**
+本轮把这句话钉进测试：`TestExchangeOutlivingItsEpochIsSignedByTheLiveOne` 断言 TEE 会产出署**新**叶的收据，
+并且该收据的结构（completion / status / 字节数）完整。
+（**本仓库侧已核**；生产 Hub 是另一个仓库 `tokhive-mvp`，不在本机，需在那边做同一次 grep——见 19.6。）
+
+留下的两笔账：
+
+- **时间倒置**：换手之后 `StartedAt` 可以早于所引证据那张叶的 `NotBefore`（交换在旧叶下开工、在新叶下签名）。
+  今天没有任何东西检查它：`proof.Receipt.Validate` 只要求 `StartedAt > 0 && FinishedAt >= StartedAt`；
+  `attest.Verifier.Check` 走 `proof.Verify` 时既不传 `Now` 也不传 `MaxAge`；平台侧只按自己的时钟判叶。
+  后果是"同一份收据在不同验证方手里可能判决不同"，形式上与伪造不可区分——这正是 RA-TLS 配对存在的理由，
+  现在只在"跨过轮换的那一小批交换"上放弃了。
+- **不再守配对这件事写进了代码**：`epochConnections` 的注释已改。它现在守的是"没有请求被服务在一条已经停止
+  为它签名的连接上"，不再是配对。`guard` / `rotate` / Hub 重试三者保留——它们的作用降级为"让新请求落到新连接"，
+  成本很低，而 Hub 的 `EpochRetiredHeader` 重试路径依赖它们。
+
+### 19.5 审计：Plan B 没有打开新的白嫖面，但把一条旧边界换成了另一条
+
+1. **在途交换现在会被计费，而不是免费**——这是收益。旧代码在 D−1s 切断 ⇒ 半截字节 + 签不出收据 ⇒
+   `serve.go` 那条注释说的 "nothing settles"；新代码跑完并拿到可定价收据。
+2. **轮换失败时的免费面缩小了**：旧的是"每个周期 D 之后的全部在途交换"，新的是"轮换失败期间跨过 D 的在途交换"。
+3. **新的边界：交换长度的上界从"signer 的剩余 margin"变成 `RequestTimeout`。** 旧代码隐含的上界是当前叶的
+   剩余寿命（≤ ~2h50m）；B-3 之后只剩 `RequestTimeout`（默认 2m，`TEE_REQUEST_TIMEOUT`）与调用方的 ctx。
+   **`RequestTimeout=0` 会让一个交换无界**，而 B-2 意味着只要平台还在轮换它就总能被签出收据 ⇒
+   无界但不免费。**⇒ 运维约束：`TEE_REQUEST_TIMEOUT` 必须非 0（默认已是 2m）；这条要进部署清单。**
+4. **boot 落在窗口内的残余**：`nextRefreshDelay` 的 floor 是 2m，所以一台在 `[N−9m48s, D)` 之间启动、
+   且距 D 不足 2m 的 TEE，第一次轮换可能落在 D 之后 ⇒ 一个 ≤2m 的洞。旧代码在**每个周期**都有更长的一个，
+   所以这是残余、不是回归。要消掉它需要让 floor 也服从 `until(D)`，本轮没做。
+5. **signer 新鲜度不变差**：换手挑的 signer 满足 `now < D`，即叶至少还有 5m 有效期；不换手时 pinned signer
+   满足同一条件。所以每份收据的证据剩余寿命 ≥ `SNPSigningMargin`，与旧代码相同。
+6. **"新旧两把 key 属于同一个 enclave"是 B-2 成立的前提。** `activeSigner()` 只能来自 `serviceRuntime.adopt`，
+   其 epoch 只来自本进程的 platform adapter（`refresher.Snapshot()`）⇒ 两把 key 属于同一个被度量的镜像，
+   Hub 的 `-expected-app` 对两者都会通过。**若哪天 Hub 前挂多台 TEE、或轮换来源不再是本机平台，这条不再成立，
+   B-2 会升级成跨机器收据替换**——这是它成立的条件，不是可以忘掉的细节。
+7. **与 §17/§18 的关系**：本轮只做 B，不动计费口径、不动 Hub、不动受理门本身。所以 §18 的结论
+   （保价目 ⇒ 必须有收据 ⇒ 受理门必须留）依然成立，而且**本轮是它更强的版本**：受理门现在同时是
+   "轮换失败"的唯一止损点——而按 §19.2，健康轮换下它永远不会开火。
+
+**一条 Plan B 之外的独立缺陷（读码确认、未端到端实测）**：`hive -audit` 复用同一个 `attest.Verifier`，
+而 `verifyNitroChain` 的 `leaf.Verify` 不传 `CurrentTime`（`shared/snp_combined_aws.go:380`），Go 用 `time.Now()`。
+⇒ **NitroTPM 叶过期（3h）之后，历史收据在 `store.Audit` 里会被判 `Invalid`，`runAudit` 退非 0。**
+结算路径（即时验证）不受影响；受影响的是"provider 事后拉收据对账"这条路径。与 Plan B 无关，今天就在。
+
+### 19.6 测试与未验证项
+
+**单测**：`go test ./tokenhive/... ./shared/...` 全绿（`-count=1`）。
+
+- 新增 `TestRotationIsAimedInsideTheReissueWindow`：把三个常数之间的**关系**钉住——lead 在 `snpReissueWindow`
+  之内（否则第一次尝试会被交回正在服务的那张叶）、floor 短于窗口（否则重试网格会整窗跨过）、
+  `aim < signingDeadline`（否则 D 必然先到）、`aim` 与 D 之间放得下一次 floor 重试——再用真实 snapshot 的叶
+  算出 cadence 确实指向那个 aim。
+- `exchange_bound_test.go` 三分：`TestExchangeIsGivenNoDeadlineOfItsOwn`（服务不再给交换装 deadline）、
+  `TestExchangeOutlivingItsEpochIsSignedByTheLiveOne`（换手，收据署新叶且内容完整）、
+  `TestExchangeIsRefusedWhenNoFresherEpochExists`（两个都越线才拒）。
+- **删掉了** `TestExchangeCutAtTheBoundStillSettles` —— 它测的正是被取消的行为（在 D 处切断仍可结算）。
+  该文件里的 `waitForDeadline` 模式也一并删掉：没有服务端的 bound，等它的传输会永远阻塞。
+
+**harness**：scenarios 1–18，`45 OK / 0 FAIL`，与 HEAD 基线一致（A/B 都在 `/tmp` 的干净 worktree 里跑）。
+但要说清楚它**测不到**什么：harness 用的是仿真证据，没有 NitroTPM 叶 ⇒ `snpLeafDeadline` 读不到 ⇒
+`tracked=false` ⇒ **B-1/B-2/B-3 三条路径在 harness 里都不会被触发**。它证明的是"其余一切没被带坏"，
+三条的目标行为由上面的单测覆盖。
+
+**未验证**：
+
+1. **真实 AWS 上"轮换落在重签窗口内"**。需要一台真 TEE 看一个完整周期（约 2h51m）：`next RA-TLS attestation
+   refresh scheduled` 里的 `at` 与当前叶的 `NotAfter` 之差应当 ≈ 9m，而不是 ≈ 5m。
+2. **生产 Hub（`tokhive-mvp`）是否也"不要求首尾证书一致"**。本仓库侧已由 19.4 的三条 grep 复核；那边需要跑一次
+   同样的 `grep -rniE "peercertificate|connectionstate|spki|keyid"`，并确认它的 `Verify` 仍是
+   `func(proof.SignedReceipt) error` 形状。
+3. **`hive -audit` 叶过期**那条（19.5 末）——机制读码确认，端到端没跑。
