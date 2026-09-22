@@ -631,3 +631,75 @@ TEE 实例没有 sshd，现场通道只有两条，这次两条都用上了：
   且**逐个提交**单独验证过（每个提交自身可编译、测试通过）。
 - `bash tokenhive/harness/harness.sh` 在 `/tmp` 的干净 worktree 里 A/B（基线 `tokhive` vs 本分支尖）：
   **18 场景 / 45 OK / 0 FAIL，断言逐行相同**。
+
+## 11. 实施记录（六）：证书轮换的影响面 —— 买家与卖家分别会看到什么（2026-09-22）
+
+> 本节只做**核对与记录**，不改代码。判据全部来自本分支尖的源码（位置随行标注）。生产 Hub 跑在独立仓库
+> `tokhive-mvp`，其 `Verify` 实现不在本仓库，凡依赖它的结论都已单独标注。
+
+### 11.1 轮换换什么、不换什么
+
+轮换要解决的是"证据会过期"，所以它只动**与证据绑死的那两样**：
+
+| 身份 | 轮换时 | 代码位置 |
+|---|---|---|
+| TEE 服务端 RA-TLS 叶（Hub→TEE 握手用） | **换** | `tokenhive/platform/sevsnp/adapter.go`（`Refresh` 换 epoch） |
+| receipt 签名 key（`KeyID`） | **换** | `tokenhive/cmd/tee/ratls_refresh.go`（`adopt`） |
+| credential inbox key | **不换**：进程启动生成一次，注释写明 deliberately untouched | `ratls_refresh.go:189-192`、`tokenhive/cmd/tee/main.go`（`GenerateInboxKey`） |
+| relay 通道（TEE 拨 Hub 去接 provider） | **不换**：WebSocket + `RelayKeyHeader` 共享密钥，不用客户端证书 | `tokenhive/cmd/tee/main.go:87-92`、`relayHeaders()` |
+| Hub 侧信任根 | **不换**：AWS NitroTPM root 在 measured bundle 里 | `tokenhive/internal/mtls`（`LoadCAPath`） |
+
+结论：**凭据平面（卖家的一切）与证书轮换完全解耦**；唯一会让 provider 重新注册 token 的是 **TEE 进程重启**
+（inbox key 换），不是轮换。
+
+### 11.2 AWS 正常时
+
+**卖家：无影响。** 卖家的在线通道是 agent ↔ Hub（Hub 自己的 WS），不经 TEE TLS；与 TEE 的唯一接触是
+注册/续期时经 Hub 取 inbox key（`CredentialKey` → `/v1/credential-key`，Hub→TEE mTLS）。inbox key 不变，
+已经封给它的 envelope 继续可用（`tokenhive/hub/tee.go` 的 `CredentialKey` 每次现取、不缓存，正是为了不吃旧 key）。
+
+**买家：三条窗口，前两条无感，第三条才是"毫秒级"的那一个。**
+
+1. **空闲连接被退役**：`rotate()` 只 close `idle` 连接（`rotated_connections.go:140-157`），在途连接留给
+   `track`（`:102-130`）在它落回 idle 时关。Hub 侧连接池是 `&http.Transport{}`（`cmd/hub/main.go:139`），
+   下次请求重新握手拿新叶即可 —— Hub 对叶的判据是标准 `leaf.Verify`，对轮换后的新叶没有额外 margin，
+   所以这一步无感。
+2. **在途请求 / 流式会话不被打断**：`Service.perform` 把本次交换的 signer **pin 住**（`tee/service.go:464-473`），
+   收据与它所在连接的叶同属一个 epoch；WebSocket session 的连接是 `hijacked`，`track` 明确不 close 它，
+   会话跨轮换继续跑。注意一个语义点：**session 的 terminal receipt 故意用轮换后的新 key 签**
+   （`tee/service.go:876-884`），所以"收据 KeyID 与其所在连接的叶"在长会话里可以不一致。本仓库 Hub 不把
+   两者交叉校验（`Verify` 是注入的 verifier，只验链 + app + policy；`hub/hub.go:513`），但若将来有验证者
+   做这种绑定，需要知道这是有意的。
+3. **复用竞态（唯一可能被买家看见的失败）**：Hub 恰好在 TEE close 的空隙里复用了那条连接 → `guard`
+   回 `503 connection belongs to a retired attestation epoch; reconnect`（`rotated_connections.go:76-89`）。
+   Hub 侧没有针对 503 的重试，只有 `executeForProviders` 的候选循环（`hub/schedule.go:362-390`），
+   而**所有候选共用同一个 TEE** —— 它靠重连建立新连接来成功；若此时已 relay 过字节或 start 帧，则不 fallback，
+   买家直接看到一次失败。窗口是毫秒级、每个真轮换一次。
+
+另外，只有**真轮换**才有连接 churn：每 2h 的空转 tick（同叶）被 `publishEpoch` 的 `serving()` 早返回
+（`ratls_refresh.go:236-243`）与 adapter 的 `supersedes`（`adapter.go:247-249`）双重挡掉，不建文件、不 retire 连接。
+
+### 11.3 AWS 不正常时（三档）
+
+| 档 | 触发 | 买家 | 卖家 |
+|---|---|---|---|
+| A | `Refresh` 失败，但叶未到期 | **无感**：准入跑到叶自己的 `NotAfter`（`adapter.go:240`），只是节奏延后 | 无感 |
+| B | 进入 `[NotAfter−5m, NotAfter]` 仍拿不到新叶 | 所有 `Execute`/`OpenSession` 被 `ErrAttestationStale` 拒（`service.go:317`、`:679`），**先于**分配 `ProviderSeq` ⇒ 不缺号、不花费额度；上限 5 分钟 | 无感（inbox key 没变） |
+| C | 叶到期后 AWS 仍不恢复 | **握手全拒**：`GetCertificate` 返 `ErrNotReady`（`adapter.go:147-151`）→ alert 80 → Hub 侧读到 `tls: internal error`；已建立的长连接也救不了（`guard` 放行，但 service 仍拒） | 新 agent 注册失败；在线 agent 的隧道还在但没有任务可跑 = **零收入**，不是坏账 |
+
+C 档只能等 AWS 恢复或重启 TEE。刷新循环的 health tracker 传的是 `nil`（`ratls_refresh.go` 注释：
+本进程没有可驱动的恢复路径），**不会自重置**。而**重启 TEE 会换 inbox key ⇒ 所有 provider 必须重新注册凭据** ——
+这是唯一需要卖家动手的场景，且由重启引起，与轮换无关。
+
+### 11.4 账务面
+
+拒发发生在分配序号之前 ⇒ 不会在 provider 的序列里打洞、不对买家计费；已 relay 字节而收据拿不到时
+Hub 无法结算（收据是计费前提，`hub/hub.go` 的 `Execute` 注释）。异常期只会"少收"，不会"错账"。
+
+### 11.5 运维约束
+
+- Hub 侧 `-tee-verify` 必须是 `attestation`。`pin` 模式信任的是部署时分发的那张叶，而轮换会换叶，
+  第一次重拨就失败（`internal/mtls/mtls.go:133-139` 有专门文案提示这两种原因需要相反的处置）。
+  线上证据支持生产用的是 attestation：§10 的黑窗在没有任何重新分发的情况下自愈。
+- 换 TEE（新 AMI / 新 digest）与**轮换**是两回事：前者要同步 `HIVE_TEE_EXPECTED_APP` 并让 provider 重新注册；
+  后者什么都不用做。
