@@ -753,13 +753,13 @@ Hub 无法结算。按 170 分钟的轮换周期、`RequestTimeout` 非零时有
 | `POST /v1/execute` | Hub 派发任务 | 买家可见的失败 | 已修（上一节，`f774d23`）：带标记的 503 重试一次 |
 | `GET /v1/credential-key` | **每个** provider agent 每次重连都拉一次（经 Hub 转发） | 卖家侧：agent 注册失败，且失败原因对它完全不可见 | 已修（`865cd2c`）：把拒绝收敛成协议包里唯一的 `tee.ErrEpochRetired`，由两边共用的客户端 helper 重试一次 |
 | `GET /v1/evidence/<hash>` | Hub 验收据时解析 `EvidenceHash`（**生产是 hash-only 收据**，且 `attest.Verifier` 不缓存，**每张收据都取一次**） | 三者中最重：任务跑完了、provider 付过上游了、TEE 也签了收据，Hub 却因为读不到收据自己点的证词而**把整单丢掉** | 已修（`0be5771`）：重试一次。这条不需要标记就安全——取回的是按自身哈希寻址的只读字节，且下面还会比对哈希，重试能重复的东西为零；对端真不可用则两次都失败，如实报错 |
-| `GET /v1/session`（WebSocket 升级） | Hub 开流式会话 | 见 12.4 | 不加代码，理由写在 12.4 |
+| `GET /v1/session`（WebSocket 升级） | Hub 开流式会话 | 升级本身见 12.4（不走池，微秒级竞态）；会话自身的终端收据见 §13 | 升级不加代码；终端收据由 `relaySession` 观察到 deadline 时主动切断（§13） |
 
 三条修复的**安全论证是同一个**：`guard` 在 handler 之前返回，所以那次拒绝没有分配序号、没有花凭据、没有碰
 provider。差别只在"能不能证明这一点"：`/v1/execute` 上必须靠标记（无标记的 503 可能是在任务已执行之后才
 回的，重试会重复执行并重复计费），`/v1/evidence` 上请求本身就是只读，规则自然满足。
 
-### 12.4 仍未修：会话的终端收据（需要你拍板）
+### 12.4 会话的终端收据（当时未修，已在 §13 修掉）
 
 会话是**故意无界**的（`rotated_connections.go` 里 `track` 对 `StateHijacked` 的解释），终端收据用**结束那一刻
 的 live signer** 签（`tee/service.go:989`）。如果那时 live signer 已经进了签名 margin，`Receipt()` 直接返回
@@ -814,3 +814,71 @@ provider。差别只在"能不能证明这一点"：`/v1/execute` 上必须靠�
   truncated 收据；余量不足时在 transport 与序号之前就拒；逃出 bound 的交易所不签名；无可读叶时不设 bound）；
   `hub/tee_test.go` 2 个（credential-key 的标记重试一次 + 不循环）；`evidence/store_test.go` 2 个
   （evidence 抓取重试一次 + 持续拒绝则报错）。
+
+## 13. 实施记录（八）：会话的终端收据（2026-09-22）
+
+§12.4 把会话末尾的收据列为「未修」，并给了三个选项。这一节按选项 (i) 修掉它：**在 live signer 距 deadline
+还有 `signingHandoff` 时就主动切断隧道**，让收据在 margin 内签出。
+
+### 13.1 问题
+
+会话是**故意无界**的（`SessionIdleTimeout` 是防「对端消失」的看门狗，不是时长上限），所以它可能跨过自己
+开启时那个 epoch 的签名 deadline。交易所没有这个问题：`Execute` 用 §12.2 的 bound 把它的**结束**压进
+deadline 之内。但会话的结束**不由服务决定**——上游流多久它就多久——所以同一个 deadline 没法用「给会话套一个
+context」实现，只能**从外面把它切断**。
+
+旧行为因此是：epoch 在会话还转发时进了 margin ⇒ `Session.Receipt`（`tee/service.go:1003`）返回
+`ErrAttestationStale` ⇒ `relaySession` 回一条 `{"error":...}` ⇒ Hub 侧 `ErrNoReceiptForSession`
+⇒ **整场会话的字节全部无证、不可结算**，而 provider 已经把它们转发完、上游也已经计过费。触发条件是
+「轮换失败到过了 deadline」（健康轮换在 deadline 前约 4m48s 就换上了新 epoch），但每次命中的损失是
+**一整场会话**，不像 §11 B 档那样有 5 分钟上界。
+
+### 13.2 修复（提交 `1a9ee05`）
+
+| 机制 | 位置 | 作用 |
+|---|---|---|
+| `watchSigningDeadline(stop)` | `tee/service.go:351` | 每会话一个观察者：反复算 live signer 的 `signingBudget`，为它设一个定时器；budget 耗尽时 close 一个 channel。**每次醒来都重读 `activeSigner()`**（见下第 2 点）|
+| 切断 | `tee/session.go:185`（`relaySession`）| channel 关闭 ⇒ `ss.markTruncated()`（`:194`）然后 `ss.Close()`：结束 provider 侧隧道。pump 本就阻塞在那个 Read 上，于是照常签名，并把收据作为终止 Text 帧送出 |
+| **标记先于关闭** | 同上 | 不是顺手：`ss.Close()` 才是解除 pump 阻塞的动作，而 provider 若以「干净读完」结束，`Session.Read` 不会把转录标成截断——收据就会声称一份少了这个瞬间之后全部字节的「完整」转录 |
+
+两个设计要点：
+
+1. **切的是 provider 侧，不是 Hub 侧。** 空闲看门狗可以直接 `conn.Close()`（对端已经走了，收据送给谁都没有
+   意义）；deadline 观察者不行——收据正是这场会话的价值所在，而它由 pump 在隧道关闭**之后**才签、才发。
+   所以先 `ss.Close()`，让 pump 完成收尾。收据仍然由「唯一写者」签出，仍然以终止帧的形式到达。
+2. **deadline 跟着轮换走。** 观察者不锁定会话开启时那一张 signer，而是每次醒来重读。轮换发布的是**更晚到期**
+   的叶，deadline 只会往后推，所以正确语义就是「按旧预算醒来 → 发现还有余量 → 重新武装」：**提前醒来是无害
+   的**，只是多一次唤醒，不需要任何锁。反过来说，若锁定开局那张 signer，一个本可以在新证据下自然结束的会话
+   会被无故切断——那才是真正的 bug。
+
+### 13.3 为什么不选 (ii)/(iii)
+
+- (ii)「只留记录」：它确实只在 AWS 已故障时出现，但代价是整场会话不可结算，而这正是「轮换期买家/卖家受影响」
+  这一类问题里损失最大的一种（§11 表里 B 档有 5 分钟上界，会话没有）。
+- (iii)「会话也加绝对时长上限」：与「unbounded work」的设计意图冲突，会杀掉合法的长会话。观察者切的是
+  **证据的期限**，不是会话的长度——这个区别正是选 (i) 的理由。
+
+### 13.4 影响
+
+- **正常轮换下完全不触发。** 健康轮换在 deadline 前约 4m48s 已发布新 epoch，观察者醒来时 budget 重新变成
+  小时级，重新武装，会话继续。它只在轮换落后时起作用，也就是 §11 B/C 档已经发生的那些时刻。
+- 触发时：会话提前结束，收据是 **truncated**，`Price` 只按已交付字节收 volume（`hub/pricing.go:69-72`）
+  ⇒ **provider 拿到它已经转发的那部分钱**，buyer 只为实际收到的字节付费。比「整场无证」严格更好。
+- **无叶证据（模拟、harness）没有任何 deadline 可切**：`signingBudget` 返回 `bounded=false`，观察者直接
+  等到会话结束。模拟与 harness 的行为一字不变。
+- `Session.Receipt` 里的 `ErrAttestationStale`（`tee/service.go:1048`）降级为纯 fail-safe：切断失效、或不
+  经 relay 直接驱动 `Session` 的调用者。注释已同步。
+
+### 13.5 验证
+
+- `go vet` 无输出；`go test ./shared/... ./tokenhive/...` 全绿；`go test -race ./tokenhive/tee/` 干净。
+- 新增 `tee/session_deadline_test.go` 3 个：
+  - provider **永不停流**时会话在 deadline 内被切断，并送出**可解码**的 truncated 收据，KeyID 指向被切的那个
+    epoch，`ResponseBytes` 等于已交付字节。「能解码」本身就是「签得及时」的证明——`Receipt` 在 margin 内会拒绝；
+  - 会话中途轮换到更晚到期的 epoch 后，跨过开局 epoch 原本的 deadline（睡 3s，长于其全部剩余余量）也**不被
+    切断**，最终在 provider 自己的 EOF 上以 **complete** 收据结束，KeyID = 新 epoch；
+  - 无可读叶的证据不产生任何切断（模拟/harness 的保证）。
+- harness A/B（`/tmp` 干净 worktree，基线 `f86e511`）：18 场景 / 31 OK / 0 FAIL，断言逐行相同。
+  **方法上的坑**：两次 harness 之间要留几秒间隔。背靠背连跑时上一轮的进程还没退净，场景 17/18 会出假 FAIL
+  （session 被记到另一个 provider 名下、随后 `receipt sequence already stored`），与本类改动无关——单跑与
+  留 8s 间隔重跑都是 31 OK / 0 FAIL 且断言逐行相同。
